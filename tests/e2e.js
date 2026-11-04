@@ -29,6 +29,7 @@ const FILES = new Map([
 ]);
 const log = [];
 const DOWNLOADS = [];
+const DOWNLOADS_REFERER = [];
 const PREVIEW_CALLS = { single: 0, batch: 0 };
 /* режим «превью заблокировано»: файлы — настоящие картинки, их будут уменьшать в браузере */
 if (process.env.BLOCK_PREVIEW) for (const k of [...FILES.keys()]) FILES.set(k, png(60, 40));
@@ -75,6 +76,8 @@ async function route(r) {
   if (u.host === 'downloader.disk.yandex.ru') {
     /* как настоящий Яндекс 360: запросы со страницы (fetch с Origin) — 403, обычная загрузка браузера — да */
     if (req.headers()['origin'] && req.resourceType() !== 'document') return r.fulfill({ status: 403, body: 'forbidden' });
+    /* и загрузки со страницы чужого сайта (Referer) — тоже 403: страница обязана не слать Referer */
+    if (req.headers()['referer']) { DOWNLOADS_REFERER.push(req.headers()['referer']); return r.fulfill({ status: 403, body: 'referer not allowed' }); }
     DOWNLOADS.push(q.p);
     return r.fulfill({ status: 200, headers: { 'content-type': 'application/zip', 'content-disposition': 'attachment; filename="x.zip"' }, body: 'ZIP' });
   }
@@ -299,6 +302,7 @@ async function route(r) {
 
   check('служебная папка не видна на витрине', await page.evaluate(() => CP.shoots.every(s => s.name.charAt(0) !== '_')));
 
+  check('загрузки архивов уходят без Referer', DOWNLOADS_REFERER.length === 0, DOWNLOADS_REFERER.join(' | '));
   check('без ошибок JS на странице', errors.length === 0, errors.join(' | '));
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-shoot.png') });
   await page.evaluate(() => cpShowShelf());

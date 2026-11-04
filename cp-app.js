@@ -94,6 +94,9 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
     + '.cp-dlcard-head{display:flex;gap:8px;align-items:flex-start}.cp-dlcard-head b{flex:1;font-size:13px;word-break:break-word}'
     + '.cp-dlcard-head button{background:none;border:none;color:#a3a09a;font-size:18px;line-height:1;padding:0 4px;cursor:pointer}'
     + '.cp-dlcard-note{color:#a3a09a;font-size:11px;line-height:1.5;margin:8px 0}'
+    + '.cp-dlcard-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}'
+    + '.cp-dlcard-alt{background:none;border:1px solid #3a3a37;color:#f2f2f1;padding:6px 12px;border-radius:3px;font-size:12px;cursor:pointer}'
+    + '.cp-dlcard-url{display:none;width:100%;margin-top:8px;background:#141413;border:1px solid #3a3a37;color:#a3a09a;font-size:10px;padding:4px 6px;box-sizing:border-box}'
     + '.cp-dlcard-btn{display:inline-block;margin-top:4px;background:#C9956B;color:#141413;text-decoration:none;padding:7px 14px;border-radius:3px;font-weight:600;font-size:12px}'
     + '.cp-menu{position:fixed;z-index:1000;background:#1d1d1b;border:1px solid #3a3a37;border-radius:4px;padding:4px;display:none;min-width:200px;box-shadow:0 6px 24px #0008}'
     + '.cp-menu.cp-open{display:block}'
@@ -1194,8 +1197,13 @@ function cpFinishDownload(res, action, extra) {
  */
 function cpNativeDownload(href, title, note) {
   window.__cpLastDownload = href;
+  if (window.console) console.info('[CP] ссылка на архив', title || '', href);
+  /* Без Referer: файловый сервер Яндекс 360 отклоняет запросы со страниц
+     чужого сайта (так же, как fetch с Origin). */
   var fr = document.createElement('iframe');
   fr.style.display = 'none';
+  fr.referrerPolicy = 'no-referrer';
+  fr.setAttribute('referrerpolicy', 'no-referrer');
   fr.src = href;
   document.body.appendChild(fr);
   setTimeout(function () { if (fr.parentNode) fr.parentNode.removeChild(fr); }, 120000);
@@ -1206,15 +1214,28 @@ function cpNativeDownload(href, title, note) {
     box.className = 'cp-dlcard';
     document.body.appendChild(box);
     box.addEventListener('click', function (e) {
-      if (e.target.closest('[data-cp-dlclose]')) box.style.display = 'none';
+      if (e.target.closest('[data-cp-dlclose]')) { box.style.display = 'none'; return; }
+      var cp = e.target.closest('[data-cp-dlcopy]');
+      if (!cp) return;
+      var inp = box.querySelector('.cp-dlcard-url');
+      var link = inp.value;
+      function shown() {
+        inp.style.display = 'block'; inp.focus(); inp.select();
+        cbToast('Ссылка скопирована. Вставьте её в адресную строку новой вкладки.');
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(shown, function () { shown(); try { document.execCommand('copy'); } catch (x) { } });
+      else { shown(); try { document.execCommand('copy'); } catch (x) { } }
     });
   }
   box.innerHTML = '<div class="cp-dlcard-head"><b>Архив готов: ' + cbEsc(title || 'выгрузка') + '</b>'
     + '<button data-cp-dlclose title="Закрыть">×</button></div>'
     + (note ? '<div class="cp-dlcard-note">' + cbEsc(note) + '</div>' : '')
     + '<div class="cp-dlcard-note">Яндекс собирает ZIP на лету: загрузка появляется в загрузках браузера '
-    + 'через несколько секунд, у больших съёмок — через минуту-две. Если загрузка не началась, нажмите кнопку.</div>'
-    + '<a class="cp-dlcard-btn" href="' + cbEsc(href) + '" target="_blank" rel="noopener">Скачать ZIP</a>';
+    + 'через несколько секунд, у больших съёмок — через минуту-две. Если не началась — «Скачать ZIP»; '
+    + 'если и так не скачивается — «Скопировать ссылку» и вставьте её в адресную строку.</div>'
+    + '<div class="cp-dlcard-row"><a class="cp-dlcard-btn" href="' + cbEsc(href) + '" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Скачать ZIP</a>'
+    + '<button class="cp-dlcard-alt" data-cp-dlcopy>Скопировать ссылку</button></div>'
+    + '<input class="cp-dlcard-url" readonly value="' + cbEsc(href) + '">';
   box.style.display = 'block';
 }
 
