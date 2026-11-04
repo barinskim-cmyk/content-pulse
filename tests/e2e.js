@@ -28,6 +28,7 @@ const FILES = new Map([
   ['disk:/Архив/LM-1043/part2/c.jpg', Buffer.from('C'.repeat(300))],
 ]);
 const log = [];
+const DOWNLOADS = [];
 /* режим «превью заблокировано»: файлы — настоящие картинки, их будут уменьшать в браузере */
 if (process.env.BLOCK_PREVIEW) for (const k of [...FILES.keys()]) FILES.set(k, png(60, 40));
 const md5 = (b) => require('crypto').createHash('md5').update(b).digest('hex');
@@ -71,10 +72,35 @@ async function route(r) {
     return json(400, { message: 'bad ' + u.pathname });
   }
   if (u.host === 'downloader.disk.yandex.ru') {
-    if (u.pathname.startsWith('/preview') && process.env.BLOCK_PREVIEW) return r.abort('failed');
-    if (u.pathname.startsWith('/preview')) return r.fulfill({ status: 200, headers: { ...CORS, 'content-type': 'image/png' }, body: png(30, 20) });
-    if (process.env.FAIL_STATE_DL && /_contentpulse\.json$/.test(q.p)) return r.abort('failed');
-    return r.fulfill({ status: 200, headers: { ...CORS, 'content-type': 'application/octet-stream' }, body: FILES.get(q.p) });
+    /* как настоящий Яндекс 360: запросы со страницы (fetch с Origin) — 403, обычная загрузка браузера — да */
+    if (req.headers()['origin'] && req.resourceType() !== 'document') return r.fulfill({ status: 403, body: 'forbidden' });
+    DOWNLOADS.push(q.p);
+    return r.fulfill({ status: 200, headers: { 'content-type': 'application/zip', 'content-disposition': 'attachment; filename="x.zip"' }, body: 'ZIP' });
+  }
+  if (u.host === 'functions.yandexcloud.net') {
+    if (m === 'OPTIONS') return r.fulfill({ status: 204, headers: { ...CORS, 'access-control-allow-headers': 'X-Disk-Token, Content-Type', 'access-control-allow-methods': 'GET, POST, OPTIONS' }, body: '' });
+    if (req.headers()['x-disk-token'] !== 'TESTTOKEN') return json(401, { error: 'no token' });
+    if (q.a === 'preview') {
+      if (process.env.BLOCK_PREVIEW) return json(502, { error: 'blocked' });
+      return r.fulfill({ status: 200, headers: { ...CORS, 'content-type': 'image/png' }, body: png(30, 20) });
+    }
+    if (q.a === 'file') {
+      if (process.env.FAIL_STATE_DL && /_contentpulse\.json$/.test(q.path)) return json(502, { error: 'fail' });
+      if (!FILES.has(q.path)) return json(404, { error: 'nf' });
+      return r.fulfill({ status: 200, headers: { ...CORS, 'content-type': 'application/octet-stream' }, body: FILES.get(q.path) });
+    }
+    if (q.a === 'copy' && m === 'POST') {
+      const b = JSON.parse(req.postData() || '{}');
+      (b.dirs || []).forEach(d => { const parts = d.split('/'); for (let i = 2; i <= parts.length; i++) DIRS.add(parts.slice(0, i).join('/')); });
+      const results = (b.items || []).map(it => {
+        const parent = it.path.slice(0, it.path.lastIndexOf('/'));
+        const parts = parent.split('/'); for (let i = 2; i <= parts.length; i++) DIRS.add(parts.slice(0, i).join('/'));
+        if (FILES.has(it.path)) return { from: it.from, status: 'exists' };
+        FILES.set(it.path, FILES.get(it.from)); return { from: it.from, status: 'done' };
+      });
+      return json(200, { results });
+    }
+    return json(400, { error: 'bad' });
   }
   if (u.host === 'uploader1.disk.yandex.net') { FILES.set(q.p, req.postDataBuffer()); return r.fulfill({ status: 201, headers: CORS, body: '' }); }
   return r.continue();
@@ -90,7 +116,7 @@ async function route(r) {
   const base = 'http://127.0.0.1:' + srv.address().port + '/content-pulse/';
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
-  await ctx.route(/yandex\.(ru|net)/, route);
+  await ctx.route(/yandex\.(ru|net)|yandexcloud\.net/, route);
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
@@ -169,28 +195,13 @@ async function route(r) {
   check('журнал показывает действие', (await page.textContent('#cpLogList')).includes('на ретушь'));
 
   /* скачивание отбора: подменяем выбор папки на OPFS (настоящая FS API в Chromium) */
-  const dl = await page.evaluate(async () => {
-    /* подставная папка в памяти: проверяем свою логику, а не файловую систему тестового браузера */
-    const files = {};
-    function dirH(path) {
-      return { kind: 'directory', name: path,
-        getDirectoryHandle: async (n) => dirH(path + n + '/'),
-        getFileHandle: async (n, o) => {
-          const key = path + n;
-          if (!(key in files) && !(o && o.create)) { const e = new Error('nf'); e.name = 'NotFoundError'; throw e; }
-          return { getFile: async () => ({ size: files[key] || 0 }),
-            createWritable: async () => ({ write: async (b) => { files[key] = b.size; }, close: async () => {} }) };
-        } };
-    }
-    window.showDirectoryPicker = async () => dirH('');
-    document.getElementById('cpMenuDlSel').click();
-    for (let i = 0; i < 80; i++) {
-      await new Promise(r => setTimeout(r, 100));
-      if (App.projectMeta.cp.events.some(e => e.action === 'download_selection')) break;
-    }
-    return Object.keys(files).map(k => k + ':' + files[k]).sort();
-  });
-  check('скачан отбор по карточкам: папка карточки, порядок, размеры', dl.some(x => /LM-1043 — отбор\/01 Лук 1.*\/01_a\.jpg:\d+$/.test(x)), dl.join(' | '));
+  await page.evaluate(() => document.getElementById('cpMenuDlSel').click());
+  await page.waitForFunction(() => App.projectMeta.cp.events.some(e => e.action === 'download_selection'), null, { timeout: 10000 });
+  await page.waitForTimeout(500);
+  const exp = [...FILES.keys()].filter(k => k.includes('/_выгрузка/'));
+  check('отбор разложен на Диске по папкам карточек (копии, порядок)', exp.some(k => /\/_выгрузка\/LM-1043 — отбор [^/]+\/01 Лук 1[^/]*\/01_a\.jpg$/.test(k)) && exp.some(k => /\/02_b\.jpg$/.test(k)), exp.join(' | '));
+  check('архив отбора скачивается обычной загрузкой браузера', DOWNLOADS.some(p => /_выгрузка\/LM-1043 — отбор/.test(p)), DOWNLOADS.join(' | '));
+  check('служебная папка выгрузки не попадает в галерею', await page.evaluate(() => App.photos.every(p => !/_выгрузка/.test(p.disk || ''))));
 
   /* повторное открытие той же съёмки: отбор читается с Диска */
   await page.evaluate(() => { cpShowShelf(); });

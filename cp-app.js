@@ -17,6 +17,8 @@
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
   clientId: '36df38c93cb944318c0084640c77d76a',
+  /* прослойка в Yandex Cloud (proxy/index.js): превью, файл отбора, копирование */
+  proxy: 'https://functions.yandexcloud.net/d4ehdtuc6j9c22657ru1',
   defaultArchive: 'disk:/Архив',
   previewSize: 'XL',
   previewParallel: 6,
@@ -494,6 +496,12 @@ function cpBlobToThumb(blob, shrink) {
 }
 
 function cpLoadThumb(p) {
+  if (CPDisk.hasProxy()) {
+    return CPDisk.proxyPreview(p.disk, CP_CONFIG.previewSize).then(function (blob) {
+      CP.previewMode = 'proxy';
+      return cpBlobToThumb(blob, false);
+    });
+  }
   if (CP.previewMode !== 'download' && p.preview) {
     return CPDisk.previewBlob(p.preview).then(function (blob) {
       CP.previewMode = 'preview';
@@ -689,33 +697,46 @@ function cpDoAction(status, pids, cardId) {
   /* ретушь: подстраховка — копии в <съёмка>/Ретушь/<дата>/ */
   var folder = CP.shoot.path + '/' + CPDisk.RETOUCH_DIR + '/' + new Date().toISOString().slice(0, 10);
   var files = pids.map(function (pid) { return cbPhotoById(pid); }).filter(function (p) { return p.disk; });
-  var copied = 0, existed = 0, failed = [];
-  cbBusyShow('Копирую на ретушь: 0 / ' + files.length, 0.05);
-  CPDisk.ensureDir(folder).then(function () {
-    return files.reduce(function (chain, p, i) {
-      return chain.then(function () {
-        return CPDisk.copy(p.disk, folder + '/' + p.name).then(function (r) {
-          if (r === 'exists') existed++; else copied++;
-        }, function (e) { failed.push(p.name + ': ' + e.message); })
-          .then(function () { cbBusyShow('Копирую на ретушь: ' + (i + 1) + ' / ' + files.length, (i + 1) / files.length); });
-      });
-    }, Promise.resolve());
-  }).then(function () {
+  var items = files.map(function (p) { return { from: p.disk, path: folder + '/' + p.name }; });
+  cbBusyShow('Копирую на ретушь: ' + files.length + ' кадр(ов)...', 0.2);
+  cpCopyOnDisk(items, [folder], 'Копирую на ретушь').then(function (r) {
     cbBusyHide();
     extra.folder = folder.replace(/^disk:/, '');
-    extra.copied = copied;
-    if (existed) extra.existed = existed;
-    if (failed.length) extra.failed = failed;
+    extra.copied = r.done;
+    if (r.exists) extra.existed = r.exists;
+    if (r.failed.length) extra.failed = r.failed;
     cpEvent('to_retouch', cpPhotoNames(pids), extra);
     cpAfterStatus();
-    cbToast('На ретушь: ' + copied + ' скопировано' + (existed ? ', уже было ' + existed : '')
-      + (failed.length ? ', ошибок ' + failed.length : '') + ' → ' + extra.folder);
-    if (failed.length && window.console) console.error('[CP] retouch copy failed', failed);
+    cbToast('На ретушь: ' + r.done + ' скопировано' + (r.exists ? ', уже было ' + r.exists : '')
+      + (r.failed.length ? ', ошибок ' + r.failed.length : '') + ' → ' + extra.folder);
+    if (r.failed.length && window.console) console.error('[CP] retouch copy failed', r.failed);
   }).catch(function (e) {
     cpEvent('to_retouch', cpPhotoNames(pids), { note: 'статус поставлен, копирование не удалось: ' + e.message });
     cpAfterStatus();
     cpHandleError(e, 'Копирование на ретушь не удалось (статус поставлен)');
   });
+}
+
+/**
+ * Скопировать файлы на Диске (через прослойку, пачками по 100 — у функции
+ * ограничено время). Возвращает {done, exists, failed:[...]}.
+ */
+function cpCopyOnDisk(items, dirs, label) {
+  var res = { done: 0, exists: 0, failed: [] };
+  var chunks = [];
+  for (var i = 0; i < items.length; i += 100) chunks.push(items.slice(i, i + 100));
+  return chunks.reduce(function (chain, chunk, ci) {
+    return chain.then(function () {
+      return CPDisk.proxyCopy(chunk, ci === 0 ? dirs : []).then(function (out) {
+        (out.results || []).forEach(function (x) {
+          if (x.status === 'done') res.done++;
+          else if (x.status === 'exists') res.exists++;
+          else res.failed.push(x.from.split('/').pop() + ': ' + (x.error || 'ошибка'));
+        });
+        cbBusyShow(label + ': ' + Math.min(items.length, (ci + 1) * 100) + ' / ' + items.length, (ci + 1) / chunks.length);
+      });
+    });
+  }, Promise.resolve()).then(function () { return res; });
 }
 
 function cpAfterStatus() {
@@ -1027,58 +1048,87 @@ function cpFinishDownload(res, action, extra) {
   if (res.failed.length && window.console) console.error('[CP] download failed', res.failed);
 }
 
+/* Скачивание: браузеру нельзя забирать файлы у сервера Яндекса напрямую,
+   поэтому скачиваем обычной загрузкой браузера архив, который Яндекс
+   собирает сам из папки. Работает в Safari, Chrome и Edge. */
+function cpNativeDownload(href) {
+  window.__cpLastDownload = href;
+  var fr = document.createElement('iframe');
+  fr.style.display = 'none';
+  fr.src = href;
+  document.body.appendChild(fr);
+  setTimeout(function () { if (fr.parentNode) fr.parentNode.removeChild(fr); }, 120000);
+}
+
+function cpStamp() {
+  var d = new Date();
+  return d.getFullYear() + '-' + cpPad(d.getMonth() + 1) + '-' + cpPad(d.getDate()) + ' ' + cpPad(d.getHours()) + '-' + cpPad(d.getMinutes());
+}
+
 function cpDownloadAll() {
   cbCloseAllPops();
   if (!CP.shoot) { cbToast('Сначала откройте съёмку'); return; }
-  var root = CP.shoot.path.replace(/\/+$/, '') + '/';
-  var jobs = App.photos.filter(function (p) { return p.disk && !p.missing; }).map(function (p) {
-    var rel = p.disk.indexOf(root) === 0 ? p.disk.slice(root.length) : p.name;
-    var parts = rel.split('/');
-    var file = parts.pop();
-    return { disk: p.disk, size: p.size, dir: [CP.shoot.name].concat(parts), file: file };
-  });
-  if (!jobs.length) { cbToast('В съёмке нет файлов'); return; }
-  cpPickRoot().then(function (dir) {
-    return cpRunDownloads(dir, jobs, 'Скачиваю съёмку');
-  }).then(function (res) { cpFinishDownload(res, 'download_shoot'); }, function (e) {
-    if (e && e.name !== 'AbortError') cpHandleError(e, 'Скачивание');
-  });
+  cbBusyShow('Яндекс собирает архив съёмки...', 0.5);
+  CPDisk.downloadHref(CP.shoot.path).then(function (href) {
+    cbBusyHide();
+    cpNativeDownload(href);
+    cpEvent('download_shoot', [], { count: cpPhotoCount() });
+    cbToast('Скачивание архива началось. Большие съёмки Яндекс собирает дольше — смотрите загрузки браузера.');
+  }).catch(function (e) { cpHandleError(e, 'Скачивание съёмки'); });
 }
 
 function cpPad(n) { return (n < 10 ? '0' : '') + n; }
 
-function cpDownloadSelection() {
-  cbCloseAllPops();
-  if (!CP.shoot) { cbToast('Сначала откройте съёмку'); return; }
-  var base = CP.shoot.name + ' — отбор';
+/** Раскладка отбора: [{disk, dir:[папки], file}] по карточкам и доп. контенту. */
+function cpSelectionJobs() {
   var jobs = [];
   App.cards.forEach(function (card, ci) {
     var folder = cpPad(ci + 1) + ' ' + (card.title || card.category || 'Карточка');
     var order = 0;
-    function add(pid, slotName) {
+    function add(pid) {
       var p = pid ? cbPhotoById(pid) : null;
       if (!p || !p.disk || p.missing) return;
       order++;
-      jobs.push({ disk: p.disk, size: p.size, dir: [base, folder],
-        file: cpPad(order) + '_' + p.name });   /* порядок слотов = номер; имя файла исходное */
+      jobs.push({ disk: p.disk, dir: [folder], file: cpPad(order) + '_' + p.name });   /* порядок слотов = номер */
     }
-    if (card.mode === 'auto') (card.pids || []).forEach(function (pid) { add(pid, ''); });
-    else (card.slots || []).forEach(function (s) { add(s.pid, s.name || ''); });
+    if (card.mode === 'auto') (card.pids || []).forEach(add);
+    else (card.slots || []).forEach(function (s) { add(s.pid); });
   });
   App.containers.forEach(function (cont, ki) {
     var folder = cpPad(ki + 1) + ' ' + (cont.title || 'Блок');
     cont.photoIds.forEach(function (pid, i) {
       var p = cbPhotoById(pid);
       if (!p || !p.disk || p.missing) return;
-      jobs.push({ disk: p.disk, size: p.size, dir: [base, 'Доп контент', folder], file: cpPad(i + 1) + '_' + p.name });
+      jobs.push({ disk: p.disk, dir: ['Доп контент', folder], file: cpPad(i + 1) + '_' + p.name });
     });
   });
+  return jobs;
+}
+
+function cpDownloadSelection() {
+  cbCloseAllPops();
+  if (!CP.shoot) { cbToast('Сначала откройте съёмку'); return; }
+  var jobs = cpSelectionJobs();
   if (!jobs.length) { cbToast('В карточках и доп. контенте пока нет кадров с Диска'); return; }
-  cpPickRoot().then(function (dir) {
-    return cpRunDownloads(dir, jobs, 'Скачиваю отбор');
-  }).then(function (res) { cpFinishDownload(res, 'download_selection', { note: 'карточек: ' + App.cards.length }); }, function (e) {
-    if (e && e.name !== 'AbortError') cpHandleError(e, 'Скачивание');
+  /* копии раскладываются на Диске в служебную папку, Яндекс отдаёт её архивом */
+  var root = CP.shoot.path + '/_выгрузка/' + CPDisk.safeName(CP.shoot.name + ' — отбор ' + cpStamp());
+  var dirs = {}, items = jobs.map(function (j) {
+    var dir = root + (j.dir.length ? '/' + j.dir.map(CPDisk.safeName).join('/') : '');
+    dirs[dir] = true;
+    return { from: j.disk, path: dir + '/' + CPDisk.safeName(j.file) };
   });
+  cbBusyShow('Раскладываю отбор по карточкам: 0 / ' + items.length, 0.05);
+  cpCopyOnDisk(items, Object.keys(dirs), 'Раскладываю отбор по карточкам').then(function (r) {
+    cbBusyShow('Яндекс собирает архив...', 1);
+    return CPDisk.downloadHref(root).then(function (href) {
+      cbBusyHide();
+      cpNativeDownload(href);
+      cpEvent('download_selection', [], { count: r.done + r.exists, note: 'карточек: ' + App.cards.length,
+        folder: root.replace(/^disk:/, ''), failed: r.failed.length ? r.failed : undefined });
+      cbToast('Скачивание отбора началось: ' + (r.done + r.exists) + ' кадр(ов) по папкам карточек'
+        + (r.failed.length ? ' · не скопировано: ' + r.failed.length : ''));
+    });
+  }).catch(function (e) { cpHandleError(e, 'Скачивание отбора'); });
 }
 
 document.getElementById('cpMenuDlAll').onclick = cpDownloadAll;
@@ -1106,5 +1156,6 @@ cbSetProjectName = (function (orig) {
   return function (name) { orig(name); cpSetTitle(); };
 })(cbSetProjectName);
 
+CPDisk.setProxy(CP_CONFIG.proxy);
 cpReadToken();
 cpSetTitle();

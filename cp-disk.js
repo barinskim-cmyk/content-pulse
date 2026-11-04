@@ -23,6 +23,7 @@ var CPDisk = (function () {
   var MAX_RETRIES = 5;
 
   var token = '';
+  var proxy = '';   /* адрес прослойки (Yandex Cloud Function) */
 
   /** Ошибка API: статус + полное тело ответа (для диагностики). */
   function DiskError(status, body, url) {
@@ -243,11 +244,46 @@ var CPDisk = (function () {
       function (e) { if (e.status === 404) return ''; throw e; });
   }
 
+  /* ---------- прослойка ----------
+     Сервер файлов Яндекса не отдаёт содержимое страницам с чужих сайтов,
+     а копирование (POST) не проходит из браузера. Это делает прослойка. */
+
+  function proxyReq(params, opts) {
+    opts = opts || {};
+    var attempt = 0;
+    var url = proxy + qs(params);
+    function run() {
+      var init = { method: opts.method || 'GET', headers: { 'X-Disk-Token': token } };
+      if (opts.body !== undefined) {
+        init.body = JSON.stringify(opts.body);
+        init.headers['Content-Type'] = 'application/json';
+      }
+      return fetch(url, init).then(function (resp) {
+        if (resp.ok) return opts.as === 'json' ? resp.json() : resp.blob();
+        return resp.text().then(function (body) {
+          if (RETRY[resp.status] && attempt < 3) return sleep(backoff(attempt++)).then(run);
+          throw new DiskError(resp.status, body, url);
+        });
+      }, function (netErr) {
+        if (attempt < 2) return sleep(backoff(attempt++)).then(run);
+        throw new DiskError(0, String(netErr && netErr.message || netErr), url);
+      });
+    }
+    return run();
+  }
+
+  function proxyPreview(path, size) { return proxyReq({ a: 'preview', path: path, size: size || 'XL' }); }
+  function proxyFile(path) { return proxyReq({ a: 'file', path: path }); }
+  /** items: [{from, path}], dirs: [папки создать заранее] -> {results:[{from, status}]} */
+  function proxyCopy(items, dirs) {
+    return proxyReq({ a: 'copy' }, { method: 'POST', body: { items: items, dirs: dirs || [] }, as: 'json' });
+  }
+
   /** {data, rev}; data = null если отбора ещё нет. */
   function readState(shoot) {
     return stateRev(shoot).then(function (rev) {
       if (!rev) return { data: null, rev: '' };
-      return downloadBlob(statePath(shoot)).then(function (b) { return b.text(); })
+      return (proxy ? proxyFile(statePath(shoot)) : downloadBlob(statePath(shoot))).then(function (b) { return b.text(); })
         .then(function (t) { return { data: JSON.parse(t), rev: rev }; });
     });
   }
@@ -275,6 +311,9 @@ var CPDisk = (function () {
 
   return {
     setToken: function (t) { token = t || ''; },
+    setProxy: function (u) { proxy = (u || '').replace(/\/+$/, ''); },
+    hasProxy: function () { return !!proxy; },
+    proxyPreview: proxyPreview, proxyFile: proxyFile, proxyCopy: proxyCopy,
     hasToken: function () { return !!token; },
     DiskError: DiskError,
     STATE_FILE: STATE_FILE, RETOUCH_DIR: RETOUCH_DIR,
