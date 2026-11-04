@@ -127,28 +127,41 @@ var CPDisk = (function () {
     });
   }
 
-  /** Все JPEG съёмки рекурсивно; служебные «_*» и «Ретушь» пропускаем. */
-  function walkPhotos(root, previewSize) {
-    var out = [];
-    function walk(path) {
-      /* previewSize === false — без ссылок на превью (быстрее, для подсчётов) */
-      return listDir(path, previewSize === false ? null : (previewSize || 'XL')).then(function (items) {
-        var dirs = [];
-        items.forEach(function (r) {
-          if (r.type === 'dir') {
-            if (r.name.charAt(0) === '_' || r.name === RETOUCH_DIR) return;
-            dirs.push(r.path);
-          } else if (PHOTO_RE.test(r.name)) {
-            out.push(r);
-          }
-        });
-        /* подпапки по очереди — бережём лимит запросов */
-        return dirs.reduce(function (p, d) { return p.then(function () { return walk(d); }); }, Promise.resolve());
-      });
-    }
-    return walk(root).then(function () {
-      out.sort(function (a, b) { return a.path < b.path ? -1 : 1; });
-      return out;
+  /**
+   * Все JPEG съёмки рекурсивно; служебные «_*» и «Ретушь» пропускаем.
+   * Папки обходим в несколько потоков (по умолчанию 4) — на съёмках с
+   * десятками папок последовательный обход шёл минутами.
+   * previewSize === false — без ссылок на превью (их отдаёт прослойка).
+   */
+  function walkPhotos(root, previewSize, parallel) {
+    var out = [], queue = [root], active = 0, limit = parallel || 4, failed = null;
+    var ps = previewSize === false ? null : (previewSize || 'XL');
+    return new Promise(function (resolve, reject) {
+      function pump() {
+        if (failed) return;
+        if (!queue.length && !active) {
+          out.sort(function (a, b) { return a.path < b.path ? -1 : 1; });
+          resolve(out);
+          return;
+        }
+        while (active < limit && queue.length) {
+          var path = queue.shift();
+          active++;
+          listDir(path, ps).then(function (items) {
+            items.forEach(function (r) {
+              if (r.type === 'dir') {
+                if (r.name.charAt(0) === '_' || r.name === RETOUCH_DIR) return;
+                queue.push(r.path);
+              } else if (PHOTO_RE.test(r.name)) {
+                out.push(r);
+              }
+            });
+            active--;
+            pump();
+          }, function (e) { failed = e; reject(e); });
+        }
+      }
+      pump();
     });
   }
 
@@ -275,6 +288,10 @@ var CPDisk = (function () {
 
   function proxyPreview(path, size) { return proxyReq({ a: 'preview', path: path, size: size || 'XL' }); }
   function proxyFile(path) { return proxyReq({ a: 'file', path: path }); }
+  /** Пачка превью: -> {items:[{path, type, data(base64)} | {path, status, error}]} */
+  function proxyPreviews(paths, size) {
+    return proxyReq({ a: 'previews' }, { method: 'POST', body: { paths: paths, size: size || 'XL' }, as: 'json' });
+  }
   /** items: [{from, path}], dirs: [папки создать заранее] -> {results:[{from, status}]} */
   function proxyCopy(items, dirs) {
     return proxyReq({ a: 'copy' }, { method: 'POST', body: { items: items, dirs: dirs || [] }, as: 'json' });
@@ -314,7 +331,7 @@ var CPDisk = (function () {
     setToken: function (t) { token = t || ''; },
     setProxy: function (u) { proxy = (u || '').replace(/\/+$/, ''); },
     hasProxy: function () { return !!proxy; },
-    proxyPreview: proxyPreview, proxyFile: proxyFile, proxyCopy: proxyCopy,
+    proxyPreview: proxyPreview, proxyPreviews: proxyPreviews, proxyFile: proxyFile, proxyCopy: proxyCopy,
     hasToken: function () { return !!token; },
     DiskError: DiskError,
     STATE_FILE: STATE_FILE, RETOUCH_DIR: RETOUCH_DIR,

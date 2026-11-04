@@ -25,6 +25,7 @@ const ALLOWED_ORIGINS = [
   'https://barinskim-cmyk.github.io',
 ];
 const MAX_FILE = 3 * 1024 * 1024;   /* лимит ответа функции ~3.5 МБ */
+const MAX_BATCH = 2.5 * 1024 * 1024; /* пачка превью: base64 + JSON укладываются в лимит */
 
 function cors(origin) {
   const ok = ALLOWED_ORIGINS.indexOf(origin) !== -1 || /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin || '');
@@ -146,6 +147,39 @@ module.exports.handler = async function (event) {
         body: img.buf.toString('base64'),
         isBase64Encoded: true,
       };
+    }
+
+    /* Пачка превью одним вызовом: POST {paths:[...до 24], size}.
+       Внутри — по 6 параллельно; ответ не больше ~2.5 МБ, остальное
+       помечаем 'later', страница дозапросит. */
+    if (a === 'previews') {
+      if (event.httpMethod !== 'POST') return json(405, { error: 'Нужен POST' }, h);
+      let body = event.body || '';
+      if (event.isBase64Encoded) body = Buffer.from(body, 'base64').toString('utf8');
+      let req;
+      try { req = JSON.parse(body); } catch (e) { return json(400, { error: 'Тело не JSON' }, h); }
+      const paths = Array.isArray(req.paths) ? req.paths.slice(0, 24) : [];
+      const size = req.size || 'XL';
+      const out = new Array(paths.length);
+      let total = 0, next = 0;
+      async function one(i) {
+        const path = paths[i];
+        try {
+          const meta = await disk(token, 'GET', '/resources', { path, preview_size: size, preview_crop: 'false', fields: 'preview,type' });
+          if (meta.status !== 200) { out[i] = { path, status: meta.status, error: meta.data.message || 'Нет файла' }; return; }
+          if (!meta.data.preview) { out[i] = { path, status: 404, error: 'У файла нет превью' }; return; }
+          const img = await binary(meta.data.preview, token);
+          if (img.status !== 200) { out[i] = { path, status: 502, error: 'Превью не отдано: HTTP ' + img.status }; return; }
+          if (total + img.buf.length > MAX_BATCH) { out[i] = { path, status: 'later' }; return; }
+          total += img.buf.length;
+          out[i] = { path, type: img.type, data: img.buf.toString('base64') };
+        } catch (e) {
+          out[i] = { path, status: 500, error: String(e && e.message || e) };
+        }
+      }
+      async function worker() { while (next < paths.length) { const i = next++; await one(i); } }
+      await Promise.all([worker(), worker(), worker(), worker(), worker(), worker()]);
+      return json(200, { items: out }, h);
     }
 
     if (a === 'file') {

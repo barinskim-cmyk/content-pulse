@@ -29,6 +29,7 @@ const FILES = new Map([
 ]);
 const log = [];
 const DOWNLOADS = [];
+const PREVIEW_CALLS = { single: 0, batch: 0 };
 /* режим «превью заблокировано»: файлы — настоящие картинки, их будут уменьшать в браузере */
 if (process.env.BLOCK_PREVIEW) for (const k of [...FILES.keys()]) FILES.set(k, png(60, 40));
 const md5 = (b) => require('crypto').createHash('md5').update(b).digest('hex');
@@ -80,7 +81,15 @@ async function route(r) {
   if (u.host === 'functions.yandexcloud.net') {
     if (m === 'OPTIONS') return r.fulfill({ status: 204, headers: { ...CORS, 'access-control-allow-headers': 'X-Disk-Token, Content-Type', 'access-control-allow-methods': 'GET, POST, OPTIONS' }, body: '' });
     if (req.headers()['x-disk-token'] !== 'TESTTOKEN') return json(401, { error: 'no token' });
+    if (q.a === 'previews' && m === 'POST') {
+      PREVIEW_CALLS.batch++;
+      const b = JSON.parse(req.postData() || '{}');
+      const img = png(30, 20).toString('base64');
+      return json(200, { items: (b.paths || []).map(p => process.env.BLOCK_PREVIEW ? { path: p, status: 502, error: 'blocked' }
+        : FILES.has(p) ? { path: p, type: 'image/png', data: img } : { path: p, status: 404, error: 'nf' }) });
+    }
     if (q.a === 'preview') {
+      PREVIEW_CALLS.single++;
       if (process.env.BLOCK_PREVIEW) return json(502, { error: 'blocked' });
       return r.fulfill({ status: 200, headers: { ...CORS, 'content-type': 'image/png' }, body: png(30, 20) });
     }
@@ -157,12 +166,11 @@ async function route(r) {
   });
   check('карточка собрана, на кадрах кнопка действий', (await page.$$('#cbCards .cp-act')).length >= 1);
 
-  /* действие с карточкой: на ретушь -> копии в Ретушь/<дата>/ */
+  /* действие с карточкой: на ретушь -> копии в <съёмка>/Ретушь/ (папка ретуши не задана) */
   await page.click('#cbCards [data-cp-card]');
   await page.click('#cpMenu button[data-s="retouch"]');
   await page.waitForFunction(() => App.projectMeta.cp.events.some(e => e.action === 'to_retouch'), null, { timeout: 8000 });
-  const today = new Date().toISOString().slice(0, 10);
-  check('ретушь: копии в папке Ретушь/' + today, FILES.has('disk:/Архив/LM-1043/Ретушь/' + today + '/a.jpg'));
+  check('ретушь без настройки: копии в <съёмка>/Ретушь/', FILES.has('disk:/Архив/LM-1043/Ретушь/a.jpg'));
   check('ретушь: оригиналы на месте', FILES.has('disk:/Архив/LM-1043/a.jpg'));
   check('бейдж статуса на кадре', (await page.$$('#cbCards .cp-badge.cp-retouch')).length >= 1);
   check('строка статусов', (await page.textContent('#cpStatusLine')).includes('ретушь'));
@@ -265,6 +273,26 @@ async function route(r) {
   await page.check('[data-cp-fold="part2"]');
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-panel.png') });
   await page.uncheck('[data-cp-fold="part2"]');
+  check('превью грузятся пачками через прослойку', PREVIEW_CALLS.batch > 0 && PREVIEW_CALLS.single === 0, JSON.stringify(PREVIEW_CALLS));
+
+  /* ---------- папка ретуши из настроек на Диске ---------- */
+  await page.fill('#cpRetouchInput', 'Архив/РЕТУШЬ');
+  await page.click('#cpRetouchApply');
+  await page.waitForFunction(() => CP.settings && CP.settings.retouch === 'disk:/Архив/РЕТУШЬ', null, { timeout: 8000 });
+  const setTxt = (FILES.get('disk:/_ContentPulse/настройки.txt') || '').toString();
+  check('настройка ретуши записана в _ContentPulse/настройки.txt', /^ретушь = disk:\/Архив\/РЕТУШЬ$/m.test(setTxt) && /# ретушь —/.test(setTxt), setTxt.slice(-80));
+  await page.dblclick('.cp-shoot');
+  await page.waitForFunction(() => CP.shoot && !document.getElementById('cpShelf').classList.contains('cp-open') && App.photos.length >= 4, null, { timeout: 10000 });
+  await page.evaluate(() => { const p = App.photos.find(x => /part2\/c\.jpg$/.test(x.disk || '')); cpDoAction('retouch', [p.id]); });
+  await page.waitForFunction(() => App.projectMeta.cp.events.some(e => e.action === 'to_retouch' && /РЕТУШЬ/.test(e.folder || '')), null, { timeout: 8000 });
+  check('ретушь с настройкой: <папка ретуши>/<съёмка>/<исходная папка>/<имя>', FILES.has('disk:/Архив/РЕТУШЬ/LM-1043/part2/c.jpg'));
+  await page.evaluate(() => cpShowShelf());
+  await page.fill('#cpShelfSearch', '');
+  await page.waitForFunction(() => document.querySelectorAll('.cp-shoot').length >= 2);
+  check('папка ретуши в архиве не показывается как съёмка', await page.evaluate(() =>
+    CP.shoots.some(s => s.name === 'РЕТУШЬ') && [...document.querySelectorAll('.cp-shoot')].every(b => b.dataset.name !== 'РЕТУШЬ')));
+  await page.fill('#cpShelfSearch', '1043');
+
   check('служебная папка не видна на витрине', await page.evaluate(() => CP.shoots.every(s => s.name.charAt(0) !== '_')));
 
   check('без ошибок JS на странице', errors.length === 0, errors.join(' | '));

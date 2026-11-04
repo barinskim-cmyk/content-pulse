@@ -24,6 +24,8 @@ var CP_CONFIG = {
   serviceDir: 'disk:/_ContentPulse',
   previewSize: 'XL',
   previewParallel: 6,
+  previewBatch: 10,      /* превью пачками через прослойку */
+  previewBatches: 3,
   downloadParallel: 3,
   pollMs: 30000
 };
@@ -251,6 +253,7 @@ function cpShowShelf() {
   }
   document.getElementById('cpShelfBar').style.display = '';
   document.getElementById('cpLogout').style.display = '';
+  if (typeof cpEnsureSettings === 'function') cpEnsureSettings();
   CP.archive = cpGet('cp_archive', CP_CONFIG.defaultArchive);
   document.getElementById('cpArchiveInput').value = CP.archive;
   var who = CP.user ? Promise.resolve(CP.user) : CPDisk.info().then(function (d) {
@@ -303,7 +306,8 @@ function cpFmtDate(iso) {
 function cpRenderShoots() {
   var q = document.getElementById('cpShelfSearch').value.trim().toLowerCase();
   var list = document.getElementById('cpShelfList');
-  var items = CP.shoots.filter(function (d) { return !q || d.name.toLowerCase().indexOf(q) !== -1; });
+  var hide = CP.settings && CP.settings.retouch;   /* папка ретуши внутри архива — не съёмка */
+  var items = CP.shoots.filter(function (d) { return d.path !== hide && (!q || d.name.toLowerCase().indexOf(q) !== -1); });
   if (!items.length) {
     list.innerHTML = '<div class="cp-empty">' + (CP.shoots.length ? 'Ничего не найдено' : 'В архиве пока нет папок съёмок') + '</div>';
     return;
@@ -363,6 +367,9 @@ function cpMeta() {
 function cpOpenShoot(path, name) {
   if (App.dirty && CP.shoot) cbAutosaveNow();
   cbBusyShow('Открываю съёмку ' + name + ': читаю сохранённый отбор...', 0.1);
+  /* обход папок идёт параллельно с чтением отбора (или уже идёт с витрины) */
+  var walk = cpWalk(path);
+  walk.catch(function () { });
   /* Отбор не прочитался — всё равно показываем кадры, но не сохраняем,
      чтобы не затереть чужую работу пустым отбором. */
   var stateError = null;
@@ -377,20 +384,32 @@ function cpOpenShoot(path, name) {
     CP.readOnly = !!stateError;
     CP.files = [];
     CP.folder = '';
+    /* превью прошлой съёмки больше не нужны */
+    CP.queue.forEach(function (q) { delete CP.thumbPending[q.disk]; });
+    CP.queue = [];
     cpApplyRemote(st.data || cpBlankProject(name));
     cpSetTitle();
-    cbBusyShow('Открываю съёмку ' + name + ': читаю папки и файлы...', 0.4);
-    return cpSyncPhotos(true);
-  }).then(function (added) {
-    cbBusyHide();
-    document.getElementById('cpShelf').classList.remove('cp-open');
-    if (stateError) {
-      cbToast('Кадры открыты, но сохранённый отбор не прочитался: ' + (stateError.message || stateError)
-        + '. Изменения пока не сохраняются, чтобы не затереть чужой отбор.');
-    } else {
-      cbToast('Съёмка открыта: ' + name + (added ? ' · новых файлов: ' + added : ''));
+    function opened(added) {
+      cbBusyHide();
+      document.getElementById('cpShelf').classList.remove('cp-open');
+      if (stateError) {
+        cbToast('Кадры открыты, но сохранённый отбор не прочитался: ' + (stateError.message || stateError)
+          + '. Изменения пока не сохраняются, чтобы не затереть чужой отбор.');
+      } else {
+        cbToast('Съёмка открыта: ' + name + (added ? ' · новых файлов: ' + added : ''));
+      }
+      cpStartPoll();
     }
-    cpStartPoll();
+    /* Съёмку уже открывали: кадры известны из отбора — показываем сразу,
+       новые файлы досчитываются в фоне. Новую съёмку ждём целиком. */
+    if (cpPhotoCount()) {
+      opened(0);
+      return cpSyncPhotos(true).then(function (added) {
+        if (added) cbToast('В съёмке новые файлы: ' + added);
+      });
+    }
+    cbBusyShow('Открываю съёмку ' + name + ': читаю папки и файлы...', 0.4);
+    return cpSyncPhotos(true).then(opened);
   }).catch(function (e) { cpHandleError(e, 'Не удалось открыть съёмку'); });
 }
 
@@ -411,7 +430,8 @@ function cpApplyRemote(data) {
     if (!p.disk) return;
     var t = CP.thumbs[p.disk];
     if (t) { p.dataUrl = t.url; p.w = t.w; p.h = t.h; return; }
-    if (CP.previews[p.disk]) { p.preview = CP.previews[p.disk]; cpQueueThumb(p); }
+    if (CP.previews[p.disk]) p.preview = CP.previews[p.disk];
+    if (p.preview || CPDisk.hasProxy()) cpQueueThumb(p);
   });
   cpMeta();
   /* файлы, которых нет в чужой версии (новая часть пришла у нас), не теряем */
@@ -424,8 +444,31 @@ function cpApplyRemote(data) {
  * Сверить галерею с папкой на Диске: добавить новые файлы (части съёмки),
  * пометить пропавшие. Возвращает число новых.
  */
+/* Обход папок съёмки запоминаем на 5 минут: выбор на витрине и открытие
+   не обходят папки повторно. «Обновить съёмку» всегда читает заново. */
+var CP_WALK_TTL = 5 * 60 * 1000;
+CP.walkCache = {};
+
+function cpWalk(path, fresh) {
+  var c = CP.walkCache[path];
+  /* идущий обход тоже переиспользуем: выбрали и сразу открыли — один обход */
+  if (!fresh && c && (c.pending || Date.now() - c.ts < CP_WALK_TTL)) return c.promise;
+  var entry = { pending: true, ts: 0 };
+  /* с прослойкой ссылки на превью не нужны — обход быстрее */
+  entry.promise = CPDisk.walkPhotos(path, CPDisk.hasProxy() ? false : CP_CONFIG.previewSize).then(function (files) {
+    entry.pending = false;
+    entry.ts = Date.now();
+    return files;
+  }, function (e) {
+    if (CP.walkCache[path] === entry) delete CP.walkCache[path];
+    throw e;
+  });
+  CP.walkCache[path] = entry;
+  return entry.promise;
+}
+
 function cpSyncPhotos(initial) {
-  return CPDisk.walkPhotos(CP.shoot.path, CP_CONFIG.previewSize).then(function (files) {
+  return cpWalk(CP.shoot.path, !initial).then(function (files) {
     CP.files = files;
     var added = cpMergeFiles();
     if (added.length) {
@@ -458,7 +501,7 @@ function cpMergeFiles() {
     added.push(f.path);
   });
   App.photos.forEach(function (p) { if (p.disk && !seen[p.disk]) p.missing = true; });
-  App.photos.forEach(function (p) { if (p.disk && !p.dataUrl && p.preview) cpQueueThumb(p); });
+  App.photos.forEach(function (p) { if (p.disk && !p.dataUrl && !p.missing && (p.preview || CPDisk.hasProxy())) cpQueueThumb(p); });
   return added;
 }
 
@@ -473,11 +516,36 @@ function cpRenderSoon() {
   }, 400);
 }
 
+/* Очередь превью — по пути на Диске: объекты кадров пересоздаются при
+   применении чужого отбора, а грузить одно превью дважды незачем. */
+CP.thumbPending = {};
 function cpQueueThumb(p) {
-  if (p._queued) return;
-  p._queued = true;
+  if (!p.disk || CP.thumbs[p.disk] || CP.thumbPending[p.disk]) return;
+  CP.thumbPending[p.disk] = true;
   CP.queue.push(p);
   cpPumpThumbs();
+}
+
+function cpThumbDone(disk, t) {
+  delete CP.thumbPending[disk];
+  CP.thumbs[disk] = t;
+  App.photos.forEach(function (q) {
+    if (q.disk === disk) { q.dataUrl = t.url; q.w = t.w; q.h = t.h; q._thumbState = 'ok'; }
+  });
+  cpRenderSoon();
+}
+
+function cpThumbFailed(disk, e) {
+  delete CP.thumbPending[disk];
+  App.photos.forEach(function (q) { if (q.disk === disk) q._thumbState = 'failed'; });
+  if (window.console) console.error('[CP] превью не загрузилось', disk, e && (e.body || e.message || e.error));
+  cpRenderSoon();
+}
+
+function cpB64Blob(b64, type) {
+  var bin = atob(b64), arr = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], { type: type || 'image/jpeg' });
 }
 
 /* Превью: сначала превью Яндекса; если браузер его не получил (CORS, сеть),
@@ -532,29 +600,53 @@ function cpLoadThumb(p) {
 }
 
 function cpPumpThumbs() {
+  if (CPDisk.hasProxy() && !CP.noBatch) return cpPumpBatches();
   var limit = CP.previewMode === 'download' ? CP_CONFIG.downloadParallel : CP_CONFIG.previewParallel;
   while (CP.loadingThumbs < limit && CP.queue.length) {
     (function (p) {
       CP.loadingThumbs++;
-      p._thumbState = 'loading';
       cpLoadThumb(p).then(function (t) {
-        CP.thumbs[p.disk] = t;
-        /* фото могло быть пересоздано при применении чужого отбора */
-        App.photos.forEach(function (q) {
-          if (q.disk === p.disk) { q.dataUrl = t.url; q.w = t.w; q.h = t.h; q._thumbState = 'ok'; }
-        });
-        cpRenderSoon();
+        cpThumbDone(p.disk, t);
       }).catch(function (e) {
-        p._queued = false;
-        p._thumbState = 'failed';
-        if (window.console) console.error('[CP] превью не загрузилось', p.disk, e && (e.body || e.message));
+        cpThumbFailed(p.disk, e);
         if (e && e.status === 401) cpHandleError(e);
-        cpRenderSoon();
       }).then(function () {
         CP.loadingThumbs--;
         cpPumpThumbs();
       });
     })(CP.queue.shift());
+  }
+}
+
+/* Через прослойку — пачками: один вызов функции на 10 превью вместо 10. */
+function cpPumpBatches() {
+  while (CP.loadingThumbs < CP_CONFIG.previewBatches && CP.queue.length) {
+    var batch = CP.queue.splice(0, CP_CONFIG.previewBatch).map(function (p) { return p.disk; });
+    (function (paths) {
+      CP.loadingThumbs++;
+      CPDisk.proxyPreviews(paths, CP_CONFIG.previewSize).then(function (out) {
+        var jobs = (out.items || []).map(function (it, i) {
+          var disk = (it && it.path) || paths[i];
+          if (it && it.data) {
+            return cpBlobToThumb(cpB64Blob(it.data, it.type), false).then(function (t) { cpThumbDone(disk, t); });
+          }
+          if (it && it.status === 'later') { CP.queue.push({ disk: disk }); return null; }
+          cpThumbFailed(disk, it);
+          if (it && it.status === 401 && !CP._authWarned) { CP._authWarned = true; cpHandleError({ status: 401, message: 'Не авторизован' }); }
+          return null;
+        });
+        return Promise.all(jobs);
+      }).catch(function (e) {
+        if (e && e.status === 401) { paths.forEach(function (d) { cpThumbFailed(d, e); }); cpHandleError(e); return; }
+        /* старая прослойка без пачек — дальше по одному */
+        if (e && e.status === 400) CP.noBatch = true;
+        if (CP.noBatch) { paths.forEach(function (d) { CP.queue.push({ disk: d }); }); return; }
+        paths.forEach(function (d) { cpThumbFailed(d, e); });
+      }).then(function () {
+        CP.loadingThumbs--;
+        cpPumpThumbs();
+      });
+    })(batch);
   }
 }
 
@@ -707,12 +799,22 @@ function cpDoAction(status, pids, cardId) {
     cbToast(CP_STATUS[status].label + ': ' + pids.length + ' кадр(ов)');
     return;
   }
-  /* ретушь: подстраховка — копии в <съёмка>/Ретушь/<дата>/ */
-  var folder = CP.shoot.path + '/' + CPDisk.RETOUCH_DIR + '/' + new Date().toISOString().slice(0, 10);
+  /* ретушь: подстраховка — копии в папку ретуши (настройка на Диске)
+     <папка ретуши>/<съёмка>/<исходные папки и имена>; без настройки —
+     <съёмка>/Ретушь/<исходные папки и имена>. */
   var files = pids.map(function (pid) { return cbPhotoById(pid); }).filter(function (p) { return p.disk; });
-  var items = files.map(function (p) { return { from: p.disk, path: folder + '/' + p.name }; });
+  var shootPath = CP.shoot.path, shootName = CP.shoot.name;
+  var ready = typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : Promise.resolve();
   cbBusyShow('Копирую на ретушь: ' + files.length + ' кадр(ов)...', 0.2);
-  cpCopyOnDisk(items, [folder], 'Копирую на ретушь').then(function (r) {
+  var folder = '';
+  ready.then(function () {
+    folder = cpRetouchBase(shootPath, shootName);
+    var items = files.map(function (p) {
+      var rel = p.disk.indexOf(shootPath + '/') === 0 ? p.disk.slice(shootPath.length + 1) : p.name;
+      return { from: p.disk, path: folder + '/' + rel };
+    });
+    return cpCopyOnDisk(items, [folder], 'Копирую на ретушь');
+  }).then(function (r) {
     cbBusyHide();
     extra.folder = folder.replace(/^disk:/, '');
     extra.copied = r.done;
@@ -728,6 +830,12 @@ function cpDoAction(status, pids, cardId) {
     cpAfterStatus();
     cpHandleError(e, 'Копирование на ретушь не удалось (статус поставлен)');
   });
+}
+
+/** Куда копировать на ретушь для съёмки. */
+function cpRetouchBase(shootPath, shootName) {
+  var root = CP.settings && CP.settings.retouch;
+  return root ? root + '/' + shootName : shootPath + '/' + CPDisk.RETOUCH_DIR;
 }
 
 /**
@@ -925,7 +1033,7 @@ cbRenderTray = (function (orig) {
 function cpOpenMenu(anchor, title, onPick) {
   var menu = document.getElementById('cpMenu');
   menu.innerHTML = '<div class="cp-menu-title">' + cbEsc(title) + '</div>'
-    + '<button data-s="retouch">На ретушь (копия в папку Ретушь)</button>'
+    + '<button data-s="retouch">На ретушь (копия в папку ретуши)</button>'
     + '<button data-s="reshoot">На пересъём</button>'
     + '<button data-s="approval">На согласование</button>'
     + '<button data-s="">Снять статус</button>';

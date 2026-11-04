@@ -18,11 +18,26 @@
    Словарь тегов — простой файл <_ContentPulse>/теги.txt:
      строка = тег; [Группа] — заголовок группы; # — комментарий.
 
+   Настройки — простой файл <_ContentPulse>/настройки.txt:
+     «название = значение», # — комментарий. Сейчас: ретушь = <папка>.
+
    Подключается после cp-app.js. Префикс: cp*.
    ============================================================ */
 
 var CP_TAGS_FILE = 'теги.txt';
 var CP_EXPORTS_DIR = 'выгрузки';
+var CP_SETTINGS_FILE = 'настройки.txt';
+
+var CP_SETTINGS_TEMPLATE = [
+  '# Настройки Content Pulse. Одна настройка в строке: название = значение.',
+  '# Строки с # — комментарии. Пути — как в адресе Диска, например disk:/КАТАЛОГ/01_РЕТУШЬ',
+  '#',
+  '# ретушь — куда копировать кадры при отправке на ретушь.',
+  '#   Внутри появляется папка съёмки, в ней — исходные папки и имена файлов.',
+  '#   Пусто — папка «Ретушь» внутри самой съёмки.',
+  'ретушь = ',
+  ''
+].join('\n');
 
 var CP_DICT_TEMPLATE = [
   '# Словарь тегов Content Pulse.',
@@ -63,7 +78,8 @@ var CP_DICT_TEMPLATE = [
     + '.cp-row > span{width:84px;color:#a3a09a;font-size:12px}'
     + '.cp-note{color:#a3a09a;font-size:11px;line-height:1.5;margin:8px 0}'
     + '.cp-warn{color:#e7c9a8}'
-    + '.cp-panel a{color:#C9956B}';
+    + '.cp-panel a{color:#C9956B}'
+    + '.cp-set{display:inline-flex;gap:8px;align-items:center}#cpRetouchInput{width:260px}';
   var st = document.createElement('style');
   st.textContent = css;
   document.head.appendChild(st);
@@ -131,10 +147,18 @@ function cpSelectShoot(path, name, modified) {
   cpMarkSelected();
   cpRenderPanel();
   var sel = CP.sel;
+  /* шаг 1: папки следующего уровня — один запрос, панель сразу живая */
+  CPDisk.listDir(path).then(function (items) {
+    if (CP.sel !== sel) return;
+    sel.dirs = items.filter(function (x) { return x.type === 'dir' && x.name.charAt(0) !== '_' && x.name !== CPDisk.RETOUCH_DIR; })
+      .sort(function (a, b) { return a.name.localeCompare(b.name, undefined, { numeric: true }); });
+    sel.dirsReady = true;
+    cpRenderPanel();
+  }).catch(function () { /* покажем ошибку после шага 2 */ });
+  /* шаг 2: отбор, все кадры (обход папок), словарь */
   Promise.all([
     CPDisk.readState(path).catch(function (e) { if (e && e.status === 401) throw e; return { data: null, rev: null, error: e }; }),
-    CPDisk.walkPhotos(path, false),
-    CPDisk.listDir(path),
+    cpWalk(path),
     cpLoadDict().catch(function () { return null; })
   ]).then(function (r) {
     if (CP.sel !== sel) return;   /* успели выбрать другую */
@@ -142,8 +166,6 @@ function cpSelectShoot(path, name, modified) {
     sel.rev = r[0].rev;
     sel.stateError = r[0].error || null;
     sel.files = r[1];
-    sel.dirs = r[2].filter(function (x) { return x.type === 'dir' && x.name.charAt(0) !== '_' && x.name !== CPDisk.RETOUCH_DIR; })
-      .sort(function (a, b) { return a.name.localeCompare(b.name, undefined, { numeric: true }); });
     sel.loading = false;
     cpRenderPanel();
   }).catch(function (e) {
@@ -153,6 +175,78 @@ function cpSelectShoot(path, name, modified) {
     cpHandleError(e, 'Не удалось прочитать съёмку');
   });
 }
+
+/* ---------- настройки на Диске ---------- */
+
+var CP_SETTING_KEYS = { 'ретушь': 'retouch' };
+
+function cpParseSettings(text) {
+  var out = {};
+  String(text || '').split(/\r?\n/).forEach(function (line) {
+    if (/^\s*#/.test(line)) return;
+    var m = /^\s*([^=]+?)\s*=\s*(.*?)\s*$/.exec(line);
+    if (!m) return;
+    var key = CP_SETTING_KEYS[m[1].toLowerCase()];
+    if (!key || !m[2]) return;
+    out[key] = key === 'retouch' ? cpNormArchive(m[2]) : m[2];
+  });
+  return out;
+}
+
+var _cpSettingsP = null;
+/** Прочитать настройки один раз за сессию (файла нет — всё по умолчанию). */
+function cpEnsureSettings(force) {
+  if (_cpSettingsP && !force) return _cpSettingsP;
+  _cpSettingsP = CPDisk.proxyFile(cpServicePath(CP_SETTINGS_FILE)).then(function (b) { return b.text(); })
+    .then(function (t) { CP.settingsText = t; CP.settings = cpParseSettings(t); }, function (e) {
+      if (e && e.status === 404) { CP.settingsText = ''; CP.settings = {}; return; }
+      _cpSettingsP = null;   /* сеть — попробуем в следующий раз */
+      if (!CP.settings) CP.settings = {};
+      if (window.console) console.warn('[CP] настройки не прочитались', e && (e.body || e.message));
+    }).then(function () { cpSettingsToUi(); if (CP.shoots) cpRenderShoots(); });
+  return _cpSettingsP;
+}
+
+/** Записать одну настройку, не трогая остальные строки и комментарии. */
+function cpSaveSetting(name, value) {
+  return cpEnsureSettings(true).then(function () {
+    var text = CP.settingsText || CP_SETTINGS_TEMPLATE;
+    var lines = text.split(/\r?\n/), done = false;
+    var re = new RegExp('^\\s*' + name + '\\s*=', 'i');
+    lines = lines.map(function (l) { if (!done && re.test(l)) { done = true; return name + ' = ' + value; } return l; });
+    if (!done) lines.push(name + ' = ' + value);
+    text = lines.join('\n');
+    return CPDisk.ensureDir(CP_CONFIG.serviceDir)
+      .then(function () { return CPDisk.uploadBlob(cpServicePath(CP_SETTINGS_FILE), new Blob([text], { type: 'text/plain;charset=utf-8' }), true); })
+      .then(function () { CP.settingsText = text; CP.settings = cpParseSettings(text); cpSettingsToUi(); if (CP.shoots) cpRenderShoots(); });
+  });
+}
+
+function cpSettingsToUi() {
+  var inp = document.getElementById('cpRetouchInput');
+  if (inp && document.activeElement !== inp) inp.value = (CP.settings && CP.settings.retouch) || '';
+}
+
+(function cpSettingsDom() {
+  var bar = document.getElementById('cpShelfBar');
+  var wrap = document.createElement('span');
+  wrap.className = 'cp-set';
+  wrap.innerHTML = '<span class="cp-user">Ретушь:</span>'
+    + '<input id="cpRetouchInput" spellcheck="false" placeholder="папка Ретушь внутри съёмки" title="Куда копировать кадры при отправке на ретушь. Общая настройка для всех, хранится на Диске в _ContentPulse/настройки.txt">'
+    + '<button id="cpRetouchApply">Сохранить</button>';
+  bar.appendChild(wrap);
+  document.getElementById('cpRetouchApply').onclick = function () {
+    var raw = document.getElementById('cpRetouchInput').value.trim();
+    var v = raw ? cpNormArchive(raw) : '';
+    var btn = this;
+    btn.disabled = true;
+    cpSaveSetting('ретушь', v).then(function () {
+      cbToast(v ? 'Папка ретуши: ' + v.replace(/^disk:/, '') + ' (внутри — папки съёмок)' : 'Ретушь копируется в папку «Ретушь» внутри съёмки');
+    }).catch(function (e) { cpHandleError(e, 'Не удалось сохранить настройку'); })
+      .then(function () { btn.disabled = false; });
+  };
+  if (CPDisk.hasToken()) cpEnsureSettings();
+})();
 
 /* ---------- вычисления по данным съёмки ---------- */
 
@@ -244,7 +338,14 @@ function cpRenderPanel() {
     + '<small>' + (sel.modified ? 'изменена ' + cpFmtDate(sel.modified) : '') + '</small></div>'
     + '<span class="cp-sp"></span><button data-cp-p="close" title="Закрыть панель">×</button></div>';
   if (sel.loading) {
-    panel.innerHTML = head + '<div class="cp-panel-body"><div class="cp-note">Читаю папки и отбор съёмки...</div></div>';
+    var lb = '<div class="cp-panel-body">';
+    if (sel.dirsReady) {
+      lb += '<h4>Папки · ' + sel.dirs.length + '</h4>';
+      sel.dirs.forEach(function (d) { lb += '<div class="cp-fold"><span>' + cbEsc(d.name) + ' <small>· ...</small></span></div>'; });
+    }
+    lb += '<div class="cp-note">Считаю кадры во всех папках и читаю отбор... Большие съёмки — до минуты.</div></div>';
+    panel.innerHTML = head + lb + '<div class="cp-panel-actions"><div class="cp-sum"></div>'
+      + '<button data-cp-p="open">Открыть</button></div>';
     return;
   }
   if (sel.error) {
