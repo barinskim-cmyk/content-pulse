@@ -16,7 +16,7 @@
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
-  clientId: '',
+  clientId: '36df38c93cb944318c0084640c77d76a',
   defaultArchive: 'disk:/Архив',
   previewSize: 'XL',
   previewParallel: 6,
