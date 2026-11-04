@@ -41,7 +41,7 @@ const DOWNLOADS_REFERER = [];
 const ZIPS = new Map();
 const FRESH = new Map();   /* как у Яндекса: новый файл появляется в списке папки не сразу */
 const CLOUD = new Map();   /* ключ в бакете -> путь архива */   /* путь .zip на Диске -> имена внутри архива */
-const PREVIEW_CALLS = { single: 0, batch: 0 };
+const PREVIEW_CALLS = { single: 0, batch: 0, big: 0 };
 /* режим «превью заблокировано»: файлы — настоящие картинки, их будут уменьшать в браузере */
 if (process.env.BLOCK_PREVIEW) for (const k of [...FILES.keys()]) FILES.set(k, png(60, 40));
 const md5 = (b) => require('crypto').createHash('md5').update(b).digest('hex');
@@ -105,7 +105,7 @@ async function route(r) {
         : FILES.has(p) ? { path: p, type: 'image/png', data: img } : { path: p, status: 404, error: 'nf' }) });
     }
     if (q.a === 'preview') {
-      PREVIEW_CALLS.single++;
+      if (q.size === '2400x2400') PREVIEW_CALLS.big++; else PREVIEW_CALLS.single++;
       if (process.env.BLOCK_PREVIEW) return json(502, { error: 'blocked' });
       return r.fulfill({ status: 200, headers: { ...CORS, 'content-type': 'image/png' }, body: png(30, 20) });
     }
@@ -205,16 +205,37 @@ async function route(r) {
     else { c.slots[0].pid = App.photos[0].id; if (c.slots[1]) c.slots[1].pid = App.photos[1].id; }
     cbMarkDirty(); cbRenderCards(); cbRenderTray();
   });
-  check('карточка собрана, на кадрах кнопка действий', (await page.$$('#cbCards .cp-act')).length >= 1);
+  check('карточка собрана, на кадрах кнопки «на ретушь» и «ещё»', (await page.$$('#cbCards .cp-acts .cp-act-rt')).length >= 1 && (await page.$$('#cbCards .cp-acts .cp-act-more')).length >= 1);
+  check('в шапке карточки сразу «На ретушь»', (await page.$$('#cbCards [data-cp-card-retouch]')).length === 1);
 
   /* действие с карточкой: на ретушь -> копии в <съёмка>/Ретушь/ (папка ретуши не задана) */
-  await page.click('#cbCards [data-cp-card]');
-  await page.click('#cpMenu button[data-s="retouch"]');
+  await page.click('#cbCards [data-cp-card-retouch]');
   await page.waitForFunction(() => App.projectMeta.cp.events.some(e => e.action === 'to_retouch'), null, { timeout: 8000 });
   check('ретушь без настройки: копии в <съёмка>/Ретушь/', FILES.has('disk:/Архив/LM-1043/Ретушь/a.jpg'));
   check('ретушь: оригиналы на месте', FILES.has('disk:/Архив/LM-1043/a.jpg'));
   check('бейдж статуса на кадре', (await page.$$('#cbCards .cp-badge.cp-retouch')).length >= 1);
   check('строка статусов', (await page.textContent('#cpStatusLine')).includes('ретушь'));
+  check('после отправки в шапке карточки «В ретуши»', (await page.textContent('#cbCards [data-cp-card-retouch]')).trim() === 'В ретуши');
+
+  /* просмотр крупно: двойной клик в галерее, листание, лайк */
+  await page.dblclick('#cbTrayGrid .cb-thumb');
+  await page.waitForSelector('#cpLb.cp-open', { timeout: 5000 });
+  await page.waitForFunction(() => /крупно/.test(document.getElementById('cpLbNote').textContent) && Object.keys(CP.big).length >= 1, null, { timeout: 8000 });
+  check('двойной клик в галерее открывает кадр крупно (превью 2400 px)', PREVIEW_CALLS.big >= 1);
+  const first = await page.textContent('#cpLbName');
+  await page.keyboard.press('ArrowRight');
+  check('стрелка листает к следующему кадру', (await page.textContent('#cpLbName')) !== first && (await page.textContent('#cpLbCount')).startsWith('2 /'));
+  await page.keyboard.press('l');
+  check('L ставит лайк', await page.evaluate(() => Object.keys(cpMeta().likes).length === 1) && (await page.textContent('#cpLb [data-lb="like"]')) === 'Убрать лайк');
+  await page.keyboard.press('Escape');
+  check('Esc закрывает просмотр', !(await page.$('#cpLb.cp-open')));
+  await page.waitForTimeout(500);
+  check('лайк виден на кадре в галерее', (await page.$$('#cbTrayGrid .cp-badge.cp-like')).length === 1);
+  await page.check('#cpLikedOnly');
+  check('фильтр «только лайки»', (await page.$$('#cbTrayGrid .cb-thumb')).length === 1);
+  await page.uncheck('#cpLikedOnly');
+  await page.waitForFunction(() => !App.dirty, null, { timeout: 8000 });
+  check('лайк сохранён в отборе на Диске', Object.keys(JSON.parse(FILES.get('disk:/Архив/LM-1043/_contentpulse.json').toString()).meta.cp.likes || {}).length === 1);
   await page.waitForFunction(() => !App.dirty, null, { timeout: 8000 });
   const saved = JSON.parse(FILES.get('disk:/Архив/LM-1043/_contentpulse.json').toString());
   check('отбор сохранён на Диск: карточка, статусы, журнал с автором',

@@ -87,8 +87,24 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
     + '.cp-badge{position:absolute;left:4px;bottom:4px;background:#C9956B;color:#131313;font:600 9px/1 "IBM Plex Mono",monospace;letter-spacing:.06em;padding:3px 5px;border-radius:2px;pointer-events:none;z-index:2}'
     + '.cp-badge.cp-reshoot{background:#d9534f;color:#fff}.cp-badge.cp-approval{background:#e8d27a}'
     + '.cp-badge.cp-dl{left:auto;right:4px;top:4px;bottom:auto;background:#3d6b52;color:#fff}'
-    + '.cp-act{position:absolute;right:4px;bottom:4px;display:none;padding:2px 7px;font-size:11px;z-index:3;background:#1d1d1bdd}'
-    + '.cb-slot.cb-filled:hover .cp-act,.cb-cont-item:hover .cp-act,.cb-thumb:hover .cp-act{display:block}'
+    + '.cp-badge.cp-like{top:4px;bottom:auto;left:4px;background:#e7c9a8}'
+    + '.cp-badge.cp-badge-inline{position:static;display:inline-block;margin-left:6px;vertical-align:middle}'
+    + '.cp-liked-only{display:flex;gap:6px;align-items:center;font-size:11px;color:#a3a09a;margin-top:6px;cursor:pointer}'
+    + '.cp-acts{position:absolute;right:4px;bottom:4px;display:none;gap:3px;z-index:3}'
+    + '.cp-acts button{padding:2px 6px;font-size:10px;background:#1d1d1bdd;line-height:1.3}'
+    + '.cp-acts .cp-act-rt{border-color:#C9956B;color:#e7c9a8}'
+    + '.cb-slot.cb-filled:hover .cp-acts,.cb-cont-item:hover .cp-acts,.cb-thumb:hover .cp-acts{display:flex}'
+    + '.cp-lb{position:fixed;inset:0;z-index:4000;background:#0b0b0af2;display:none;flex-direction:column;color:#f2f2f1}'
+    + '.cp-lb.cp-open{display:flex}'
+    + '.cp-lb-head{display:flex;gap:10px;align-items:center;padding:10px 16px;border-bottom:1px solid #2a2a28;flex-wrap:wrap}'
+    + '.cp-lb-head b{font-size:13px;word-break:break-all}'
+    + '.cp-lb-head small{color:#a3a09a;font:11px "IBM Plex Mono",monospace}'
+    + '.cp-lb-head .cp-sp{flex:1}'
+    + '.cp-lb-body{flex:1;overflow:auto;display:flex;align-items:center;justify-content:center;min-height:0;position:relative}'
+    + '.cp-lb-body img{max-width:100%;max-height:100%;object-fit:contain;cursor:zoom-in;display:block}'
+    + '.cp-lb-body.cp-full{display:block}'
+    + '.cp-lb-body.cp-full img{max-width:none;max-height:none;cursor:zoom-out;margin:auto}'
+    + '.cp-lb-note{position:absolute;left:16px;bottom:12px;color:#a3a09a;font-size:11px;background:#0b0b0acc;padding:3px 8px;border-radius:3px}'
     + '.cb-thumb{position:relative}'
     + '.cp-dlcard{position:fixed;left:20px;bottom:20px;z-index:3000;width:360px;max-width:calc(100vw - 32px);background:#1d1d1b;border:1px solid #C9956B;border-radius:6px;padding:14px 16px;box-shadow:0 8px 32px #000a;display:none;color:#f2f2f1}'
     + '.cp-dlcard-head{display:flex;gap:8px;align-items:flex-start}.cp-dlcard-head b{flex:1;font-size:13px;word-break:break-word}'
@@ -370,6 +386,7 @@ function cpMeta() {
   if (!m.folderTags) m.folderTags = {}; /* путь папки внутри съёмки ('' = вся) -> [теги] */
   if (!m.status) m.status = {};
   if (!m.cardStatus) m.cardStatus = {};
+  if (!m.likes) m.likes = {};           /* pid -> {by, ts}: лайк в галерее для сборки карточек */
   if (!m.events) m.events = [];
   return m;
 }
@@ -922,7 +939,8 @@ function cpUpdateStatusLine() {
 /* бейджи статусов и кнопка действий — поверх отрисовки Cardboard */
 function cpBadgeHTML(pid) {
   if (!CP.shoot) return '';
-  var m = cpMeta(), st = m.status[pid], dl = m.downloads[pid], html = '';
+  var m = cpMeta(), st = m.status[pid], dl = m.downloads[pid], lk = m.likes[pid], html = '';
+  if (lk) html += '<span class="cp-badge cp-like" title="' + cbEsc('Лайк · ' + lk.by + ' · ' + cpFmtDate(lk.ts)) + '">ЛАЙК</span>';
   if (st && CP_STATUS[st.s]) {
     html += '<span class="cp-badge cp-' + st.s + '" title="' + cbEsc(CP_STATUS[st.s].label + ' · ' + st.by + ' · ' + cpFmtDate(st.ts)) + '">'
       + CP_STATUS[st.s].short + '</span>';
@@ -944,8 +962,12 @@ function cpDecorate(rootId) {
     var p = cbPhotoById(pid);
     if (!p || (p.kind || 'photo') === 'ref') return;
     if (p.disk) el.title = (cpRelDir(p) ? cpRelDir(p) + '/' : '') + p.name;
+    var inRetouch = cpMeta().status[pid] && cpMeta().status[pid].s === 'retouch';
     el.insertAdjacentHTML('beforeend', cpBadgeHTML(pid)
-      + '<button class="cp-act" data-cp-pid="' + pid + '" title="Действия с кадром">...</button>');
+      + '<span class="cp-acts">'
+      + (inRetouch ? '' : '<button class="cp-act-rt" data-cp-retouch="' + pid + '" title="Отправить кадр на ретушь">на ретушь</button>')
+      + '<button class="cp-act-more" data-cp-pid="' + pid + '" title="Другие действия: пересъём, согласование, снять статус">ещё</button></span>');
+    el.setAttribute('data-cp-zoom', pid);
   });
   if (rootId === 'cbCards') {
     Array.prototype.forEach.call(root.querySelectorAll('.cb-card'), function (cardEl) {
@@ -953,14 +975,26 @@ function cpDecorate(rootId) {
       var cid = cardEl.getAttribute('data-cid');
       if (!head || head.querySelector('[data-cp-card]')) return;
       var st = cpMeta().cardStatus[cid];
-      var label = st && CP_STATUS[st.s] ? CP_STATUS[st.s].label : 'Действия';
+      var rt = document.createElement('button');
+      rt.className = 'cb-mini cp-card-rt';
+      rt.setAttribute('data-cp-card-retouch', cid);
+      if (st && st.s === 'retouch') {
+        rt.textContent = 'В ретуши';
+        rt.title = 'Отправлена на ретушь · ' + st.by + ' · ' + cpFmtDate(st.ts);
+        rt.style.borderColor = '#C9956B';
+      } else {
+        rt.textContent = 'На ретушь';
+        rt.title = 'Отправить все кадры карточки на ретушь (с копией в папку ретуши)';
+      }
       var btn = document.createElement('button');
       btn.className = 'cb-mini';
       btn.setAttribute('data-cp-card', cid);
-      btn.textContent = label;
-      btn.title = st ? (st.by + ' · ' + cpFmtDate(st.ts)) : 'Действия со всей карточкой';
-      if (st) btn.style.borderColor = '#C9956B';
-      head.insertBefore(btn, head.querySelector('[data-act="tpl"]'));
+      btn.textContent = st && CP_STATUS[st.s] && st.s !== 'retouch' ? CP_STATUS[st.s].label : 'ещё';
+      btn.title = 'Другие действия с карточкой: пересъём, согласование, снять статус';
+      if (st && st.s !== 'retouch') btn.style.borderColor = '#C9956B';
+      var before = head.querySelector('[data-act="tpl"]');
+      head.insertBefore(rt, before);
+      head.insertBefore(btn, before);
     });
   }
 }
@@ -1023,7 +1057,11 @@ function cpRenderFolderFilter() {
   var keys = Object.keys(counts).sort(function (a, b) {
     return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
   });
-  sel.parentNode.style.display = (CP.shoot && keys.length) ? '' : 'none';
+  sel.parentNode.style.display = CP.shoot ? '' : 'none';
+  sel.style.display = keys.length ? '' : 'none';
+  var nl = CP.shoot ? Object.keys(cpMeta().likes).length : 0;
+  var ll = document.getElementById('cpLikedLabel');
+  if (ll) ll.textContent = 'только лайки · ' + nl;
   if (CP.folder && CP.folder !== '/' && !counts[CP.folder]) CP.folder = '';
   var html = '<option value="">Все папки · ' + total + '</option>';
   if (root && keys.length) html += '<option value="/">Корень съёмки · ' + root + '</option>';
@@ -1043,8 +1081,13 @@ function cpRenderFolderFilter() {
   row.className = 'cb-row';
   row.style.display = 'none';
   row.style.marginTop = '6px';
-  row.innerHTML = '<select id="cpFolderFilter" title="Показать только содержимое папки (со всеми вложенными)" style="width:100%"></select>';
+  row.innerHTML = '<select id="cpFolderFilter" title="Показать только содержимое папки (со всеми вложенными)" style="width:100%"></select>'
+    + '<label class="cp-liked-only" title="Кадры с лайком: двойной клик по кадру → «Лайк» или клавиша L"><input type="checkbox" id="cpLikedOnly"> <span id="cpLikedLabel">только лайки</span></label>';
   head.appendChild(row);
+  document.getElementById('cpLikedOnly').onchange = function () {
+    CP.likedOnly = this.checked;
+    cbRenderTray();
+  };
   document.getElementById('cpFolderFilter').onchange = function () {
     CP.folder = this.value;
     cbRenderTray();
@@ -1056,9 +1099,11 @@ function cpRenderFolderFilter() {
 cbRenderTray = (function (orig) {
   return function () {
     cpRenderFolderFilter();
-    if (!CP.shoot || !CP.folder) return orig.apply(this, arguments);
-    var all = App.photos;
-    App.photos = all.filter(cpPhotoInFolder);
+    if (!CP.shoot || (!CP.folder && !CP.likedOnly)) return orig.apply(this, arguments);
+    var all = App.photos, likes = cpMeta().likes;
+    App.photos = all.filter(function (p) {
+      return cpPhotoInFolder(p) && (!CP.likedOnly || !p.disk || !!likes[p.id]);
+    });
     try { return orig.apply(this, arguments); }
     finally { App.photos = all; }
   };
@@ -1097,6 +1142,22 @@ function cpOpenMenu(anchor, title, onPick) {
 
 document.addEventListener('click', function (e) {
   var menu = document.getElementById('cpMenu');
+  var rtPhoto = e.target.closest('[data-cp-retouch]');
+  var rtCard = e.target.closest('[data-cp-card-retouch]');
+  if (rtPhoto) {
+    e.preventDefault(); e.stopPropagation();
+    cpDoAction('retouch', [rtPhoto.getAttribute('data-cp-retouch')], null);
+    return;
+  }
+  if (rtCard) {
+    e.preventDefault(); e.stopPropagation();
+    var rc = cbCardById(rtCard.getAttribute('data-cp-card-retouch'));
+    if (!rc) return;
+    var cst = cpMeta().cardStatus[rc.id];
+    if (cst && cst.s === 'retouch') { cbToast('Карточка уже в ретуши: ' + cst.by + ', ' + cpFmtDate(cst.ts) + '. Снять — через «ещё».'); return; }
+    cpDoAction('retouch', cpCardPids(rc), rc.id);
+    return;
+  }
   var actPhoto = e.target.closest('[data-cp-pid]');
   var actCard = e.target.closest('[data-cp-card]');
   if (actPhoto) {
@@ -1516,3 +1577,181 @@ cbSetProjectName = (function (orig) {
 CPDisk.setProxy(CP_CONFIG.proxy);
 cpReadToken();
 cpSetTitle();
+
+/* ---------- просмотр кадра крупно ----------
+   Двойной клик по кадру (лента, карточка, доп. контент) открывает его во
+   весь экран. Сначала показываем превью ленты, затем крупное превью Яндекса
+   по длинной стороне до 2400 px (около половины исходника). Клик по кадру —
+   вписать / 100 %. Стрелки — соседние кадры той же ленты или карточки,
+   Esc — закрыть. */
+
+var CP_BIG_SIZE = '2400x2400';
+var CP_BIG_FALLBACK = 'XXXL';
+CP.big = {};          /* путь на Диске -> objectURL крупного превью */
+CP.lb = null;         /* {list:[pid], i} */
+
+(function cpLbDom() {
+  var lb = document.createElement('div');
+  lb.className = 'cp-lb';
+  lb.id = 'cpLb';
+  lb.innerHTML = '<div class="cp-lb-head">'
+    + '<div><b id="cpLbName"></b><br><small id="cpLbPath"></small></div><span id="cpLbBadges"></span>'
+    + '<span class="cp-sp"></span><small id="cpLbCount"></small>'
+    + '<button data-lb="prev" title="Предыдущий кадр (стрелка влево)">Назад</button>'
+    + '<button data-lb="next" title="Следующий кадр (стрелка вправо)">Вперёд</button>'
+    + '<button data-lb="like" title="Лайк — чтобы потом быстрее собрать карточку (клавиша L)">Лайк</button>'
+    + '<button data-lb="retouch" class="cp-act-rt" title="Отправить кадр на ретушь">На ретушь</button>'
+    + '<button data-lb="close" title="Закрыть (Esc)">Закрыть</button></div>'
+    + '<div class="cp-lb-body" id="cpLbBody"><img id="cpLbImg" alt=""><div class="cp-lb-note" id="cpLbNote"></div></div>';
+  document.body.appendChild(lb);
+  lb.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-lb]');
+    if (b) {
+      var a = b.getAttribute('data-lb');
+      if (a === 'close') cpLbClose();
+      else if (a === 'prev') cpLbStep(-1);
+      else if (a === 'next') cpLbStep(1);
+      else if (a === 'like') cpLbLike();
+      else if (a === 'retouch' && CP.lb) {
+        var pid = CP.lb.list[CP.lb.i];
+        cpDoAction('retouch', [pid], null);
+        setTimeout(cpLbShow, 300);
+      }
+      return;
+    }
+    if (e.target.id === 'cpLbImg') {
+      var body = document.getElementById('cpLbBody');
+      body.classList.toggle('cp-full');
+      cpLbNote();
+      return;
+    }
+    if (e.target.id === 'cpLbBody') cpLbClose();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (!CP.lb) return;
+    if (e.key === 'Escape') cpLbClose();
+    else if (e.key === 'ArrowLeft') cpLbStep(-1);
+    else if (e.key === 'ArrowRight') cpLbStep(1);
+    else if (e.code === 'KeyL') cpLbLike();
+    else return;
+    e.preventDefault();
+  });
+})();
+
+/* двойной клик по кадру — открыть крупно */
+document.addEventListener('dblclick', function (e) {
+  if (!CP.shoot || e.target.closest('button, input, select, textarea')) return;
+  var el = e.target.closest('.cb-thumb, .cb-slot.cb-filled, .cb-cont-item');
+  if (!el) return;
+  var pid = cpPidOf(el);
+  var p = pid ? cbPhotoById(pid) : null;
+  if (!p || !p.disk) return;
+  e.preventDefault();
+  var list;
+  if (el.classList.contains('cb-thumb')) {
+    list = Array.prototype.map.call(document.querySelectorAll('#cbTrayGrid .cb-thumb'), function (t) { return t.getAttribute('data-pid'); });
+  } else if (el.classList.contains('cb-cont-item')) {
+    var cont = cbContById(el.getAttribute('data-kid'));
+    list = cont ? cont.photoIds.slice() : [pid];
+  } else {
+    var card = cbCardById(el.getAttribute('data-cid'));
+    list = card ? cpCardPids(card) : [pid];
+  }
+  list = list.filter(function (x) { var q = cbPhotoById(x); return q && q.disk; });
+  var i = list.indexOf(pid);
+  if (i === -1) { list = [pid]; i = 0; }
+  cpLbOpen(list, i);
+}, true);
+
+function cpLbOpen(list, i) {
+  CP.lb = { list: list, i: i };
+  document.getElementById('cpLb').classList.add('cp-open');
+  document.getElementById('cpLbBody').classList.remove('cp-full');
+  cpLbShow();
+}
+
+function cpLbClose() {
+  CP.lb = null;
+  document.getElementById('cpLb').classList.remove('cp-open');
+  document.getElementById('cpLbImg').removeAttribute('src');
+}
+
+/** Лайк кадра в просмотре: общий для всех, хранится в отборе съёмки. */
+function cpLbLike() {
+  if (!CP.lb) return;
+  var pid = CP.lb.list[CP.lb.i];
+  var likes = cpMeta().likes;
+  if (likes[pid]) delete likes[pid];
+  else likes[pid] = { by: cpActor(), ts: new Date().toISOString() };
+  cbMarkDirty();
+  cpRenderSoon();
+  cpLbShow();
+}
+
+function cpLbStep(d) {
+  if (!CP.lb) return;
+  var n = CP.lb.list.length;
+  CP.lb.i = (CP.lb.i + d + n) % n;
+  cpLbShow();
+}
+
+function cpLbNote(text) {
+  var note = document.getElementById('cpLbNote');
+  if (text !== undefined) note.setAttribute('data-t', text);
+  var full = document.getElementById('cpLbBody').classList.contains('cp-full');
+  note.textContent = (note.getAttribute('data-t') || '') + (full ? ' · 100 % — клик, чтобы вписать' : ' · клик — 100 %')
+    + ' · стрелки — листать · L — лайк · Esc — закрыть';
+}
+
+function cpLbShow() {
+  if (!CP.lb) return;
+  var pid = CP.lb.list[CP.lb.i];
+  var p = cbPhotoById(pid);
+  if (!p) return;
+  var img = document.getElementById('cpLbImg');
+  document.getElementById('cpLbName').textContent = p.name;
+  document.getElementById('cpLbPath').textContent = cpRelDir(p) || 'корень съёмки';
+  document.getElementById('cpLbCount').textContent = (CP.lb.i + 1) + ' / ' + CP.lb.list.length;
+  document.getElementById('cpLbBadges').innerHTML = cpBadgeHTML(pid).replace(/cp-badge/g, 'cp-badge cp-badge-inline');
+  var lkb = document.querySelector('#cpLb [data-lb="like"]');
+  var liked = !!cpMeta().likes[pid];
+  lkb.textContent = liked ? 'Убрать лайк' : 'Лайк';
+  lkb.style.borderColor = liked ? '#C9956B' : '';
+  var st = cpMeta().status[pid];
+  var rt = document.querySelector('#cpLb [data-lb="retouch"]');
+  rt.textContent = st && st.s === 'retouch' ? 'В ретуши' : 'На ретушь';
+  rt.disabled = !!(st && st.s === 'retouch');
+  var big = CP.big[p.disk];
+  if (big) { img.src = big; cpLbNote('крупно'); return; }
+  if (p.dataUrl) img.src = p.dataUrl; else img.removeAttribute('src');
+  cpLbNote('загружаю крупно...');
+  var disk = p.disk;
+  cpLoadBig(disk).then(function (url) {
+    if (!CP.lb || cbPhotoById(CP.lb.list[CP.lb.i]).disk !== disk) return;
+    img.src = url;
+    cpLbNote('крупно');
+  }, function (e) {
+    if (!CP.lb || cbPhotoById(CP.lb.list[CP.lb.i]).disk !== disk) return;
+    cpLbNote('крупное превью не загрузилось: ' + ((e && (e.status || e.message)) || e));
+  });
+  /* соседний кадр — заранее, чтобы листалось без ожидания */
+  var nx = cbPhotoById(CP.lb.list[(CP.lb.i + 1) % CP.lb.list.length]);
+  if (nx && nx.disk && !CP.big[nx.disk]) cpLoadBig(nx.disk).catch(function () { });
+}
+
+var _cpBigP = {};
+function cpLoadBig(disk) {
+  if (CP.big[disk]) return Promise.resolve(CP.big[disk]);
+  if (_cpBigP[disk]) return _cpBigP[disk];
+  var p = CPDisk.proxyPreview(disk, CP_BIG_SIZE).catch(function (e) {
+    if (e && e.status === 413) return CPDisk.proxyPreview(disk, CP_BIG_FALLBACK);
+    throw e;
+  }).then(function (blob) {
+    var url = URL.createObjectURL(blob);
+    CP.big[disk] = url;
+    delete _cpBigP[disk];
+    return url;
+  }, function (e) { delete _cpBigP[disk]; throw e; });
+  _cpBigP[disk] = p;
+  return p;
+}

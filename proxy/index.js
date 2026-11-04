@@ -28,7 +28,8 @@ process.on('unhandledRejection', (e) => { console.log(JSON.stringify({ ev: 'unha
 
 const MAX_FILE = 3 * 1024 * 1024;   /* лимит ответа функции ~3.5 МБ */
 const ZIP_BUDGET_MS = 480000;        /* функция живёт 600 с — оставляем запас на загрузку */
-const MAX_BATCH = 2.5 * 1024 * 1024; /* пачка превью: base64 + JSON укладываются в лимит */
+const MAX_BATCH = 2.5 * 1024 * 1024;
+const MAX_PREVIEW = 2.5 * 1024 * 1024; /* пачка превью: base64 + JSON укладываются в лимит */
 
 function cors(origin) {
   const ok = ALLOWED_ORIGINS.indexOf(origin) !== -1 || /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin || '');
@@ -445,7 +446,8 @@ module.exports.handler = async function (event) {
       if (!meta.data.preview) return json(404, { error: 'У файла нет превью' }, h);
       const img = await binary(meta.data.preview, token);
       if (img.status !== 200) return json(502, { error: 'Превью не отдано: HTTP ' + img.status }, h);
-      if (img.buf.length > MAX_FILE) return json(413, { error: 'Превью слишком большое' }, h);
+      /* ответ функции в base64 не больше ~3,5 МБ — крупное превью страница возьмёт поменьше */
+      if (img.buf.length > MAX_PREVIEW) return json(413, { error: 'Превью слишком большое' }, h);
       return {
         statusCode: 200,
         headers: Object.assign({ 'Content-Type': img.type, 'Cache-Control': 'private, max-age=86400' }, h),
