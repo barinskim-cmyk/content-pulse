@@ -72,7 +72,7 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
     + '.cp-shoot-name{font-size:14px;font-weight:600;word-break:break-word}'
     + '.cp-shoot-meta{color:#a3a09a;font-size:11px;margin-top:6px;font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace}'
     + '.cp-empty{color:#a3a09a;padding:24px 0;grid-column:1/-1}'
-    + '.cp-login{margin:auto;max-width:420px;text-align:center;line-height:1.6;color:#d6d4cf}'
+    + '.cp-login{grid-column:1/-1;justify-self:center;margin:12vh auto 0;max-width:420px;text-align:center;line-height:1.6;color:#d6d4cf}'
     + '.cp-login button{margin-top:16px}'
     + '.cp-link{background:none;border:none;color:#a3a09a;text-decoration:underline;padding:4px;font-size:11px}'
     + '.cp-badge{position:absolute;left:4px;bottom:4px;background:#C9956B;color:#131313;font:600 9px/1 "IBM Plex Mono",monospace;letter-spacing:.06em;padding:3px 5px;border-radius:2px;pointer-events:none;z-index:2}'
