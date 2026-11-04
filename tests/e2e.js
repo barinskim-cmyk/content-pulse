@@ -21,11 +21,19 @@ function png(w, h) {
 }
 
 /* --- состояние фейкового Диска --- */
-const DIRS = new Set(['disk:/Архив', 'disk:/Архив/LM-1043', 'disk:/Архив/LM-1043/part2', 'disk:/Архив/LM-2001']);
+const DIRS = new Set(['disk:/Архив', 'disk:/Архив/LM-1043', 'disk:/Архив/LM-1043/part2', 'disk:/Архив/LM-2001',
+  /* съёмки по структуре SK: моделька (лук/артикул) и оптика (бренд/артикул) */
+  'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST', 'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1', 'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74595_модель',
+  'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74596_модель',
+  'disk:/Архив/2026-09-21_SV_ОПТИКА_N', 'disk:/Архив/2026-09-21_SV_ОПТИКА_N/maxmara_оптика', 'disk:/Архив/2026-09-21_SV_ОПТИКА_N/maxmara_оптика/75327_оптика_N']);
 const FILES = new Map([
   ['disk:/Архив/LM-1043/a.jpg', Buffer.from('A'.repeat(100))],
   ['disk:/Архив/LM-1043/b.jpg', Buffer.from('B'.repeat(200))],
   ['disk:/Архив/LM-1043/part2/c.jpg', Buffer.from('C'.repeat(300))],
+  ['disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/IMG_0101.jpg', Buffer.from('M'.repeat(120))],
+  ['disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74595_модель/manekin.jpg', Buffer.from('N'.repeat(130))],
+  ['disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74596_модель/manekin2.jpg', Buffer.from('Q'.repeat(140))],
+  ['disk:/Архив/2026-09-21_SV_ОПТИКА_N/maxmara_оптика/75327_оптика_N/s1.jpg', Buffer.from('S'.repeat(150))],
 ]);
 const log = [];
 const DOWNLOADS = [];
@@ -166,7 +174,7 @@ async function route(r) {
   await page.goto(base + '#access_token=TESTTOKEN&token_type=bearer');
   await page.waitForSelector('.cp-shoot', { timeout: 8000 });
   check('после входа токен убран из адреса', !(await page.url()).includes('access_token'));
-  check('витрина: две съёмки из архива', (await page.$$('.cp-shoot')).length === 2);
+  check('витрина: все съёмки из архива', (await page.$$('.cp-shoot')).length === 4);
   check('витрина: имя пользователя', (await page.textContent('#cpUser')) === 'Маша');
 
   await page.fill('#cpShelfSearch', '1043');
@@ -343,6 +351,67 @@ async function route(r) {
   await page.waitForFunction(() => document.querySelectorAll('.cp-shoot').length >= 2);
   check('папка ретуши в архиве не показывается как съёмка', await page.evaluate(() =>
     CP.shoots.some(s => s.name === 'РЕТУШЬ') && [...document.querySelectorAll('.cp-shoot')].every(b => b.dataset.name !== 'РЕТУШЬ')));
+  await page.fill('#cpShelfSearch', '1043');
+
+  /* ---------- структура съёмок из файла на Диске ---------- */
+  await page.click('#cpFilesOpen');
+  await page.click('[data-cp-f="tab"][data-i="1"]');
+  await page.waitForFunction(() => /\[Модельная\]/.test(document.getElementById('cpFilesText').value), null, { timeout: 8000 });
+  await page.click('[data-cp-f="save"]');
+  await page.waitForFunction(() => CP.rules && CP.rules.length === 3, null, { timeout: 8000 });
+  check('структура.txt создана из редактора и прочитана', FILES.has('disk:/_ContentPulse/структура.txt'));
+  await page.click('[data-cp-f="close"]');
+  await page.fill('#cpShelfSearch', 'МОДЕЛЬ');
+  await page.click('.cp-shoot');
+  await page.waitForSelector('#cpPanel.cp-open [data-cp-fold]', { timeout: 10000 });
+  check('тип съёмки по названию виден на панели', (await page.textContent('#cpPanel .cp-panel-head small')).includes('Модельная'));
+  await page.dblclick('.cp-shoot');
+  await page.waitForFunction(() => CP.shoot && /МОДЕЛЬ/.test(CP.shoot.name) && App.photos.length === 3 && !document.getElementById('cpShelf').classList.contains('cp-open'), null, { timeout: 10000 });
+  await page.evaluate(() => {
+    var tpl = App.templates[0];
+    cbAddCardFromTpl(tpl.id);
+    var c = App.cards[App.cards.length - 1];
+    var man = App.photos.find(p => /74595_модель/.test(p.disk)), model = App.photos.find(p => /IMG_0101/.test(p.disk));
+    if (c.mode === 'auto') c.pids = [model.id, man.id];
+    else { c.slots[0].pid = model.id; if (c.slots[1]) c.slots[1].pid = man.id; else c.slots[0].pid = man.id; }
+    cbMarkDirty(); cbRenderCards();
+  });
+  check('обтравка из папки артикула ставит карточке артикул', await page.evaluate(() => {
+    var c = App.cards[App.cards.length - 1];
+    return c.title === '74595' && c.cpArticle === '74595' && !!document.querySelector('#cbCards .cp-art');
+  }));
+  await page.evaluate(() => {
+    var c = App.cards[App.cards.length - 1];
+    var m2 = App.photos.find(p => /74596_модель/.test(p.disk));
+    if (c.mode === 'auto') c.pids.push(m2.id); else { var s = c.slots.find(x => !x.pid) || c.slots[c.slots.length - 1]; s.pid = m2.id; }
+    cbMarkDirty(); cbRenderCards();
+  });
+  check('кадры двух артикулов в карточке — предупреждение, а не выбор молча', await page.evaluate(() => {
+    var c = App.cards[App.cards.length - 1];
+    return /74595/.test(c.cpArticle) && /74596/.test(c.cpArticle) && !!document.querySelector('#cbCards .cp-art-warn');
+  }));
+  await page.evaluate(() => {
+    var c = App.cards[App.cards.length - 1];
+    c.title = 'Мой заголовок';
+    var m2 = App.photos.find(p => /74596_модель/.test(p.disk));
+    if (c.mode === 'auto') c.pids = c.pids.filter(x => x !== m2.id); else c.slots.forEach(x => { if (x.pid === m2.id) x.pid = null; });
+    cbMarkDirty(); cbRenderCards();
+  });
+  check('ручной заголовок карточки не перезаписывается', await page.evaluate(() => App.cards[App.cards.length - 1].title === 'Мой заголовок'));
+  await page.waitForFunction(() => !App.dirty, null, { timeout: 8000 });
+  const stM = JSON.parse(FILES.get('disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/_contentpulse.json').toString());
+  check('артикул карточки сохранён в отборе', stM.cards.some(c => c.cpArticle === '74595'), JSON.stringify(stM.cards.map(c => [c.title, c.cpArticle])));
+
+  /* оптика: выгрузка как в папках */
+  await page.evaluate(() => cpShowShelf());
+  await page.fill('#cpShelfSearch', 'ОПТИКА');
+  await page.click('.cp-shoot');
+  await page.waitForSelector('#cpPanel.cp-open [data-cp-fold]', { timeout: 10000 });
+  check('оптика: тип и «выгрузка как в папках» на панели', /Оптика, выгрузка как в папках/.test(await page.textContent('#cpPanel .cp-panel-head small')));
+  await page.click('[data-cp-p="download"]');
+  await page.waitForFunction(() => [...document.querySelectorAll('#cpDlCard a.cp-dlcard-btn')].some(a => /ОПТИКА/.test(decodeURIComponent(a.href))), null, { timeout: 10000 });
+  const zOpt = ZIPS.get('disk:/_ContentPulse/выгрузки/2026-09-21_SV_ОПТИКА_N_1.zip') || [];
+  check('оптика: в архиве исходные папки бренда и артикула', zOpt.includes('2026-09-21_SV_ОПТИКА_N_1/maxmara_оптика/75327_оптика_N/s1.jpg'), [...ZIPS.keys()].join(' | ') + ' :: ' + zOpt.join(' | '));
   await page.fill('#cpShelfSearch', '1043');
 
   check('служебная папка не видна на витрине', await page.evaluate(() => CP.shoots.every(s => s.name.charAt(0) !== '_')));

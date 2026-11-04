@@ -40,7 +40,8 @@ var CP_SETTINGS_TEMPLATE = [
 
 var CP_DICT_TEMPLATE = [
   '# Словарь тегов Content Pulse.',
-  '# Один тег в строке. [Название] — группа тегов. Строки с # — комментарии.',
+  '# Один тег в строке. [Название] — группа тегов. Строки с # — комментарии,',
+  '# после тега можно пояснить: «Y  # Юля».',
   '# Присвоить можно только теги из этого файла.',
   '',
   '[Ретушёры]',
@@ -133,7 +134,7 @@ function cpLoadDict(force) {
   return cpReadServiceFile(CP_TAGS_FILE, force).then(function (txt) {
     var out = [], group = '';
     txt.split(/\r?\n/).forEach(function (line) {
-      var l = line.trim();
+      var l = line.replace(/\s+#.*$/, '').trim();   /* «Y  # Юля» — тег Y, пояснение после # */
       if (!l || l.charAt(0) === '#') return;
       var g = /^\[(.+)\]$/.exec(l);
       if (g) { group = g[1].trim(); return; }
@@ -185,7 +186,8 @@ function cpSelectShoot(path, name, modified) {
   Promise.all([
     CPDisk.readState(path).catch(function (e) { if (e && e.status === 401) throw e; return { data: null, rev: null, error: e }; }),
     cpWalk(path),
-    cpLoadDict().catch(function () { return null; })
+    cpLoadDict().catch(function () { return null; }),
+    typeof cpLoadRules === 'function' ? cpLoadRules() : null
   ]).then(function (r) {
     if (CP.sel !== sel) return;   /* успели выбрать другую */
     sel.data = r[0].data;
@@ -360,8 +362,10 @@ function cpRenderPanel() {
   var sel = CP.sel;
   if (!sel) { panel.classList.remove('cp-open'); return; }
   panel.classList.add('cp-open');
+  var stype = typeof cpShootType === 'function' ? cpShootType(sel.name) : null;
   var head = '<div class="cp-panel-head"><div><b>' + cbEsc(sel.name) + '</b>'
-    + '<small>' + (sel.modified ? 'изменена ' + cpFmtDate(sel.modified) : '') + '</small></div>'
+    + '<small>' + (sel.modified ? 'изменена ' + cpFmtDate(sel.modified) : '')
+    + (stype ? ' · ' + cbEsc(stype.name) + (stype.exportMode === 'folders' ? ', выгрузка как в папках' : '') : '') + '</small></div>'
     + '<span class="cp-sp"></span><button data-cp-p="close" title="Закрыть панель">×</button></div>';
   if (sel.loading) {
     var lb = '<div class="cp-panel-body">';
@@ -526,9 +530,11 @@ function cpShelfDownload() {
   var used = {};
   /* раскладка внутри архива: кадры из карточек — по папкам карточек,
      остальные — по исходным папкам; имена файлов исходные */
+  var stype = typeof cpShootType === 'function' ? cpShootType(sel.name) : null;
+  var asFolders = !!(stype && stype.exportMode === 'folders');   /* правило из структура.txt */
   var entries = items.map(function (x) {
     var parts;
-    if (x.cards.length) {
+    if (x.cards.length && !asFolders) {
       var c = cards[x.cards[0]];
       parts = [cpPad(x.cards[0] + 1) + ' ' + (c.title || c.category || 'Карточка')];
     } else {

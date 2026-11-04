@@ -374,8 +374,29 @@ function cpMeta() {
   return m;
 }
 
+/** Дождаться записи отбора текущей съёмки (не дольше 20 с). */
+function cpFlushSave() {
+  if (!CP.shoot || CP.readOnly || (!App.dirty && !CP.saving)) return Promise.resolve();
+  var t0 = Date.now(), tries = 0;
+  return new Promise(function (resolve) {
+    (function tick() {
+      if (!CP.saving && App.dirty && tries < 2) { tries++; cbAutosaveNow(); }
+      if ((!CP.saving && (!App.dirty || tries >= 2)) || Date.now() - t0 > 20000) return resolve();
+      setTimeout(tick, 150);
+    })();
+  });
+}
+
 function cpOpenShoot(path, name) {
-  if (App.dirty && CP.shoot) cbAutosaveNow();
+  /* сначала дописываем отбор открытой съёмки, потом переключаемся */
+  if (CP.shoot && CP.shoot.path !== path && (App.dirty || CP.saving)) {
+    cbBusyShow('Сохраняю отбор съёмки ' + CP.shoot.name + '...', 0.05);
+    return cpFlushSave().then(function () { cpOpenShootNow(path, name); });
+  }
+  return cpOpenShootNow(path, name);
+}
+
+function cpOpenShootNow(path, name) {
   cbBusyShow('Открываю съёмку ' + name + ': читаю сохранённый отбор...', 0.1);
   /* обход папок идёт параллельно с чтением отбора (или уже идёт с витрины) */
   var walk = cpWalk(path);
@@ -705,9 +726,15 @@ cbAutosaveNow = function () {
   CP.saving = true;
   var seq = CP.editSeq;
   var data = cbProjectData();
-  CPDisk.writeState(CP.shoot.path, data, CP.rev).then(function (rev) {
-    CP.rev = rev;
+  /* Запись могла закончиться, когда уже открыта другая съёмка: тогда её
+     ревизию и флаги не трогаем — иначе следующая запись новой съёмки уйдёт
+     с чужой ревизией, словит «конфликт» и потеряет правки. */
+  var path = CP.shoot.path;
+  function sameShoot() { return CP.shoot && CP.shoot.path === path; }
+  CPDisk.writeState(path, data, CP.rev).then(function (rev) {
     CP.saving = false;
+    if (!sameShoot()) { if (App.dirty) cbScheduleAutosave(); return; }
+    CP.rev = rev;
     /* за время записи могли быть новые правки — тогда сохраняем ещё раз */
     if (CP.editSeq === seq) cbClearDirty();
     else cbScheduleAutosave();
@@ -715,6 +742,12 @@ cbAutosaveNow = function () {
     if (el) el.textContent = 'на Диске · ' + new Date().toLocaleTimeString('ru-RU').slice(0, 5);
   }, function (e) {
     CP.saving = false;
+    if (!sameShoot()) {
+      if (e && e.conflict) cbToast('Последние правки прошлой съёмки не сохранились: её отбор изменил другой пользователь.');
+      else cpHandleError(e, 'Не удалось сохранить отбор прошлой съёмки');
+      if (App.dirty) cbScheduleAutosave();
+      return;
+    }
     if (e && e.conflict) {
       CP.rev = e.rev;
       cpApplyRemote(e.data);
@@ -1439,9 +1472,15 @@ function cpDownloadSelection() {
   var jobs = cpSelectionJobs();
   if (!jobs.length) { cbToast('В карточках и доп. контенте пока нет кадров с Диска'); return; }
   var shoot = CP.shoot;
-  var entries = jobs.map(function (j) {
-    return { from: j.disk, size: j.size, name: (j.dir.length ? j.dir.map(CPDisk.safeName).join('/') + '/' : '') + CPDisk.safeName(j.file) };
-  });
+  /* правило из структура.txt: выгрузка «как в папках» — исходные папки и имена */
+  var stype = typeof cpShootType === 'function' ? cpShootType(shoot.name) : null;
+  var seen = {};
+  var entries = (stype && stype.exportMode === 'folders')
+    ? jobs.filter(function (j) { if (seen[j.disk]) return false; seen[j.disk] = true; return true; })
+      .map(function (j) { return { from: j.disk, size: j.size, name: cpRelInShoot(j.disk) }; })
+    : jobs.map(function (j) {
+      return { from: j.disk, size: j.size, name: (j.dir.length ? j.dir.map(CPDisk.safeName).join('/') + '/' : '') + CPDisk.safeName(j.file) };
+    });
   cpNextExportName(CPDisk.safeName(shoot.name) + '_отбор', cpMeta().events).then(function (name) {
     return cpZipExport(name, entries, 'Отбор по карточкам: ' + entries.length + ' кадр(ов).').then(function (r) {
       cpEvent('download_selection', [], { count: r.files, note: 'карточек: ' + App.cards.length, export: name, parts: r.parts.length });
