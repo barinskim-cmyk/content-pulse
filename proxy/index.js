@@ -146,6 +146,89 @@ async function doCopy(token, items, dirs) {
   return { status: 200, result: { results } };
 }
 
+/* ---------- Object Storage (S3) для архивов выгрузки ----------
+   Запись на Яндекс Диск сейчас ~0,1 МБ/с, поэтому готовый ZIP кладём в
+   закрытый бакет в Yandex Cloud (живёт 3 дня, правило жизненного цикла),
+   а странице отдаём подписанную ссылку на сутки. Ключи — в переменных
+   окружения функции, в репозиторий не попадают. */
+const crypto = require('crypto');
+const S3 = {
+  host: 'storage.yandexcloud.net', region: 'ru-central1',
+  key: process.env.S3_KEY_ID || '', secret: process.env.S3_SECRET || '', bucket: process.env.S3_BUCKET || '',
+};
+const S3_LINK_TTL = 24 * 3600;
+
+function s3Ready() { return !!(S3.key && S3.secret && S3.bucket); }
+function hmac(k, str) { return crypto.createHmac('sha256', k).update(str, 'utf8').digest(); }
+function sha256hex(str) { return crypto.createHash('sha256').update(str, 'utf8').digest('hex'); }
+function amzDate(d) { return d.toISOString().replace(/[:-]|\.\d{3}/g, ''); }
+function uriEnc(str) { return encodeURIComponent(str).replace(/[!'()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase()); }
+function s3Path(key) { return '/' + S3.bucket + '/' + key.split('/').map(uriEnc).join('/'); }
+function s3SigningKey(date) {
+  let k = hmac('AWS4' + S3.secret, date);
+  k = hmac(k, S3.region); k = hmac(k, 's3');
+  return hmac(k, 'aws4_request');
+}
+function s3Query(q) { return Object.keys(q).sort().map((k) => uriEnc(k) + '=' + uriEnc(q[k])).join('&'); }
+
+/** Подписанные заголовки для запроса к бакету (тело не хешируем: UNSIGNED-PAYLOAD). */
+function s3Sign(method, key, query, headers) {
+  const ad = amzDate(new Date()), date = ad.slice(0, 8);
+  const h = { host: S3.host, 'x-amz-date': ad, 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' };
+  Object.keys(headers || {}).forEach((n) => { h[n.toLowerCase()] = String(headers[n]).trim(); });
+  const names = Object.keys(h).sort();
+  const qs = s3Query(query || {});
+  const canon = [method, s3Path(key), qs, names.map((n) => n + ':' + h[n] + '\n').join(''), names.join(';'), 'UNSIGNED-PAYLOAD'].join('\n');
+  const scope = date + '/' + S3.region + '/s3/aws4_request';
+  const sts = ['AWS4-HMAC-SHA256', ad, scope, sha256hex(canon)].join('\n');
+  const sig = crypto.createHmac('sha256', s3SigningKey(date)).update(sts, 'utf8').digest('hex');
+  h.authorization = 'AWS4-HMAC-SHA256 Credential=' + S3.key + '/' + scope + ', SignedHeaders=' + names.join(';') + ', Signature=' + sig;
+  return { path: s3Path(key) + (qs ? '?' + qs : ''), headers: h };
+}
+
+/** Ссылка на скачивание объекта: действует ttl секунд, имя файла — русское, как в выгрузке. */
+function s3Presign(key, ttl, filename) {
+  const ad = amzDate(new Date()), date = ad.slice(0, 8);
+  const scope = date + '/' + S3.region + '/s3/aws4_request';
+  const ascii = filename.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, '');
+  const q = {
+    'X-Amz-Algorithm': 'AWS4-HMAC-SHA256', 'X-Amz-Credential': S3.key + '/' + scope, 'X-Amz-Date': ad,
+    'X-Amz-Expires': String(ttl), 'X-Amz-SignedHeaders': 'host',
+    'response-content-disposition': 'attachment; filename="' + ascii + '"; filename*=UTF-8\'\'' + uriEnc(filename),
+    'response-content-type': 'application/zip',
+  };
+  const qs = s3Query(q);
+  const canon = ['GET', s3Path(key), qs, 'host:' + S3.host + '\n', 'host', 'UNSIGNED-PAYLOAD'].join('\n');
+  const sts = ['AWS4-HMAC-SHA256', ad, scope, sha256hex(canon)].join('\n');
+  const sig = crypto.createHmac('sha256', s3SigningKey(date)).update(sts, 'utf8').digest('hex');
+  return 'https://' + S3.host + s3Path(key) + '?' + qs + '&X-Amz-Signature=' + sig;
+}
+
+/** PUT в бакет потоком с известной длиной. Интерфейс как у openUpload. */
+function openS3Upload(key, length) {
+  const https = require('https');
+  const signed = s3Sign('PUT', key, {}, { 'content-type': 'application/zip' });
+  return new Promise((resolve) => {
+    const req = https.request({ method: 'PUT', hostname: S3.host, port: 443, path: signed.path,
+      headers: Object.assign({}, signed.headers, { 'Content-Length': length }) });
+    const done = new Promise((res, rej) => {
+      req.on('response', (r) => { let t = ''; r.on('data', (c) => { t += c; }); r.on('end', () => res({ status: r.statusCode === 200 ? 201 : r.statusCode, body: t })); });
+      req.on('error', rej);
+    });
+    done.catch(() => { });
+    resolve({
+      write(buf) {
+        return new Promise((res, rej) => {
+          const ok = req.write(buf, (e) => (e ? rej(e) : null));
+          if (ok) res(); else req.once('drain', res);
+        });
+      },
+      end() { req.end(); return done; },
+      abort() { try { req.destroy(); } catch (e) { } },
+    });
+  });
+}
+
 /* ---------- ZIP без сжатия (JPEG всё равно не сжимается) ----------
    С октября 2026 Яндекс отключил скачивание папок архивом (ссылка на папку
    отдаёт 500), отдельные файлы скачиваются. Поэтому архив собираем сами:
@@ -260,16 +343,16 @@ function openUpload(href, length) {
   });
 }
 
-async function doZip(token, target, entries) {
+async function doZip(token, target, entries, store) {
   try {
-    return await doZipInner(token, target, entries);
+    return await doZipInner(token, target, entries, store);
   } catch (e) {
     console.log(JSON.stringify({ ev: 'zip_error', error: String(e && e.message || e) }));
     return { status: 422, result: { error: 'Сборка архива: ' + String(e && e.message || e) } };
   }
 }
 
-async function doZipInner(token, target, entries) {
+async function doZipInner(token, target, entries, store) {
   const t0 = Date.now();
   const dt = dosDateTime(new Date());
   const items = entries.map((e) => ({ from: e.from, name: Buffer.from(String(e.name).replace(/^\/+/, ''), 'utf8'), size: +e.size || 0 }));
@@ -279,13 +362,19 @@ async function doZipInner(token, target, entries) {
   for (const x of items) total += 30 + x.name.length + x.size + 46 + x.name.length;
   if (total >= 0xFFFFFFFF || items.length >= 0xFFFF) return { status: 413, result: { error: 'Архив больше 4 ГБ — нужна разбивка на части' } };
 
-  const parent = target.slice(0, target.lastIndexOf('/'));
-  const d = await ensureDir(token, parent);
-  if (!d.ok) return { status: d.status || 500, result: { error: 'Не удалось создать папку ' + parent + ': ' + d.error } };
-  const up = await disk(token, 'GET', '/resources/upload', { path: target, overwrite: 'true' });
-  if (up.status !== 200) return { status: up.status, result: { error: 'Загрузка на Диск не выдана: ' + (up.data.message || up.status) } };
-
-  const out = await openUpload(up.data.href, total);
+  /* куда пишем: бакет (быстро) или, если он не настроен, Диск */
+  let out, s3Key = '';
+  if (s3Ready() && store !== 'disk') {
+    s3Key = 'exports/' + crypto.randomBytes(16).toString('hex') + '.zip';
+    out = await openS3Upload(s3Key, total);
+  } else {
+    const parent = target.slice(0, target.lastIndexOf('/'));
+    const d = await ensureDir(token, parent);
+    if (!d.ok) return { status: d.status || 500, result: { error: 'Не удалось создать папку ' + parent + ': ' + d.error } };
+    const up = await disk(token, 'GET', '/resources/upload', { path: target, overwrite: 'true' });
+    if (up.status !== 200) return { status: up.status, result: { error: 'Загрузка на Диск не выдана: ' + (up.data.message || up.status) } };
+    out = await openUpload(up.data.href, total);
+  }
   /* читаем вперёд до 4 файлов, пишем строго по порядку */
   const AHEAD = 4;
   const pending = [];
@@ -319,9 +408,15 @@ async function doZipInner(token, target, entries) {
     await out.write(cd);
     await out.write(endRecord(items.length, cd.length, offset));
     const r = await out.end();
-    if (r.status !== 201 && r.status !== 202) throw new Error('Диск не принял архив: HTTP ' + r.status + ' ' + r.body.slice(0, 200));
-    console.log(JSON.stringify({ ev: 'zip', files: items.length, bytes: total, ms: Date.now() - t0 }));
-    return { status: 200, result: { path: target, bytes: total, files: items.length, ms: Date.now() - t0 } };
+    if (r.status !== 201 && r.status !== 202) throw new Error((s3Key ? 'Хранилище' : 'Диск') + ' не принял архив: HTTP ' + r.status + ' ' + r.body.slice(0, 200));
+    console.log(JSON.stringify({ ev: 'zip', files: items.length, bytes: total, ms: Date.now() - t0, s3: !!s3Key }));
+    const result = { path: target, bytes: total, files: items.length, ms: Date.now() - t0 };
+    if (s3Key) {
+      result.url = s3Presign(s3Key, S3_LINK_TTL, target.split('/').pop());
+      result.store = 'cloud';
+      result.expires = new Date(Date.now() + S3_LINK_TTL * 1000).toISOString();
+    }
+    return { status: 200, result };
   } catch (e) {
     out.abort();
     console.log(JSON.stringify({ ev: 'zip_error', error: String(e && e.message || e), ms: Date.now() - t0 }));
@@ -462,7 +557,7 @@ module.exports.handler = async function (event) {
       let req;
       try { req = JSON.parse(body); } catch (e) { return json(400, { error: 'Тело не JSON' }, h); }
       if (!req.target || !/\.zip$/i.test(req.target)) return json(400, { error: 'Нет target .zip' }, h);
-      const r = await doZip(token, req.target, Array.isArray(req.entries) ? req.entries : []);
+      const r = await doZip(token, req.target, Array.isArray(req.entries) ? req.entries : [], req.store);
       return json(r.status, r.result, h);
     }
 
@@ -552,3 +647,6 @@ module.exports.handler = async function (event) {
     return json(500, { error: 'Ошибка прослойки: ' + (e && e.message || e) }, h);
   }
 };
+
+/* для скриптов настройки и проверки (proxy/s3setup.js) */
+module.exports._s3 = { S3, s3Sign, s3Presign, openS3Upload, s3Ready };

@@ -512,7 +512,8 @@ function cpExportName(sel) {
   var parts = [CPDisk.safeName(sel.name)];
   if (sel.tag) parts.push(CPDisk.safeName(sel.tag));
   else if (sel.status && sel.status !== 'none' && CP_STATUS[sel.status]) parts.push(CP_STATUS[sel.status].label);
-  return cpNextExportName(parts.join('_'));
+  var events = (sel.data && sel.data.meta && sel.data.meta.cp && sel.data.meta.cp.events) || [];
+  return cpNextExportName(parts.join('_'), events);
 }
 
 function cpShelfDownload() {

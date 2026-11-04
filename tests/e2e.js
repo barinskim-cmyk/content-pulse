@@ -30,7 +30,8 @@ const FILES = new Map([
 const log = [];
 const DOWNLOADS = [];
 const DOWNLOADS_REFERER = [];
-const ZIPS = new Map();   /* путь .zip на Диске -> имена внутри архива */
+const ZIPS = new Map();
+const CLOUD = new Map();   /* ключ в бакете -> путь архива */   /* путь .zip на Диске -> имена внутри архива */
 const PREVIEW_CALLS = { single: 0, batch: 0 };
 /* режим «превью заблокировано»: файлы — настоящие картинки, их будут уменьшать в браузере */
 if (process.env.BLOCK_PREVIEW) for (const k of [...FILES.keys()]) FILES.set(k, png(60, 40));
@@ -117,8 +118,11 @@ async function route(r) {
       }
       const parts = b.target.split('/'); for (let i = 2; i < parts.length; i++) DIRS.add(parts.slice(0, i).join('/'));
       ZIPS.set(b.target, b.entries.map(e => e.name));
-      FILES.set(b.target, Buffer.from('PK' + b.entries.map(e => e.name).join('\n')));
-      return json(200, { path: b.target, bytes: 1, files: b.entries.length, ms: 5 });
+      /* как настоящая прослойка с хранилищем: архив в облаке, ссылка подписана */
+      const key = 'exports/' + ZIPS.size + '.zip';
+      CLOUD.set(key, b.target);
+      return json(200, { path: b.target, bytes: 1, files: b.entries.length, ms: 5, store: 'cloud',
+        url: 'https://storage.yandexcloud.net/content-pulse-exports-test/' + key + '?X-Amz-Signature=x&name=' + encodeURIComponent(b.target.split('/').pop()) });
     }
     if (q.a === 'copy' && m === 'POST') {
       const b = JSON.parse(req.postData() || '{}');
@@ -132,6 +136,12 @@ async function route(r) {
       return json(200, { results });
     }
     return json(400, { error: 'bad' });
+  }
+  if (u.host === 'storage.yandexcloud.net') {
+    const key = u.pathname.split('/').slice(2).join('/');
+    if (!CLOUD.has(key) || !q['X-Amz-Signature']) return r.fulfill({ status: 403, body: 'AccessDenied' });
+    DOWNLOADS.push(CLOUD.get(key));
+    return r.fulfill({ status: 200, headers: { 'content-type': 'application/zip', 'content-disposition': 'attachment; filename="x.zip"' }, body: 'PK' });
   }
   if (u.host === 'uploader1.disk.yandex.net') { FILES.set(q.p, req.postDataBuffer()); return r.fulfill({ status: 201, headers: CORS, body: '' }); }
   return r.continue();

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Выкладка прослойки Content Pulse в Yandex Cloud Functions.
 
-Запуск:  python3 proxy/deploy.py <authorized_key.json> <folder_id>
+Запуск:  python3 proxy/deploy.py <authorized_key.json> <folder_id> [s3.json]
+
+s3.json (не в репозитории): {"S3_KEY_ID", "S3_SECRET", "S3_BUCKET"} — бакет для
+архивов выгрузки; передаётся функции переменными окружения.
 
 Что делает:
   1. По авторизованному ключу сервисного аккаунта получает IAM-токен.
@@ -65,6 +68,7 @@ def wait(op, token):
 
 def main():
     key_path, folder = sys.argv[1], sys.argv[2]
+    env = json.load(open(sys.argv[3])) if len(sys.argv) > 3 else {}
     tok = iam_token(key_path)
 
     found = call('GET', FN_API + '/functions?folderId=%s&filter=name="%s"' % (folder, FN_NAME), token=tok)
@@ -84,6 +88,7 @@ def main():
         'functionId': fn['id'], 'runtime': 'nodejs18', 'entrypoint': 'index.handler',
         'resources': {'memory': str(1024 * 1024 * 1024)}, 'executionTimeout': '600s',
         'content': base64.b64encode(buf.getvalue()).decode(),
+        'environment': env,
     }, token=tok)
     ver = wait(op, tok)
     print('version', ver.get('id'))
