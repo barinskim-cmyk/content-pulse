@@ -28,6 +28,8 @@ const FILES = new Map([
   ['disk:/Архив/LM-1043/part2/c.jpg', Buffer.from('C'.repeat(300))],
 ]);
 const log = [];
+/* режим «превью заблокировано»: файлы — настоящие картинки, их будут уменьшать в браузере */
+if (process.env.BLOCK_PREVIEW) for (const k of [...FILES.keys()]) FILES.set(k, png(60, 40));
 const md5 = (b) => require('crypto').createHash('md5').update(b).digest('hex');
 const meta = (p) => {
   const name = p.split('/').pop();
@@ -69,6 +71,7 @@ async function route(r) {
     return json(400, { message: 'bad ' + u.pathname });
   }
   if (u.host === 'downloader.disk.yandex.ru') {
+    if (u.pathname.startsWith('/preview') && process.env.BLOCK_PREVIEW) return r.abort('failed');
     if (u.pathname.startsWith('/preview')) return r.fulfill({ status: 200, headers: { ...CORS, 'content-type': 'image/png' }, body: png(30, 20) });
     return r.fulfill({ status: 200, headers: { ...CORS, 'content-type': 'application/octet-stream' }, body: FILES.get(q.p) });
   }
@@ -139,7 +142,7 @@ async function route(r) {
   check('копии из Ретушь не попали в галерею', await page.evaluate(() => App.photos.every(p => !/Ретушь/.test(p.disk || ''))));
 
   /* новая часть съёмки */
-  FILES.set('disk:/Архив/LM-1043/part2/d.jpg', Buffer.from('D'.repeat(50)));
+  FILES.set('disk:/Архив/LM-1043/part2/d.jpg', process.env.BLOCK_PREVIEW ? png(60, 40) : Buffer.from('D'.repeat(50)));
   await page.evaluate(() => { document.getElementById('cpMenuRefresh').click(); });
   await page.waitForFunction(() => App.photos.length === 4, null, { timeout: 8000 });
   check('обновить съёмку: подтянута новая часть', true);
@@ -180,7 +183,7 @@ async function route(r) {
     }
     return Object.keys(files).map(k => k + ':' + files[k]).sort();
   });
-  check('скачан отбор по карточкам: папка карточки, порядок, размеры', dl.some(x => /LM-1043 — отбор\/01 Лук 1.*\/01_a\.jpg:100$/.test(x)), dl.join(' | '));
+  check('скачан отбор по карточкам: папка карточки, порядок, размеры', dl.some(x => /LM-1043 — отбор\/01 Лук 1.*\/01_a\.jpg:\d+$/.test(x)), dl.join(' | '));
 
   check('без ошибок JS на странице', errors.length === 0, errors.join(' | '));
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-shoot.png') });

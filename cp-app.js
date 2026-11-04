@@ -42,6 +42,7 @@ var CP = {
   pollTimer: null,
   shoots: [],
   previews: {},        /* disk path -> ссылка превью из последнего обхода */
+  previewMode: '',     /* '' | 'preview' | 'download' — как получаем картинки */
   files: [],           /* последний обход папки съёмки на Диске */
   editSeq: 0           /* счётчик правок: сохранение снимает dirty, только если новых не было */
 };
@@ -271,6 +272,21 @@ function cpLoadShoots() {
   });
 }
 
+/**
+ * Путь к архиву в любом виде -> disk:/A/B.
+ * Понимает: disk:/A/B, disk/A/B, /A/B, A/B и ссылку из браузера
+ * https://disk.yandex.ru/client/disk/A/B (с %-кодировкой).
+ */
+function cpNormArchive(raw) {
+  var v = String(raw || '').trim();
+  if (!v) return '';
+  var m = /\/client\/disk\/?(.*)$/.exec(v);
+  if (m) v = m[1].split(/[?#]/)[0];
+  try { v = decodeURIComponent(v); } catch (e) { }
+  v = v.replace(/^disk:/i, '').replace(/^\/+/, '').replace(/^disk\//i, '').replace(/\/+$/, '');
+  return 'disk:/' + v;
+}
+
 function cpFmtDate(iso) {
   if (!iso) return '';
   var d = new Date(iso);
@@ -300,9 +316,9 @@ document.getElementById('cpShelfList').addEventListener('click', function (e) {
 document.getElementById('cpShelfSearch').oninput = cpRenderShoots;
 document.getElementById('cpShelfRefresh').onclick = cpLoadShoots;
 document.getElementById('cpArchiveApply').onclick = function () {
-  var v = document.getElementById('cpArchiveInput').value.trim();
+  var v = cpNormArchive(document.getElementById('cpArchiveInput').value);
   if (!v) return;
-  if (v.indexOf('disk:') !== 0) v = 'disk:/' + v.replace(/^\/+/, '');
+  document.getElementById('cpArchiveInput').value = v;
   CP.archive = v;
   cpSet('cp_archive', v);
   cpLoadShoots();
@@ -433,28 +449,70 @@ function cpQueueThumb(p) {
   cpPumpThumbs();
 }
 
+/* Превью: сначала превью Яндекса; если браузер его не получил (CORS, сеть),
+   запасной путь — скачать сам JPEG и уменьшить в браузере. Режим запоминается,
+   чтобы не долбить превью, если оно не работает в принципе. */
+var CP_THUMB_SIDE = 900;
+
+function cpBlobToThumb(blob, shrink) {
+  if (!shrink) {
+    var u = URL.createObjectURL(blob);
+    return new Promise(function (res) {
+      var img = new Image();
+      img.onload = function () { res({ url: u, w: img.naturalWidth, h: img.naturalHeight }); };
+      img.onerror = function () { res({ url: u, w: 0, h: 0 }); };
+      img.src = u;
+    });
+  }
+  return createImageBitmap(blob).then(function (bmp) {
+    var k = Math.min(1, CP_THUMB_SIDE / Math.max(bmp.width, bmp.height));
+    var cnv = document.createElement('canvas');
+    cnv.width = Math.round(bmp.width * k); cnv.height = Math.round(bmp.height * k);
+    cnv.getContext('2d').drawImage(bmp, 0, 0, cnv.width, cnv.height);
+    var w = bmp.width, h = bmp.height;
+    if (bmp.close) bmp.close();
+    return new Promise(function (res) {
+      cnv.toBlob(function (b) { res({ url: URL.createObjectURL(b), w: w, h: h }); }, 'image/jpeg', 0.85);
+    });
+  });
+}
+
+function cpLoadThumb(p) {
+  if (CP.previewMode !== 'download' && p.preview) {
+    return CPDisk.previewBlob(p.preview).then(function (blob) {
+      CP.previewMode = 'preview';
+      return cpBlobToThumb(blob, false);
+    }, function (e) {
+      if (e && e.status === 401) throw e;
+      if (CP.previewMode !== 'preview') {
+        CP.previewMode = 'download';
+        if (window.console) console.warn('[CP] превью Яндекса недоступно из браузера, беру сами файлы', e && (e.body || e.message));
+      }
+      return CPDisk.downloadBlob(p.disk, p.size).then(function (b) { return cpBlobToThumb(b, true); });
+    });
+  }
+  return CPDisk.downloadBlob(p.disk, p.size).then(function (b) { return cpBlobToThumb(b, true); });
+}
+
 function cpPumpThumbs() {
-  while (CP.loadingThumbs < CP_CONFIG.previewParallel && CP.queue.length) {
+  var limit = CP.previewMode === 'download' ? CP_CONFIG.downloadParallel : CP_CONFIG.previewParallel;
+  while (CP.loadingThumbs < limit && CP.queue.length) {
     (function (p) {
       CP.loadingThumbs++;
-      CPDisk.previewBlob(p.preview).then(function (blob) {
-        var url = URL.createObjectURL(blob);
-        return new Promise(function (res) {
-          var img = new Image();
-          img.onload = function () { res({ url: url, w: img.naturalWidth, h: img.naturalHeight }); };
-          img.onerror = function () { res({ url: url, w: 0, h: 0 }); };
-          img.src = url;
-        });
-      }).then(function (t) {
+      p._thumbState = 'loading';
+      cpLoadThumb(p).then(function (t) {
         CP.thumbs[p.disk] = t;
         /* фото могло быть пересоздано при применении чужого отбора */
         App.photos.forEach(function (q) {
-          if (q.disk === p.disk) { q.dataUrl = t.url; q.w = t.w; q.h = t.h; }
+          if (q.disk === p.disk) { q.dataUrl = t.url; q.w = t.w; q.h = t.h; q._thumbState = 'ok'; }
         });
         cpRenderSoon();
       }).catch(function (e) {
         p._queued = false;
+        p._thumbState = 'failed';
+        if (window.console) console.error('[CP] превью не загрузилось', p.disk, e && (e.body || e.message));
         if (e && e.status === 401) cpHandleError(e);
+        cpRenderSoon();
       }).then(function () {
         CP.loadingThumbs--;
         cpPumpThumbs();
@@ -462,6 +520,17 @@ function cpPumpThumbs() {
     })(CP.queue.shift());
   }
 }
+
+/* Заглушка вместо «файл не найден» для кадров с Диска, пока превью грузится. */
+cbImgHtml = (function (orig) {
+  return function (photo) {
+    if (photo && photo.disk && !photo.dataUrl) {
+      var txt = photo.missing ? 'нет на Диске' : (photo._thumbState === 'failed' ? 'превью не загрузилось' : 'загрузка...');
+      return '<div class="cb-missing-box" style="color:#a3a09a" title="' + cbEsc(photo.disk) + '">' + txt + '</div>';
+    }
+    return orig(photo);
+  };
+})(cbImgHtml);
 
 /* ---------- данные проекта и сохранение на Диск ---------- */
 

@@ -58,6 +58,7 @@ var CPDisk = (function () {
   function req(url, opts) {
     opts = opts || {};
     var attempt = 0;
+    var maxRetries = opts.retries === undefined ? MAX_RETRIES : opts.retries;
     function run() {
       var headers = {};
       if (opts.auth !== false && token) headers['Authorization'] = 'OAuth ' + token;
@@ -75,7 +76,7 @@ var CPDisk = (function () {
             });
           }
           return resp.text().then(function (body) {
-            if (RETRY[resp.status] && attempt < MAX_RETRIES) {
+            if (RETRY[resp.status] && attempt < maxRetries) {
               var wait = backoff(attempt++, resp.headers.get('Retry-After'));
               return sleep(wait).then(run);
             }
@@ -83,7 +84,7 @@ var CPDisk = (function () {
           });
         }, function (netErr) {
           /* сеть оборвалась или CORS — повторяем, потом сдаёмся */
-          if (attempt < MAX_RETRIES) return sleep(backoff(attempt++)).then(run);
+          if (attempt < maxRetries) return sleep(backoff(attempt++)).then(run);
           throw new DiskError(0, String(netErr && netErr.message || netErr), url);
         });
     }
@@ -150,7 +151,8 @@ var CPDisk = (function () {
   }
 
   /** Превью приватного файла: нужна авторизация. */
-  function previewBlob(previewUrl) { return req(previewUrl, { as: 'blob' }); }
+  /* сеть/CORS не повторяем долго: при отказе есть запасной путь через скачивание */
+  function previewBlob(previewUrl) { return req(previewUrl, { as: 'blob', retries: 1 }); }
 
   function downloadHref(path) {
     return api('/resources/download', { path: path }).then(function (d) { return d.href; });
