@@ -131,7 +131,7 @@ async function route(r) {
   await page.fill('#cpShelfSearch', '1043');
   check('поиск по коду', (await page.$$('.cp-shoot')).length === 1);
 
-  await page.click('.cp-shoot');
+  await page.dblclick('.cp-shoot');
   await page.waitForFunction(() => !document.getElementById('cpShelf').classList.contains('cp-open'));
   await page.waitForFunction(() => App.photos.filter(p => p.dataUrl).length === 3, null, { timeout: 8000 });
   check('съёмка: 3 JPEG включая часть в подпапке, превью загружены', true);
@@ -207,7 +207,7 @@ async function route(r) {
   await page.evaluate(() => { cpShowShelf(); });
   await page.waitForSelector('.cp-shoot');
   await page.fill('#cpShelfSearch', '1043');
-  await page.click('.cp-shoot');
+  await page.dblclick('.cp-shoot');
   await page.waitForFunction(() => !document.getElementById('cpShelf').classList.contains('cp-open') && App.cards.length === 1, null, { timeout: 8000 });
   check('повторное открытие: карточки и статусы на месте', await page.evaluate(() => !CP.readOnly && Object.keys(App.projectMeta.cp.status).length >= 1));
 
@@ -216,7 +216,7 @@ async function route(r) {
   await page.evaluate(() => { cpShowShelf(); });
   await page.waitForSelector('.cp-shoot');
   await page.fill('#cpShelfSearch', '1043');
-  await page.click('.cp-shoot');
+  await page.dblclick('.cp-shoot');
   await page.waitForFunction(() => !document.getElementById('cpShelf').classList.contains('cp-open'), null, { timeout: 20000 });
   const before = FILES.get('disk:/Архив/LM-1043/_contentpulse.json').toString();
   await page.evaluate(() => { cbMarkDirty(); cbAutosaveNow(); });
@@ -224,6 +224,48 @@ async function route(r) {
   check('отбор не прочитан: кадры открыты, режим без сохранения, файл на Диске не тронут',
     await page.evaluate(() => CP.readOnly && App.photos.length >= 4) && FILES.get('disk:/Архив/LM-1043/_contentpulse.json').toString() === before);
   delete process.env.FAIL_STATE_DL;
+
+  /* ---------- панель витрины ---------- */
+  await page.evaluate(() => { cpShowShelf(); });
+  await page.waitForSelector('.cp-shoot');
+  await page.fill('#cpShelfSearch', '1043');
+  await page.click('.cp-shoot');
+  await page.waitForSelector('#cpPanel.cp-open [data-cp-fold]', { timeout: 10000 });
+  check('клик выбирает съёмку, а не открывает: панель справа с папками',
+    await page.evaluate(() => document.getElementById('cpShelf').classList.contains('cp-open') && CP.sel && CP.sel.dirs.length === 1));
+  await page.click('[data-cp-p="mkdict"]');
+  await page.waitForSelector('#cpAssignTag', { timeout: 8000 });
+  check('словарь тегов создан в служебной папке', FILES.has('disk:/_ContentPulse/теги.txt'));
+  await page.check('[data-cp-fold="part2"]');
+  await page.selectOption('#cpAssignTag', 'Яна');
+  await page.click('[data-cp-p="assign"]');
+  await page.waitForFunction(() => CP.sel && CP.sel.data && CP.sel.data.meta.cp.folderTags.part2, null, { timeout: 8000 });
+  const st1 = JSON.parse(FILES.get('disk:/Архив/LM-1043/_contentpulse.json').toString());
+  check('тег папки записан в отбор на Диске', (st1.meta.cp.folderTags.part2 || []).includes('Яна'));
+  await page.selectOption('#cpFTag', 'Яна');
+  check('фильтр по тегу папки: только её кадры (наследование)', await page.evaluate(() => cpFiltered(CP.sel).length === 2 && cpFiltered(CP.sel).every(x => x.dir === 'part2')));
+  await page.uncheck('[data-cp-fold="part2"]');
+  await page.selectOption('#cpFTag', '');
+  await page.selectOption('#cpFStatus', 'retouch');
+  check('фильтр по статусу «Ретушь»', await page.evaluate(() => cpFiltered(CP.sel).length === 2));
+  await page.click('[data-cp-p="download"]');
+  await page.waitForFunction(() => CP.sel && CP.sel.data && Object.keys(CP.sel.data.meta.cp.downloads).length === 2, null, { timeout: 10000 });
+  const ex1 = [...FILES.keys()].filter(k => k.startsWith('disk:/_ContentPulse/выгрузки/'));
+  check('выгрузка: <код>_Ретушь_1, папка карточки, исходные имена файлов', ex1.some(k => /выгрузки\/LM-1043_Ретушь_1\/01 Лук 1[^/]*\/a\.jpg$/.test(k)), ex1.join(' | '));
+  check('архив выгрузки скачивается обычной загрузкой', DOWNLOADS.some(p => /выгрузки\/LM-1043_Ретушь_1$/.test(p)));
+  check('после скачивания — отметка «скачано», статус не поменялся', await page.evaluate(() => {
+    const m = CP.sel.data.meta.cp; return Object.values(m.downloads).every(d => d.n === 1) && Object.values(m.status).every(s => s.s === 'retouch'); }));
+  await page.selectOption('#cpFDl', 'no');
+  check('фильтр «не скачано» исключает скачанное', await page.evaluate(() => cpFiltered(CP.sel).length === 0));
+  await page.selectOption('#cpFDl', '');
+  await page.click('[data-cp-p="download"]');
+  await page.waitForFunction(() => Object.values(CP.sel.data.meta.cp.downloads).every(d => d.n === 2), null, { timeout: 10000 });
+  check('повторное скачивание разрешено: _2 и счётчик ×2', [...FILES.keys()].some(k => /выгрузки\/LM-1043_Ретушь_2\//.test(k)));
+  await page.selectOption('#cpFStatus', '');
+  await page.check('[data-cp-fold="part2"]');
+  await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-panel.png') });
+  await page.uncheck('[data-cp-fold="part2"]');
+  check('служебная папка не видна на витрине', await page.evaluate(() => CP.shoots.every(s => s.name.charAt(0) !== '_')));
 
   check('без ошибок JS на странице', errors.length === 0, errors.join(' | '));
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-shoot.png') });

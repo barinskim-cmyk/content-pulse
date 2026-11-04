@@ -20,6 +20,8 @@ var CP_CONFIG = {
   /* прослойка в Yandex Cloud (proxy/index.js): превью, файл отбора, копирование */
   proxy: 'https://functions.yandexcloud.net/d4ehdtuc6j9c22657ru1',
   defaultArchive: 'disk:/Архив',
+  /* служебная папка Content Pulse на Диске клиента: словарь тегов, настройки, выгрузки */
+  serviceDir: 'disk:/_ContentPulse',
   previewSize: 'XL',
   previewParallel: 6,
   downloadParallel: 3,
@@ -43,6 +45,7 @@ var CP = {
   loadingThumbs: 0,
   pollTimer: null,
   shoots: [],
+  sel: null,           /* выбранная на витрине съёмка (cp-shelf.js) */
   previews: {},        /* disk path -> ссылка превью из последнего обхода */
   folder: '',          /* фильтр галереи по папке съёмки ('' = все, '/' = только корень) */
   previewMode: '',     /* '' | 'preview' | 'download' — как получаем картинки */
@@ -81,6 +84,7 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
     + '.cp-link{background:none;border:none;color:#a3a09a;text-decoration:underline;padding:4px;font-size:11px}'
     + '.cp-badge{position:absolute;left:4px;bottom:4px;background:#C9956B;color:#131313;font:600 9px/1 "IBM Plex Mono",monospace;letter-spacing:.06em;padding:3px 5px;border-radius:2px;pointer-events:none;z-index:2}'
     + '.cp-badge.cp-reshoot{background:#d9534f;color:#fff}.cp-badge.cp-approval{background:#e8d27a}'
+    + '.cp-badge.cp-dl{left:auto;right:4px;top:4px;bottom:auto;background:#3d6b52;color:#fff}'
     + '.cp-act{position:absolute;right:4px;bottom:4px;display:none;padding:2px 7px;font-size:11px;z-index:3;background:#1d1d1bdd}'
     + '.cb-slot.cb-filled:hover .cp-act,.cb-cont-item:hover .cp-act,.cb-thumb:hover .cp-act{display:block}'
     + '.cb-thumb{position:relative}'
@@ -305,15 +309,22 @@ function cpRenderShoots() {
     return;
   }
   list.innerHTML = items.map(function (d) {
-    return '<button class="cp-shoot" data-path="' + cbEsc(d.path) + '" data-name="' + cbEsc(d.name) + '">'
+    return '<button class="cp-shoot' + (CP.sel && CP.sel.path === d.path ? ' cp-shoot-sel' : '') + '" data-path="' + cbEsc(d.path) + '" data-name="' + cbEsc(d.name) + '" data-mod="' + cbEsc(d.modified || '') + '">'
       + '<div class="cp-shoot-name">' + cbEsc(d.name) + '</div>'
       + '<div class="cp-shoot-meta">изменена ' + cpFmtDate(d.modified) + '</div></button>';
   }).join('');
 }
 
+/* клик — выбрать съёмку (панель справа), двойной клик — открыть отбор */
+document.getElementById('cpShelfList').addEventListener('dblclick', function (e) {
+  var b = e.target.closest('.cp-shoot');
+  if (!b) return;
+  cpOpenShoot(b.getAttribute('data-path'), b.getAttribute('data-name'));
+});
 document.getElementById('cpShelfList').addEventListener('click', function (e) {
   var b = e.target.closest('.cp-shoot');
   if (!b) return;
+  if (typeof cpSelectShoot === 'function') { cpSelectShoot(b.getAttribute('data-path'), b.getAttribute('data-name'), b.getAttribute('data-mod')); return; }
   cpOpenShoot(b.getAttribute('data-path'), b.getAttribute('data-name'));
 });
 document.getElementById('cpShelfSearch').oninput = cpRenderShoots;
@@ -341,6 +352,8 @@ function cpMeta() {
   if (!App.projectMeta) App.projectMeta = {};
   if (!App.projectMeta.cp) App.projectMeta.cp = { status: {}, cardStatus: {}, events: [] };
   var m = App.projectMeta.cp;
+  if (!m.downloads) m.downloads = {};   /* pid -> {n, first:{by,ts,export}, last:{...}} */
+  if (!m.folderTags) m.folderTags = {}; /* путь папки внутри съёмки ('' = вся) -> [теги] */
   if (!m.status) m.status = {};
   if (!m.cardStatus) m.cardStatus = {};
   if (!m.events) m.events = [];
@@ -755,10 +768,17 @@ function cpUpdateStatusLine() {
 
 /* бейджи статусов и кнопка действий — поверх отрисовки Cardboard */
 function cpBadgeHTML(pid) {
-  var st = CP.shoot && cpMeta().status[pid];
-  if (!st || !CP_STATUS[st.s]) return '';
-  return '<span class="cp-badge cp-' + st.s + '" title="' + cbEsc(CP_STATUS[st.s].label + ' · ' + st.by + ' · ' + cpFmtDate(st.ts)) + '">'
-    + CP_STATUS[st.s].short + '</span>';
+  if (!CP.shoot) return '';
+  var m = cpMeta(), st = m.status[pid], dl = m.downloads[pid], html = '';
+  if (st && CP_STATUS[st.s]) {
+    html += '<span class="cp-badge cp-' + st.s + '" title="' + cbEsc(CP_STATUS[st.s].label + ' · ' + st.by + ' · ' + cpFmtDate(st.ts)) + '">'
+      + CP_STATUS[st.s].short + '</span>';
+  }
+  if (dl && dl.n) {
+    html += '<span class="cp-badge cp-dl" title="' + cbEsc('Скачано ' + dl.n + ' раз · последний: ' + dl.last.by + ' · ' + cpFmtDate(dl.last.ts) + ' · ' + dl.last.export) + '">'
+      + 'СКАЧАНО' + (dl.n > 1 ? ' ×' + dl.n : '') + '</span>';
+  }
+  return html;
 }
 
 function cpDecorate(rootId) {

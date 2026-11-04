@@ -131,7 +131,8 @@ var CPDisk = (function () {
   function walkPhotos(root, previewSize) {
     var out = [];
     function walk(path) {
-      return listDir(path, previewSize || 'XL').then(function (items) {
+      /* previewSize === false — без ссылок на превью (быстрее, для подсчётов) */
+      return listDir(path, previewSize === false ? null : (previewSize || 'XL')).then(function (items) {
         var dirs = [];
         items.forEach(function (r) {
           if (r.type === 'dir') {
