@@ -128,20 +128,25 @@ function cpReadServiceFile(name, force) {
   });
 }
 
+/** Разбор словаря: [{tag, group}]. «Y  # Юля» — тег Y, пояснение после #. */
+function cpParseDict(txt) {
+  var out = [], group = '';
+  String(txt || '').split(/\r?\n/).forEach(function (line) {
+    var l = line.replace(/\s+#.*$/, '').trim();
+    if (!l || l.charAt(0) === '#') return;
+    var g = /^\[(.+)\]$/.exec(l);
+    if (g) { group = g[1].trim(); return; }
+    if (!out.some(function (x) { return x.tag.toLowerCase() === l.toLowerCase(); })) out.push({ tag: l, group: group });
+  });
+  return out;
+}
+
 /** Словарь: [{tag, group}]. null — файла нет. Кэшируется до перезагрузки витрины. */
 function cpLoadDict(force) {
   if (CP.dict !== undefined && CP.dict !== null && !force) return Promise.resolve(CP.dict);
   return cpReadServiceFile(CP_TAGS_FILE, force).then(function (txt) {
-    var out = [], group = '';
-    txt.split(/\r?\n/).forEach(function (line) {
-      var l = line.replace(/\s+#.*$/, '').trim();   /* «Y  # Юля» — тег Y, пояснение после # */
-      if (!l || l.charAt(0) === '#') return;
-      var g = /^\[(.+)\]$/.exec(l);
-      if (g) { group = g[1].trim(); return; }
-      if (!out.some(function (x) { return x.tag.toLowerCase() === l.toLowerCase(); })) out.push({ tag: l, group: group });
-    });
-    CP.dict = out;
-    return out;
+    CP.dict = cpParseDict(txt);
+    return CP.dict;
   }, function (e) {
     if (e && e.status === 404) { CP.dict = null; return null; }
     throw e;
@@ -154,8 +159,9 @@ function cpCreateDict() {
     return CPDisk.uploadBlob(cpServicePath(CP_TAGS_FILE), new Blob([CP_DICT_TEMPLATE], { type: 'text/plain' }), false);
   }).then(function () {
     cbBusyHide();
-    cbToast('Словарь создан: ' + cpServicePath(CP_TAGS_FILE).replace(/^disk:/, '') + ' — впишите туда свои теги');
-    return cpLoadDict(true);
+    cbToast('Словарь создан: ' + cpServicePath(CP_TAGS_FILE).replace(/^disk:/, '') + ' — свои теги впишите в «Файлы настроек»');
+    _cpSvcList = null;
+    CP.dict = cpParseDict(CP_DICT_TEMPLATE);   /* сразу, не ждём, пока Диск покажет файл в списке */
   }).then(cpRenderPanel).catch(function (e) { cpHandleError(e, 'Не удалось создать словарь'); });
 }
 

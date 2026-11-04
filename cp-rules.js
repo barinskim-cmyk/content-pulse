@@ -134,6 +134,15 @@ function cpFacets(type, rel) {
     var m = type.codeRe.exec(out['артикул']);
     out.code = m ? m[1] : '';
   }
+  /* Лишний уровень папок (часть, день) сдвигает роли — тогда артикул ищем
+     по коду: ближайшая к кадру папка, чьё имя начинается с кода. Папки
+     луков («1», «2») под код не подходят. */
+  if (!out.code && type.roles.indexOf('артикул') !== -1) {
+    for (var i = dirs.length - 1; i >= 0; i--) {
+      var mm = type.codeRe.exec(dirs[i]);
+      if (mm) { out['артикул'] = dirs[i]; out.code = mm[1]; break; }
+    }
+  }
   return out;
 }
 
@@ -156,15 +165,24 @@ function cpAutoArticles() {
   var type = cpShootType(CP.shoot.name);
   if (!type || !type.cardArticle) return false;
   var changed = false;
+  CP.artLogged = CP.artLogged || {};
   App.cards.forEach(function (card) {
-    var codes = [];
+    var codes = [], rels = [];
     cpCardPids(card).forEach(function (pid) {
       var p = cbPhotoById(pid);
-      var f = cpFacets(type, cpRelPath(p));
+      var rel = cpRelPath(p);
+      var f = cpFacets(type, rel);
+      rels.push(rel + ' → ' + (f.code || 'нет'));
       if (f.code && codes.indexOf(f.code) === -1) codes.push(f.code);
     });
     var auto = codes.join(', ');
     var prev = card.cpArticle || '';
+    /* для разбора по консоли: какие пути и что из них вышло (один раз на состав) */
+    var sig = card.id + '|' + rels.join(';');
+    if (rels.length && !CP.artLogged[sig] && window.console) {
+      CP.artLogged[sig] = true;
+      console.info('[CP] артикул карточки «' + card.title + '» (' + type.name + '): ' + rels.join(' | '));
+    }
     if (auto === prev) return;
     /* заголовок по умолчанию («Карточка 3»), пустой или поставленный нами — заменяем */
     if (prev && card.title === prev) card.title = auto;
@@ -207,9 +225,9 @@ function cpDecorateArticles() {
 /* ---------- редактор служебных файлов ---------- */
 
 var CP_SERVICE_FILES = [
-  { name: 'теги.txt', label: 'Словарь тегов', template: function () { return CP_DICT_TEMPLATE; } },
+  { name: CP_TAGS_FILE, label: 'Словарь тегов', template: function () { return CP_DICT_TEMPLATE; } },
   { name: CP_RULES_FILE, label: 'Структура съёмок', template: function () { return CP_RULES_TEMPLATE; } },
-  { name: 'настройки.txt', label: 'Настройки', template: function () { return CP_SETTINGS_TEMPLATE; } }
+  { name: CP_SETTINGS_FILE, label: 'Настройки', template: function () { return CP_SETTINGS_TEMPLATE; } }
 ];
 
 (function cpRulesCss() {
@@ -305,8 +323,21 @@ function cpFilesSave() {
   CPDisk.ensureDir(CP_CONFIG.serviceDir).then(function () {
     return CPDisk.uploadBlob(cpServicePath(f.name), new Blob([text], { type: 'text/plain;charset=utf-8' }), true);
   }).then(function () {
+    /* Применяем сохранённый текст сразу: Диск показывает новый файл в списке
+       папки не мгновенно, перечитывание могло вернуть «файла нет». */
     _cpSvcList = null;
-    return Promise.all([cpLoadDict(true).catch(function () { }), cpLoadRules(true), cpEnsureSettings(true)]);
+    if (f.name === CP_RULES_FILE) {
+      CP.rulesText = text;
+      CP.rules = cpParseRules(text);
+      _cpRulesP = Promise.resolve(CP.rules);
+    } else if (f.name === CP_TAGS_FILE) {
+      CP.dict = cpParseDict(text);
+    } else if (f.name === CP_SETTINGS_FILE) {
+      CP.settingsText = text;
+      CP.settings = cpParseSettings(text);
+      _cpSettingsP = Promise.resolve();
+      cpSettingsToUi();
+    }
   }).then(function () {
     note.textContent = 'Сохранено: ' + f.name;
     cbToast('Сохранено на Диск: ' + f.name);

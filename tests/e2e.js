@@ -39,6 +39,7 @@ const log = [];
 const DOWNLOADS = [];
 const DOWNLOADS_REFERER = [];
 const ZIPS = new Map();
+const FRESH = new Map();   /* как у Яндекса: новый файл появляется в списке папки не сразу */
 const CLOUD = new Map();   /* ключ в бакете -> путь архива */   /* путь .zip на Диске -> имена внутри архива */
 const PREVIEW_CALLS = { single: 0, batch: 0 };
 /* режим «превью заблокировано»: файлы — настоящие картинки, их будут уменьшать в браузере */
@@ -67,7 +68,7 @@ async function route(r) {
     if (u.pathname === '/v1/disk' || u.pathname === '/v1/disk/') return json(200, { user: { login: 'masha', display_name: 'Маша' } });
     if (u.pathname === '/v1/disk/resources' && m === 'GET') {
       if (DIRS.has(p)) {
-        const kids = [...DIRS, ...FILES.keys()].filter(x => x !== p && x.slice(0, x.lastIndexOf('/')) === p).sort();
+        const kids = [...DIRS, ...FILES.keys()].filter(x => x !== p && x.slice(0, x.lastIndexOf('/')) === p && !(FRESH.has(x) && Date.now() - FRESH.get(x) < 3000)).sort();
         const off = +q.offset || 0, lim = +q.limit || 20;
         return json(200, { ...meta(p), _embedded: { items: kids.slice(off, off + lim).map(meta), total: kids.length } });
       }
@@ -151,7 +152,7 @@ async function route(r) {
     DOWNLOADS.push(CLOUD.get(key));
     return r.fulfill({ status: 200, headers: { 'content-type': 'application/zip', 'content-disposition': 'attachment; filename="x.zip"' }, body: 'PK' });
   }
-  if (u.host === 'uploader1.disk.yandex.net') { FILES.set(q.p, req.postDataBuffer()); return r.fulfill({ status: 201, headers: CORS, body: '' }); }
+  if (u.host === 'uploader1.disk.yandex.net') { if (!FILES.has(q.p)) FRESH.set(q.p, Date.now()); FILES.set(q.p, req.postDataBuffer()); return r.fulfill({ status: 201, headers: CORS, body: '' }); }
   return r.continue();
 }
 
@@ -397,6 +398,10 @@ async function route(r) {
     if (c.mode === 'auto') c.pids = c.pids.filter(x => x !== m2.id); else c.slots.forEach(x => { if (x.pid === m2.id) x.pid = null; });
     cbMarkDirty(); cbRenderCards();
   });
+  check('лишний уровень папок не мешает найти артикул по коду', await page.evaluate(() => {
+    var t = cpShootType(CP.shoot.name);
+    return cpFacets(t, 'часть 1/2/74597_модель/x.jpg').code === '74597' && !cpFacets(t, '2/IMG_1.jpg').code;
+  }));
   check('ручной заголовок карточки не перезаписывается', await page.evaluate(() => App.cards[App.cards.length - 1].title === 'Мой заголовок'));
   await page.waitForFunction(() => !App.dirty, null, { timeout: 8000 });
   const stM = JSON.parse(FILES.get('disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/_contentpulse.json').toString());
