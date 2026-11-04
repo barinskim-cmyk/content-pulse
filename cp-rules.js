@@ -10,7 +10,8 @@
      - как взять код артикула из названия папки;
      - ставить ли карточке артикул по кадру из папки артикула;
      - как раскладывать выгрузку: по карточкам или как в папках.
-   Нет файла или тип не распознан — всё работает как раньше.
+   Нет файла — кладём на Диск образец и работаем по нему; тип не
+   распознан — всё работает как раньше.
 
    Формат (строки «название: значение», # — комментарий):
      [Модельная]
@@ -100,11 +101,22 @@ function cpLoadRules(force) {
     CP.rulesText = t;
     CP.rules = cpParseRules(t);
   }, function (e) {
+    if (e && e.status === 404) {
+      /* Файла нет — кладём образец на Диск и сразу работаем по нему.
+         Дальше правила меняются только в файле (кнопка «Файлы настроек»). */
+      CP.rulesText = CP_RULES_TEMPLATE;
+      CP.rules = cpParseRules(CP_RULES_TEMPLATE);
+      CP.rulesCreated = true;
+      return CPDisk.ensureDir(CP_CONFIG.serviceDir).then(function () {
+        return CPDisk.uploadBlob(cpServicePath(CP_RULES_FILE), new Blob([CP_RULES_TEMPLATE], { type: 'text/plain;charset=utf-8' }), false);
+      }).catch(function (er) { if (window.console) console.warn('[CP] образец структуры не записался', er && (er.body || er.message)); });
+    }
     CP.rulesText = '';
     CP.rules = [];
-    if (!(e && e.status === 404)) { _cpRulesP = null; if (window.console) console.warn('[CP] структура не прочиталась', e && (e.body || e.message)); }
+    _cpRulesP = null;
+    if (window.console) console.warn('[CP] структура не прочиталась', e && (e.body || e.message));
   }).then(function () {
-    if (CP.shoot && typeof cbRenderCards === 'function') cbRenderCards();
+    if (CP.shoot && typeof cbRenderCards === 'function') { cbRenderCards(); cpUpdateStatusLine(); }
     return CP.rules;
   });
   return _cpRulesP;
@@ -155,10 +167,9 @@ function cpRelPath(p) {
 /* ---------- артикул карточки ---------- */
 
 /**
- * Артикул карточки по кадрам из папок артикулов. Заголовок карточки
- * («Название / артикул») заполняется сам, если он пуст или был поставлен
- * автоматически; ручной заголовок не трогаем. Возвращает true, если что-то
- * поменялось.
+ * Артикул карточки по кадрам из папок артикулов: как только в карточке
+ * появляется такой кадр, её заголовок («Название / артикул») становится
+ * кодом артикула. Возвращает true, если что-то поменялось.
  */
 function cpAutoArticles() {
   if (!CP.shoot) return false;
@@ -183,10 +194,19 @@ function cpAutoArticles() {
       CP.artLogged[sig] = true;
       console.info('[CP] артикул карточки «' + card.title + '» (' + type.name + '): ' + rels.join(' | '));
     }
+    /* карточки из прошлой версии: артикул уже записан, а заголовок не ставился */
+    if (auto && auto === prev && !card.cpArtTitled) {
+      card.title = auto;
+      card.cpArtTitled = true;
+      changed = true;
+      return;
+    }
     if (auto === prev) return;
-    /* заголовок по умолчанию («Карточка 3»), пустой или поставленный нами — заменяем */
-    if (prev && card.title === prev) card.title = auto;
-    else if (auto && (!card.title || /^Карточка\s*\d*$/i.test(card.title))) card.title = auto;
+    /* В карточке появился кадр из папки артикула (или состав артикулов
+       поменялся) — карточка называется по артикулу. Пока состав тот же,
+       заголовок не трогаем: его можно поправить руками. */
+    if (auto) { card.title = auto; card.cpArtTitled = true; }
+    else if (card.title === prev) card.title = '';
     card.cpArticle = auto;
     changed = true;
   });

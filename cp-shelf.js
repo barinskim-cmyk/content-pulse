@@ -325,6 +325,30 @@ function cpPhotoIndex(sel) {
   return idx;
 }
 
+/**
+ * Видео и прочие не-JPEG файлы под фильтры панели (галка «Все файлы»).
+ * Действуют папки и теги папок; статус и «скачано» есть только у кадров —
+ * при этих фильтрах прочие файлы не берём.
+ */
+function cpFilteredOthers(sel) {
+  if (!sel || !sel.allFiles || !sel.allList || sel.status || sel.dl) return [];
+  var meta = cpSelMeta(sel.data || {});
+  var folders = Object.keys(sel.folders).filter(function (k) { return sel.folders[k]; });
+  return sel.allList.filter(function (f) { return !CPDisk.isPhoto(f.name); }).map(function (f) {
+    var rel = cpRelOf(sel.path, f.path);
+    var dir = rel.indexOf('/') === -1 ? '' : rel.slice(0, rel.lastIndexOf('/'));
+    var tags = {};
+    Object.keys(meta.folderTags).forEach(function (fp) {
+      if (fp === '' || dir === fp || dir.indexOf(fp + '/') === 0) (meta.folderTags[fp] || []).forEach(function (t) { tags[t] = true; });
+    });
+    return { file: f, rel: rel, dir: dir, tags: Object.keys(tags) };
+  }).filter(function (x) {
+    if (folders.length && !folders.some(function (f) { return x.dir === f || x.dir.indexOf(f + '/') === 0; })) return false;
+    if (sel.tag && x.tags.indexOf(sel.tag) === -1) return false;
+    return true;
+  });
+}
+
 /** Кадры, проходящие фильтры панели. */
 function cpFiltered(sel) {
   var idx = cpPhotoIndex(sel);
@@ -436,6 +460,11 @@ function cpRenderPanel() {
     + [['', 'Все'], ['no', 'Не скачано'], ['yes', 'Скачано']]
       .map(function (o) { return '<option value="' + o[0] + '"' + (sel.dl === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('')
     + '</select></div>';
+  body += '<div class="cp-row"><span>Файлы</span><select id="cpFAll">'
+    + '<option value=""' + (sel.allFiles ? '' : ' selected') + '>Только фото</option>'
+    + '<option value="all"' + (sel.allFiles ? ' selected' : '') + '>Все файлы (с видео)</option></select></div>';
+  if (sel.allFiles && !sel.allList) body += '<div class="cp-note">Считаю видео и прочие файлы...</div>';
+  else if (sel.allFiles && (sel.status || sel.dl)) body += '<div class="cp-note">Фильтры «Статус» и «Скачано» есть только у кадров — видео и прочие файлы с ними не скачиваются.</div>';
   if (sel.stateError) body += '<div class="cp-note cp-warn">Отбор съёмки не прочитался — статусы и карточки не учитываются.</div>';
   else if (!sel.data) body += '<div class="cp-note">Съёмку ещё не открывали в Content Pulse: карточек и статусов пока нет.</div>';
   body += '<div class="cp-note"><a href="#" data-cp-p="bench">Проверить скорость Диска</a> — замер на 3 кадрах этой съёмки, отчёт для разработки</div>';
@@ -443,13 +472,17 @@ function cpRenderPanel() {
   var items = cpFiltered(sel);
   var inCards = items.filter(function (x) { return x.cards.length; }).length;
   var again = items.filter(function (x) { return x.dl; }).length;
+  var others = cpFilteredOthers(sel);
+  var othersBytes = others.reduce(function (a, x) { return a + (x.file.size || 0); }, 0);
   var sum = 'Будет скачано: <b>' + items.length + '</b> из ' + Object.keys(idx).length
-    + (inCards ? ' · в карточках ' + inCards : '') + (again ? '<br><span class="cp-warn">уже скачивали: ' + again + '</span>' : '');
+    + (inCards ? ' · в карточках ' + inCards : '')
+    + (others.length ? '<br>и других файлов: <b>' + others.length + '</b> · ' + cpMb(othersBytes) : '')
+    + (again ? '<br><span class="cp-warn">уже скачивали: ' + again + '</span>' : '');
 
   panel.innerHTML = head + '<div class="cp-panel-body">' + body + '</div>'
     + '<div class="cp-panel-actions"><div class="cp-sum">' + sum + '</div>'
     + '<button data-cp-p="open">Открыть</button>'
-    + '<button class="cb-primary" data-cp-p="download"' + (items.length ? '' : ' disabled') + '>Скачать</button></div>';
+    + '<button class="cb-primary" data-cp-p="download"' + (items.length || others.length ? '' : ' disabled') + '>Скачать</button></div>';
 }
 
 /* ---------- изменения отбора с витрины (чтение-правка-запись) ---------- */
@@ -552,10 +585,21 @@ function cpShelfDownload() {
     used[key] = true;
     return { from: x.file.path, name: key, size: x.file.size };
   });
-  cbBusyShow('Готовлю архив: ' + items.length + ' кадр(ов)...', 0.02);
+  /* видео и прочие файлы (галка «Все файлы») — по исходным папкам */
+  var others = cpFilteredOthers(sel);
+  var tooBig = others.filter(function (x) { return x.file.size >= CP_ZIP_FILE_MAX; });
+  others.filter(function (x) { return x.file.size < CP_ZIP_FILE_MAX; }).forEach(function (x) {
+    if (used[x.rel]) return;
+    used[x.rel] = true;
+    entries.push({ from: x.file.path, name: x.rel, size: x.file.size });
+  });
+  if (tooBig.length) cbToast('Не входят в архив (больше 3,9 ГБ), скачайте с Диска отдельно: ' + tooBig.map(function (x) { return x.file.name; }).join(', '));
+  if (!entries.length) { cbToast('Нечего скачивать'); return; }
+  cbBusyShow('Готовлю архив: ' + entries.length + ' файл(ов)...', 0.02);
   cpExportName(sel).then(function (n) {
     name = n;
-    return cpZipExport(name, entries, items.length + ' кадр(ов). После скачивания кадры отмечаются как скачанные.');
+    return cpZipExport(name, entries, items.length + ' кадр(ов)' + (others.length ? ' и других файлов: ' + (entries.length - items.length) : '')
+      + '. После скачивания кадры отмечаются как скачанные.');
   }).then(function (r) {
     /* отметка «скачано» — статус не меняем */
     var stamp = { by: cpActor(), ts: new Date().toISOString(), export: name };
@@ -651,6 +695,16 @@ document.getElementById('cpPanel').addEventListener('change', function (e) {
   else if (t.id === 'cpFTag') sel.tag = t.value;
   else if (t.id === 'cpFStatus') sel.status = t.value;
   else if (t.id === 'cpFDl') sel.dl = t.value;
+  else if (t.id === 'cpFAll') {
+    sel.allFiles = !!t.value;
+    if (sel.allFiles && !sel.allList) {
+      cpWalkAll(sel.path).then(function (list) {
+        if (CP.sel !== sel) return;
+        sel.allList = list;
+        cpRenderPanel();
+      }, function (e) { cpHandleError(e, 'Не удалось прочитать файлы съёмки'); });
+    }
+  }
   else return;
   cpRenderPanel();
 });

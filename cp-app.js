@@ -177,7 +177,8 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
     + '<button id="cpMenuShelf">Витрина съёмок</button>'
     + '<button id="cpMenuRefresh">Обновить съёмку (новые части)</button>'
     + '<button id="cpMenuDlSel">Скачать отбор по карточкам...</button>'
-    + '<button id="cpMenuDlAll">Скачать всю съёмку...</button>'
+    + '<button id="cpMenuDlAll">Скачать всю съёмку: только фото</button>'
+    + '<button id="cpMenuDlAllV">Скачать всю съёмку: все файлы (с видео)</button>'
     + '<button id="cpMenuLog">Журнал действий</button>'
     + '<div class="cb-pop-sep"></div>';
   while (block.firstChild) file.insertBefore(block.firstChild, first);
@@ -512,6 +513,24 @@ function cpWalk(path, fresh) {
     throw e;
   });
   CP.walkCache[path] = entry;
+  return entry.promise;
+}
+
+/** Все файлы съёмки (с видео) — для выгрузки «Все файлы»; тот же кэш на 5 минут. */
+function cpWalkAll(path, fresh) {
+  var key = 'all:' + path;
+  var c = CP.walkCache[key];
+  if (!fresh && c && (c.pending || Date.now() - c.ts < CP_WALK_TTL)) return c.promise;
+  var entry = { pending: true, ts: 0 };
+  entry.promise = CPDisk.walkPhotos(path, false, 4, true).then(function (files) {
+    entry.pending = false;
+    entry.ts = Date.now();
+    return files;
+  }, function (e) {
+    if (CP.walkCache[key] === entry) delete CP.walkCache[key];
+    throw e;
+  });
+  CP.walkCache[key] = entry;
   return entry.promise;
 }
 
@@ -933,7 +952,9 @@ function cpUpdateStatusLine() {
   if (!CP.shoot) { el.textContent = ''; return; }
   var m = cpMeta(), n = { retouch: 0, reshoot: 0, approval: 0 };
   Object.keys(m.status).forEach(function (pid) { if (n[m.status[pid].s] !== undefined) n[m.status[pid].s]++; });
-  el.textContent = 'ретушь ' + n.retouch + ' · пересъём ' + n.reshoot + ' · согласование ' + n.approval;
+  var t = typeof cpShootType === 'function' ? cpShootType(CP.shoot.name) : null;
+  el.textContent = (t ? t.name + (t.cardArticle ? ', артикул карточки по папке' : '') + ' · ' : '')
+    + 'ретушь ' + n.retouch + ' · пересъём ' + n.reshoot + ' · согласование ' + n.approval;
 }
 
 /* бейджи статусов и кнопка действий — поверх отрисовки Cardboard */
@@ -1296,6 +1317,7 @@ var CP_EXPORTS = 'выгрузки';
 var CP_ZIP_PART_MS = 30000;              /* целимся в ~30 с на часть */
 var CP_ZIP_MIN = 40 * 1024 * 1024;
 var CP_ZIP_MAX = 1800 * 1024 * 1024;
+var CP_ZIP_FILE_MAX = 3.9 * 1024 * 1024 * 1024;   /* ZIP без ZIP64: файл больше не влезет */
 CP.zipTarget = 100 * 1024 * 1024;        /* первая часть; дальше — по замеру скорости */
 
 function cpExportsDir() { return CP_CONFIG.serviceDir.replace(/\/+$/, '') + '/' + CP_EXPORTS; }
@@ -1485,16 +1507,22 @@ function cpRelInShoot(disk) {
   return disk.indexOf(root) === 0 ? disk.slice(root.length) : disk.split('/').pop();
 }
 
-function cpDownloadAll() {
+function cpDownloadAll(withAll) {
   cbCloseAllPops();
   if (!CP.shoot) { cbToast('Сначала откройте съёмку'); return; }
   var shoot = CP.shoot;
   var files = (CP.files || []).slice();
-  if (!files.length) { cbToast('Кадры съёмки ещё не прочитаны — подождите или «Обновить съёмку»'); return; }
-  var entries = files.map(function (f) { return { from: f.path, name: cpRelInShoot(f.path), size: f.size }; });
-  cpNextExportName(CPDisk.safeName(shoot.name) + '_вся съёмка', cpMeta().events).then(function (name) {
-    return cpZipExport(name, entries, 'Вся съёмка: ' + entries.length + ' кадр(ов).').then(function (r) {
-      cpEvent('download_shoot', [], { count: r.files, export: name, parts: r.parts.length });
+  if (!files.length && !withAll) { cbToast('Кадры съёмки ещё не прочитаны — подождите или «Обновить съёмку»'); return; }
+  var list = withAll ? (cbBusyShow('Считаю все файлы съёмки...', 0.05), cpWalkAll(shoot.path)) : Promise.resolve(files);
+  list.then(function (all) {
+    var big = all.filter(function (f) { return f.size >= CP_ZIP_FILE_MAX; });
+    var entries = all.filter(function (f) { return f.size < CP_ZIP_FILE_MAX; })
+      .map(function (f) { return { from: f.path, name: cpRelInShoot(f.path), size: f.size }; });
+    if (big.length) cbToast('Не входят в архив (больше 3,9 ГБ), скачайте с Диска отдельно: ' + big.map(function (f) { return f.name; }).join(', '));
+    var photos = entries.filter(function (e) { return CPDisk.isPhoto(e.name); }).length;
+    return cpNextExportName(CPDisk.safeName(shoot.name) + '_вся съёмка', cpMeta().events).then(function (name) {
+      return cpZipExport(name, entries, 'Вся съёмка: ' + photos + ' кадр(ов)' + (entries.length > photos ? ' и других файлов: ' + (entries.length - photos) : '') + '.')
+        .then(function (r) { cpEvent('download_shoot', [], { count: r.files, export: name, parts: r.parts.length, all: withAll || undefined }); });
     });
   }).catch(function (e) { cpHandleError(e, 'Скачивание съёмки'); });
 }
@@ -1549,7 +1577,8 @@ function cpDownloadSelection() {
   }).catch(function (e) { cpHandleError(e, 'Скачивание отбора'); });
 }
 
-document.getElementById('cpMenuDlAll').onclick = cpDownloadAll;
+document.getElementById('cpMenuDlAll').onclick = function () { cpDownloadAll(false); };
+document.getElementById('cpMenuDlAllV').onclick = function () { cpDownloadAll(true); };
 document.getElementById('cpMenuDlSel').onclick = cpDownloadSelection;
 document.getElementById('cpMenuShelf').onclick = function () { cbCloseAllPops(); cpShowShelf(); };
 document.getElementById('cpMenuRefresh').onclick = function () {

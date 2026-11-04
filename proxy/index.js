@@ -318,6 +318,37 @@ async function readDiskFile(token, path) {
   return f.buf;
 }
 
+/* Крупные файлы (видео) не держим в памяти: читаем потоком дважды —
+   сначала считаем CRC (он нужен в заголовке до данных), потом пишем в архив. */
+const BIG_ENTRY = +process.env.ZIP_BIG_ENTRY || 48 * 1024 * 1024;
+
+async function diskHref(token, path) {
+  const link = await disk(token, 'GET', '/resources/download', { path });
+  if (link.status !== 200) throw new Error(path.split('/').pop() + ': ссылка не выдана (' + link.status + ' ' + (link.data.message || '') + ')');
+  return link.data.href;
+}
+
+async function streamDiskFile(token, path, onChunk) {
+  const href = await diskHref(token, path);
+  const r = await fetch(href, { redirect: 'follow' });
+  if (r.status !== 200) throw new Error(path.split('/').pop() + ': файл не отдан, HTTP ' + r.status);
+  let n = 0;
+  const reader = r.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const b = Buffer.from(value);
+    n += b.length;
+    await onChunk(b);
+  }
+  return n;
+}
+
+function crc32Update(c, buf) {
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+  return c;
+}
+
 /** PUT потоком с известной длиной. */
 function openUpload(href, length) {
   const https = require('https');
@@ -383,7 +414,8 @@ async function doZipInner(token, target, entries, store) {
   function pump() {
     while (next < items.length && pending.length < AHEAD) {
       const x = items[next++];
-      const p = readDiskFile(token, x.from);
+      /* крупные читаем потоком в свой черёд, а не заранее в память */
+      const p = x.size > BIG_ENTRY ? Promise.resolve(null) : readDiskFile(token, x.from);
       p.catch(() => { });
       pending.push(p);
     }
@@ -397,6 +429,21 @@ async function doZipInner(token, target, entries, store) {
       if (Date.now() - t0 > ZIP_BUDGET_MS) throw new Error('Яндекс отдаёт файлы слишком медленно: за ' + Math.round((Date.now() - t0) / 1000) + ' с прочитано ' + i + ' из ' + items.length + ' кадров');
       const buf = await pending.shift();
       pump();
+      if (buf === null) {
+        /* крупный файл: проход 1 — CRC, проход 2 — данные в архив */
+        let c = -1;
+        const n1 = await streamDiskFile(token, x.from, (b) => { c = crc32Update(c, b); });
+        if (n1 !== x.size) throw new Error(x.from.split('/').pop() + ': размер изменился (' + n1 + ' вместо ' + x.size + '), обновите съёмку');
+        const crc = (c ^ -1) >>> 0;
+        const lh = localHeader(x.name, crc, x.size, dt);
+        await out.write(lh);
+        const n2 = await streamDiskFile(token, x.from, (b) => out.write(b));
+        if (n2 !== x.size) throw new Error(x.from.split('/').pop() + ': файл изменился во время сборки');
+        central.push(centralHeader(x.name, crc, x.size, offset, dt));
+        offset += lh.length + x.size;
+        console.log(JSON.stringify({ ev: 'big', bytes: x.size, ms: Date.now() - t0 }));
+        continue;
+      }
       if (buf.length !== x.size) throw new Error(x.from.split('/').pop() + ': размер изменился (' + buf.length + ' вместо ' + x.size + '), обновите съёмку');
       const crc = crc32(buf);
       const lh = localHeader(x.name, crc, x.size, dt);

@@ -24,7 +24,7 @@ function png(w, h) {
 const DIRS = new Set(['disk:/Архив', 'disk:/Архив/LM-1043', 'disk:/Архив/LM-1043/part2', 'disk:/Архив/LM-2001',
   /* съёмки по структуре SK: моделька (лук/артикул) и оптика (бренд/артикул) */
   'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST', 'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1', 'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74595_модель',
-  'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74596_модель',
+  'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74596_модель', 'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/видео',
   'disk:/Архив/2026-09-21_SV_ОПТИКА_N', 'disk:/Архив/2026-09-21_SV_ОПТИКА_N/maxmara_оптика', 'disk:/Архив/2026-09-21_SV_ОПТИКА_N/maxmara_оптика/75327_оптика_N']);
 const FILES = new Map([
   ['disk:/Архив/LM-1043/a.jpg', Buffer.from('A'.repeat(100))],
@@ -34,6 +34,8 @@ const FILES = new Map([
   ['disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74595_модель/manekin.jpg', Buffer.from('N'.repeat(130))],
   ['disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74596_модель/manekin2.jpg', Buffer.from('Q'.repeat(140))],
   ['disk:/Архив/2026-09-21_SV_ОПТИКА_N/maxmara_оптика/75327_оптика_N/s1.jpg', Buffer.from('S'.repeat(150))],
+  ['disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/видео/clip.mp4', Buffer.from('V'.repeat(500))],
+  ['disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/видео/.DS_Store', Buffer.from('x')],
 ]);
 const log = [];
 const DOWNLOADS = [];
@@ -415,18 +417,37 @@ async function route(r) {
   await page.evaluate(() => {
     var c = App.cards[App.cards.length - 1];
     c.title = 'Мой заголовок';
+    cbMarkDirty(); cbRenderCards();
+  });
+  check('пока состав карточки тот же, ручной заголовок остаётся', await page.evaluate(() => App.cards[App.cards.length - 1].title === 'Мой заголовок'));
+  await page.evaluate(() => {
+    var c = App.cards[App.cards.length - 1];
     var m2 = App.photos.find(p => /74596_модель/.test(p.disk));
     if (c.mode === 'auto') c.pids = c.pids.filter(x => x !== m2.id); else c.slots.forEach(x => { if (x.pid === m2.id) x.pid = null; });
     cbMarkDirty(); cbRenderCards();
   });
+  check('состав артикулов поменялся — карточка снова называется по артикулу', await page.evaluate(() => App.cards[App.cards.length - 1].title === '74595'));
+  check('в строке съёмки виден тип', (await page.textContent('#cpStatusLine')).includes('Модельная'));
   check('лишний уровень папок не мешает найти артикул по коду', await page.evaluate(() => {
     var t = cpShootType(CP.shoot.name);
     return cpFacets(t, 'часть 1/2/74597_модель/x.jpg').code === '74597' && !cpFacets(t, '2/IMG_1.jpg').code;
   }));
-  check('ручной заголовок карточки не перезаписывается', await page.evaluate(() => App.cards[App.cards.length - 1].title === 'Мой заголовок'));
   await page.waitForFunction(() => !App.dirty, null, { timeout: 8000 });
   const stM = JSON.parse(FILES.get('disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/_contentpulse.json').toString());
   check('артикул карточки сохранён в отборе', stM.cards.some(c => c.cpArticle === '74595'), JSON.stringify(stM.cards.map(c => [c.title, c.cpArticle])));
+
+  /* все файлы: видео тоже уходит в архив */
+  await page.evaluate(() => cpShowShelf());
+  await page.fill('#cpShelfSearch', 'МОДЕЛЬ');
+  await page.click('.cp-shoot');
+  await page.waitForSelector('#cpPanel.cp-open #cpFAll', { timeout: 10000 });
+  await page.selectOption('#cpFAll', 'all');
+  await page.waitForFunction(() => CP.sel && CP.sel.allList && /других файлов: 1/.test(document.querySelector('#cpPanel .cp-sum').textContent), null, { timeout: 8000 });
+  check('«Все файлы»: видео посчитано, мусор (.DS_Store) — нет', true);
+  await page.click('[data-cp-p="download"]');
+  await page.waitForFunction(() => [...document.querySelectorAll('#cpDlCard a.cp-dlcard-btn')].some(a => /МОДЕЛЬ/.test(decodeURIComponent(a.href))), null, { timeout: 10000 });
+  const zVid = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST_1\.zip$/.test(k)).flatMap(([, v]) => v);
+  check('«Все файлы»: видео в архиве по исходной папке', zVid.some(n => /\/видео\/clip\.mp4$/.test(n)) && zVid.filter(n => /\.jpg$/.test(n)).length === 3, zVid.join(' | '));
 
   /* оптика: выгрузка как в папках */
   await page.evaluate(() => cpShowShelf());

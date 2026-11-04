@@ -133,7 +133,10 @@ var CPDisk = (function () {
    * десятками папок последовательный обход шёл минутами.
    * previewSize === false — без ссылок на превью (их отдаёт прослойка).
    */
-  function walkPhotos(root, previewSize, parallel) {
+  var JUNK_RE = /^(\.DS_Store|\._.*|Thumbs\.db|desktop\.ini|\.localized)$/i;
+
+  /* allFiles — все файлы (видео и прочее), кроме системного мусора */
+  function walkPhotos(root, previewSize, parallel, allFiles) {
     var out = [], queue = [root], active = 0, limit = parallel || 4, failed = null;
     var ps = previewSize === false ? null : (previewSize || 'XL');
     return new Promise(function (resolve, reject) {
@@ -152,7 +155,7 @@ var CPDisk = (function () {
               if (r.type === 'dir') {
                 if (r.name.charAt(0) === '_' || r.name === RETOUCH_DIR) return;
                 queue.push(r.path);
-              } else if (PHOTO_RE.test(r.name)) {
+              } else if (allFiles ? !JUNK_RE.test(r.name) : PHOTO_RE.test(r.name)) {
                 out.push(r);
               }
             });
@@ -345,6 +348,7 @@ var CPDisk = (function () {
     hasProxy: function () { return !!proxy; },
     proxyPreview: proxyPreview, proxyPreviews: proxyPreviews, proxyDlTest: proxyDlTest, proxyZip: proxyZip, proxyBench: proxyBench, proxyFile: proxyFile, proxyCopy: proxyCopy,
     hasToken: function () { return !!token; },
+    isPhoto: function (name) { return PHOTO_RE.test(name || ''); },
     DiskError: DiskError,
     STATE_FILE: STATE_FILE, RETOUCH_DIR: RETOUCH_DIR,
     info: info, listDir: listDir, listShoots: listShoots, walkPhotos: walkPhotos,
