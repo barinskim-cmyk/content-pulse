@@ -73,6 +73,7 @@ async function route(r) {
   if (u.host === 'downloader.disk.yandex.ru') {
     if (u.pathname.startsWith('/preview') && process.env.BLOCK_PREVIEW) return r.abort('failed');
     if (u.pathname.startsWith('/preview')) return r.fulfill({ status: 200, headers: { ...CORS, 'content-type': 'image/png' }, body: png(30, 20) });
+    if (process.env.FAIL_STATE_DL && /_contentpulse\.json$/.test(q.p)) return r.abort('failed');
     return r.fulfill({ status: 200, headers: { ...CORS, 'content-type': 'application/octet-stream' }, body: FILES.get(q.p) });
   }
   if (u.host === 'uploader1.disk.yandex.net') { FILES.set(q.p, req.postDataBuffer()); return r.fulfill({ status: 201, headers: CORS, body: '' }); }
@@ -190,6 +191,28 @@ async function route(r) {
     return Object.keys(files).map(k => k + ':' + files[k]).sort();
   });
   check('скачан отбор по карточкам: папка карточки, порядок, размеры', dl.some(x => /LM-1043 — отбор\/01 Лук 1.*\/01_a\.jpg:\d+$/.test(x)), dl.join(' | '));
+
+  /* повторное открытие той же съёмки: отбор читается с Диска */
+  await page.evaluate(() => { cpShowShelf(); });
+  await page.waitForSelector('.cp-shoot');
+  await page.fill('#cpShelfSearch', '1043');
+  await page.click('.cp-shoot');
+  await page.waitForFunction(() => !document.getElementById('cpShelf').classList.contains('cp-open') && App.cards.length === 1, null, { timeout: 8000 });
+  check('повторное открытие: карточки и статусы на месте', await page.evaluate(() => !CP.readOnly && Object.keys(App.projectMeta.cp.status).length >= 1));
+
+  /* отбор не скачивается (как в Safari) — съёмка всё равно открывается, без сохранения */
+  process.env.FAIL_STATE_DL = '1';
+  await page.evaluate(() => { cpShowShelf(); });
+  await page.waitForSelector('.cp-shoot');
+  await page.fill('#cpShelfSearch', '1043');
+  await page.click('.cp-shoot');
+  await page.waitForFunction(() => !document.getElementById('cpShelf').classList.contains('cp-open'), null, { timeout: 20000 });
+  const before = FILES.get('disk:/Архив/LM-1043/_contentpulse.json').toString();
+  await page.evaluate(() => { cbMarkDirty(); cbAutosaveNow(); });
+  await page.waitForTimeout(500);
+  check('отбор не прочитан: кадры открыты, режим без сохранения, файл на Диске не тронут',
+    await page.evaluate(() => CP.readOnly && App.photos.length >= 4) && FILES.get('disk:/Архив/LM-1043/_contentpulse.json').toString() === before);
+  delete process.env.FAIL_STATE_DL;
 
   check('без ошибок JS на странице', errors.length === 0, errors.join(' | '));
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-shoot.png') });

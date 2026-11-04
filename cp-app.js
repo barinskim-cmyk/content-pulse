@@ -347,20 +347,34 @@ function cpMeta() {
 
 function cpOpenShoot(path, name) {
   if (App.dirty && CP.shoot) cbAutosaveNow();
-  cbBusyShow('Открываю съёмку ' + name + '...', 0.1);
-  CPDisk.readState(path).then(function (st) {
+  cbBusyShow('Открываю съёмку ' + name + ': читаю сохранённый отбор...', 0.1);
+  /* Отбор не прочитался — всё равно показываем кадры, но не сохраняем,
+     чтобы не затереть чужую работу пустым отбором. */
+  var stateError = null;
+  CPDisk.readState(path).catch(function (e) {
+    if (e && e.status === 401) throw e;
+    stateError = e;
+    if (window.console) console.error('[CP] отбор не прочитался', path, e && (e.body || e.message), e);
+    return { data: null, rev: null };
+  }).then(function (st) {
     CP.shoot = { path: path, name: name };
     CP.rev = st.rev;
+    CP.readOnly = !!stateError;
     CP.files = [];
     CP.folder = '';
     cpApplyRemote(st.data || cpBlankProject(name));
     cpSetTitle();
-    cbBusyShow('Читаю файлы съёмки...', 0.4);
+    cbBusyShow('Открываю съёмку ' + name + ': читаю папки и файлы...', 0.4);
     return cpSyncPhotos(true);
   }).then(function (added) {
     cbBusyHide();
     document.getElementById('cpShelf').classList.remove('cp-open');
-    cbToast('Съёмка открыта: ' + name + (added ? ' · новых файлов: ' + added : ''));
+    if (stateError) {
+      cbToast('Кадры открыты, но сохранённый отбор не прочитался: ' + (stateError.message || stateError)
+        + '. Изменения пока не сохраняются, чтобы не затереть чужой отбор.');
+    } else {
+      cbToast('Съёмка открыта: ' + name + (added ? ' · новых файлов: ' + added : ''));
+    }
     cpStartPoll();
   }).catch(function (e) { cpHandleError(e, 'Не удалось открыть съёмку'); });
 }
@@ -560,6 +574,11 @@ var _cbAutosaveOrig = cbAutosaveNow;
 cbAutosaveNow = function () {
   if (!CP.shoot) return _cbAutosaveOrig();
   if (!App.dirty || CP.saving) return;
+  if (CP.readOnly) {
+    var el0 = document.getElementById('cbMode');
+    if (el0) el0.textContent = 'отбор не сохраняется: не прочитан с Диска';
+    return;
+  }
   CP.saving = true;
   var seq = CP.editSeq;
   var data = cbProjectData();
@@ -594,11 +613,12 @@ cbSaveProject = function () {
 function cpStartPoll() {
   clearInterval(CP.pollTimer);
   CP.pollTimer = setInterval(function () {
-    if (!CP.shoot || App.dirty || CP.saving || document.hidden) return;
+    if (!CP.shoot || (App.dirty && !CP.readOnly) || CP.saving || document.hidden) return;
     CPDisk.stateRev(CP.shoot.path).then(function (rev) {
       if (!rev || rev === CP.rev || App.dirty) return;
       return CPDisk.readState(CP.shoot.path).then(function (st) {
-        if (App.dirty) return;
+        if (App.dirty && !CP.readOnly) return;
+        CP.readOnly = false;
         CP.rev = st.rev;
         cpApplyRemote(st.data);
         cbToast('Отбор обновлён: изменения коллег');
