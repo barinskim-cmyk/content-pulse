@@ -93,29 +93,39 @@ async function ensureDir(token, path) {
   return { ok: true };
 }
 
+/* Копирование пачкой: папки создаём один раз (общий промис на папку),
+   сами копии — по 10 параллельно. Последовательно 400 кадров шли минуты. */
 async function doCopy(token, items, dirs) {
   const made = {};
-  for (const d of dirs || []) {
-    const r = await ensureDir(token, d);
-    if (!r.ok) return { status: r.status || 500, result: { error: 'Не удалось создать папку ' + d + ': ' + r.error } };
-    made[d] = true;
+  function dirReady(d) {
+    if (!made[d]) made[d] = ensureDir(token, d);
+    return made[d];
   }
-  const results = [];
-  for (const it of items) {
+  for (const d of dirs || []) {
+    const r = await dirReady(d);
+    if (!r.ok) return { status: r.status || 500, result: { error: 'Не удалось создать папку ' + d + ': ' + r.error } };
+  }
+  const results = new Array(items.length);
+  async function one(i) {
+    const it = items[i];
     const parent = it.path.slice(0, it.path.lastIndexOf('/'));
-    if (parent && !made[parent]) {
-      const r = await ensureDir(token, parent);
-      if (!r.ok) { results.push({ from: it.from, status: 'failed', error: r.error }); continue; }
-      made[parent] = true;
+    if (parent) {
+      const d = await dirReady(parent);
+      if (!d.ok) { results[i] = { from: it.from, status: 'failed', error: d.error }; return; }
     }
     const r = await disk(token, 'POST', '/resources/copy', { from: it.from, path: it.path, overwrite: 'false' });
-    if (r.status === 201) results.push({ from: it.from, status: 'done' });
-    else if (r.status === 409) results.push({ from: it.from, status: 'exists' });
+    if (r.status === 201) results[i] = { from: it.from, status: 'done' };
+    else if (r.status === 409) results[i] = { from: it.from, status: 'exists' };
     else if (r.status === 202 && r.data.href) {
       const st = await waitOp(token, r.data.href);
-      results.push({ from: it.from, status: st === 'success' ? 'done' : 'failed', error: st === 'success' ? undefined : st });
-    } else results.push({ from: it.from, status: 'failed', error: (r.data.message || r.data.description || ('HTTP ' + r.status)) });
+      results[i] = { from: it.from, status: st === 'success' ? 'done' : 'failed', error: st === 'success' ? undefined : st };
+    } else results[i] = { from: it.from, status: 'failed', error: (r.data.message || r.data.description || ('HTTP ' + r.status)) };
   }
+  let next = 0;
+  async function worker() { while (next < items.length) { const i = next++; try { await one(i); } catch (e) { results[i] = { from: items[i].from, status: 'failed', error: String(e && e.message || e) }; } } }
+  const workers = [];
+  for (let w = 0; w < Math.min(10, items.length); w++) workers.push(worker());
+  await Promise.all(workers);
   return { status: 200, result: { results } };
 }
 

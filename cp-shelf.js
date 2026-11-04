@@ -508,7 +508,7 @@ function cpShelfDownload() {
   var cards = data.cards || [];
   var name, root;
   var used = {};
-  cbBusyShow('Готовлю выгрузку...', 0.05);
+  cbBusyShow('Готовлю архив: ' + items.length + ' кадр(ов)...', 0.02);
   cpExportName(sel).then(function (n) {
     name = n;
     root = cpServicePath(CP_EXPORTS_DIR) + '/' + name;
@@ -528,12 +528,13 @@ function cpShelfDownload() {
       return { from: x.file.path, path: key };
     });
     return CPDisk.ensureDir(cpServicePath(CP_EXPORTS_DIR)).then(function () {
-      return cpCopyOnDisk(copies, Object.keys(dirs), 'Раскладываю выгрузку');
+      return cpCopyOnDisk(copies, Object.keys(dirs), 'Готовлю архив ' + name + ', копирую кадры');
     });
   }).then(function (r) {
-    cbBusyShow('Яндекс собирает архив...', 1);
+    cbBusyShow('Получаю ссылку на архив...', 1);
     return CPDisk.downloadHref(root).then(function (href) {
-      cpNativeDownload(href);
+      cpNativeDownload(href, name, (r.done + r.exists) + ' кадр(ов)'
+        + (r.failed.length ? ' · не скопировано: ' + r.failed.length : '') + '. Кадры отмечаются как скачанные.');
       return r;
     });
   }).then(function (r) {
@@ -561,8 +562,7 @@ function cpShelfDownload() {
     }).then(function () {
       cbBusyHide();
       cpRenderPanel();
-      cbToast('Скачивание началось: ' + name + ' · ' + (r.done + r.exists) + ' кадр(ов)'
-        + (r.failed.length ? ' · не скопировано: ' + r.failed.length : '') + '. Кадры отмечены как скачанные.');
+
     });
   }).catch(function (e) { cpHandleError(e, 'Скачивание'); });
 }

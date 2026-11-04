@@ -90,6 +90,11 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
     + '.cp-act{position:absolute;right:4px;bottom:4px;display:none;padding:2px 7px;font-size:11px;z-index:3;background:#1d1d1bdd}'
     + '.cb-slot.cb-filled:hover .cp-act,.cb-cont-item:hover .cp-act,.cb-thumb:hover .cp-act{display:block}'
     + '.cb-thumb{position:relative}'
+    + '.cp-dlcard{position:fixed;left:20px;bottom:20px;z-index:3000;width:360px;max-width:calc(100vw - 32px);background:#1d1d1b;border:1px solid #C9956B;border-radius:6px;padding:14px 16px;box-shadow:0 8px 32px #000a;display:none;color:#f2f2f1}'
+    + '.cp-dlcard-head{display:flex;gap:8px;align-items:flex-start}.cp-dlcard-head b{flex:1;font-size:13px;word-break:break-word}'
+    + '.cp-dlcard-head button{background:none;border:none;color:#a3a09a;font-size:18px;line-height:1;padding:0 4px;cursor:pointer}'
+    + '.cp-dlcard-note{color:#a3a09a;font-size:11px;line-height:1.5;margin:8px 0}'
+    + '.cp-dlcard-btn{display:inline-block;margin-top:4px;background:#C9956B;color:#141413;text-decoration:none;padding:7px 14px;border-radius:3px;font-weight:600;font-size:12px}'
     + '.cp-menu{position:fixed;z-index:1000;background:#1d1d1b;border:1px solid #3a3a37;border-radius:4px;padding:4px;display:none;min-width:200px;box-shadow:0 6px 24px #0008}'
     + '.cp-menu.cp-open{display:block}'
     + '.cp-menu button{display:block;width:100%;text-align:left;border:none;background:none;padding:7px 10px}'
@@ -839,13 +844,15 @@ function cpRetouchBase(shootPath, shootName) {
 }
 
 /**
- * Скопировать файлы на Диске (через прослойку, пачками по 100 — у функции
+ * Скопировать файлы на Диске (через прослойку, пачками по 50 — у функции
  * ограничено время). Возвращает {done, exists, failed:[...]}.
  */
 function cpCopyOnDisk(items, dirs, label) {
   var res = { done: 0, exists: 0, failed: [] };
   var chunks = [];
-  for (var i = 0; i < items.length; i += 100) chunks.push(items.slice(i, i + 100));
+  var CH = 50;
+  for (var i = 0; i < items.length; i += CH) chunks.push(items.slice(i, i + CH));
+  cbBusyShow(label + ': 0 / ' + items.length, 0.02);
   return chunks.reduce(function (chain, chunk, ci) {
     return chain.then(function () {
       return CPDisk.proxyCopy(chunk, ci === 0 ? dirs : []).then(function (out) {
@@ -854,7 +861,7 @@ function cpCopyOnDisk(items, dirs, label) {
           else if (x.status === 'exists') res.exists++;
           else res.failed.push(x.from.split('/').pop() + ': ' + (x.error || 'ошибка'));
         });
-        cbBusyShow(label + ': ' + Math.min(items.length, (ci + 1) * 100) + ' / ' + items.length, (ci + 1) / chunks.length);
+        cbBusyShow(label + ': ' + Math.min(items.length, (ci + 1) * CH) + ' / ' + items.length, (ci + 1) / chunks.length);
       });
     });
   }, Promise.resolve()).then(function () { return res; });
@@ -1179,13 +1186,36 @@ function cpFinishDownload(res, action, extra) {
 /* Скачивание: браузеру нельзя забирать файлы у сервера Яндекса напрямую,
    поэтому скачиваем обычной загрузкой браузера архив, который Яндекс
    собирает сам из папки. Работает в Safari, Chrome и Edge. */
-function cpNativeDownload(href) {
+/**
+ * Загрузка архива. Яндекс собирает ZIP на лету: файл появляется в загрузках
+ * браузера через секунды или минуты (зависит от объёма). Пробуем начать сами
+ * (скрытый iframe) и всегда показываем карточку с кнопкой — нажатие кнопки
+ * браузер точно не заблокирует.
+ */
+function cpNativeDownload(href, title, note) {
   window.__cpLastDownload = href;
   var fr = document.createElement('iframe');
   fr.style.display = 'none';
   fr.src = href;
   document.body.appendChild(fr);
   setTimeout(function () { if (fr.parentNode) fr.parentNode.removeChild(fr); }, 120000);
+  var box = document.getElementById('cpDlCard');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'cpDlCard';
+    box.className = 'cp-dlcard';
+    document.body.appendChild(box);
+    box.addEventListener('click', function (e) {
+      if (e.target.closest('[data-cp-dlclose]')) box.style.display = 'none';
+    });
+  }
+  box.innerHTML = '<div class="cp-dlcard-head"><b>Архив готов: ' + cbEsc(title || 'выгрузка') + '</b>'
+    + '<button data-cp-dlclose title="Закрыть">×</button></div>'
+    + (note ? '<div class="cp-dlcard-note">' + cbEsc(note) + '</div>' : '')
+    + '<div class="cp-dlcard-note">Яндекс собирает ZIP на лету: загрузка появляется в загрузках браузера '
+    + 'через несколько секунд, у больших съёмок — через минуту-две. Если загрузка не началась, нажмите кнопку.</div>'
+    + '<a class="cp-dlcard-btn" href="' + cbEsc(href) + '" target="_blank" rel="noopener">Скачать ZIP</a>';
+  box.style.display = 'block';
 }
 
 function cpStamp() {
@@ -1199,9 +1229,8 @@ function cpDownloadAll() {
   cbBusyShow('Яндекс собирает архив съёмки...', 0.5);
   CPDisk.downloadHref(CP.shoot.path).then(function (href) {
     cbBusyHide();
-    cpNativeDownload(href);
+    cpNativeDownload(href, CP.shoot.name, 'Вся съёмка: ' + cpPhotoCount() + ' кадр(ов).');
     cpEvent('download_shoot', [], { count: cpPhotoCount() });
-    cbToast('Скачивание архива началось. Большие съёмки Яндекс собирает дольше — смотрите загрузки браузера.');
   }).catch(function (e) { cpHandleError(e, 'Скачивание съёмки'); });
 }
 
@@ -1250,11 +1279,10 @@ function cpDownloadSelection() {
     cbBusyShow('Яндекс собирает архив...', 1);
     return CPDisk.downloadHref(root).then(function (href) {
       cbBusyHide();
-      cpNativeDownload(href);
+      cpNativeDownload(href, CP.shoot.name + ' — отбор', (r.done + r.exists) + ' кадр(ов) по папкам карточек'
+        + (r.failed.length ? ' · не скопировано: ' + r.failed.length : '') + '.');
       cpEvent('download_selection', [], { count: r.done + r.exists, note: 'карточек: ' + App.cards.length,
         folder: root.replace(/^disk:/, ''), failed: r.failed.length ? r.failed : undefined });
-      cbToast('Скачивание отбора началось: ' + (r.done + r.exists) + ' кадр(ов) по папкам карточек'
-        + (r.failed.length ? ' · не скопировано: ' + r.failed.length : ''));
     });
   }).catch(function (e) { cpHandleError(e, 'Скачивание отбора'); });
 }

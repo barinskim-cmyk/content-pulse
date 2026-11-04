@@ -261,6 +261,10 @@ async function route(r) {
   const ex1 = [...FILES.keys()].filter(k => k.startsWith('disk:/_ContentPulse/выгрузки/'));
   check('выгрузка: <код>_Ретушь_1, папка карточки, исходные имена файлов', ex1.some(k => /выгрузки\/LM-1043_Ретушь_1\/01 Лук 1[^/]*\/a\.jpg$/.test(k)), ex1.join(' | '));
   check('архив выгрузки скачивается обычной загрузкой', DOWNLOADS.some(p => /выгрузки\/LM-1043_Ретушь_1$/.test(p)));
+  check('карточка «Архив готов» с кнопкой «Скачать ZIP»', await page.evaluate(() => {
+    const b = document.querySelector('#cpDlCard a.cp-dlcard-btn');
+    return !!b && getComputedStyle(document.getElementById('cpDlCard')).display !== 'none' && /LM-1043_%D0%A0|LM-1043_Ретушь_1/.test(decodeURIComponent(b.href)) && b.target === '_blank';
+  }));
   check('после скачивания — отметка «скачано», статус не поменялся', await page.evaluate(() => {
     const m = CP.sel.data.meta.cp; return Object.values(m.downloads).every(d => d.n === 1) && Object.values(m.status).every(s => s.s === 'retouch'); }));
   await page.selectOption('#cpFDl', 'no');
