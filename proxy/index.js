@@ -24,6 +24,8 @@ const API = 'https://cloud-api.yandex.net/v1/disk';
 const ALLOWED_ORIGINS = [
   'https://barinskim-cmyk.github.io',
 ];
+process.on('unhandledRejection', (e) => { console.log(JSON.stringify({ ev: 'unhandled', error: String(e && e.message || e) })); });
+
 const MAX_FILE = 3 * 1024 * 1024;   /* лимит ответа функции ~3.5 МБ */
 const ZIP_BUDGET_MS = 480000;        /* функция живёт 600 с — оставляем запас на загрузку */
 const MAX_BATCH = 2.5 * 1024 * 1024; /* пачка превью: base64 + JSON укладываются в лимит */
@@ -243,6 +245,7 @@ function openUpload(href, length) {
       req.on('response', (r) => { let t = ''; r.on('data', (c) => { t += c; }); r.on('end', () => res({ status: r.statusCode, body: t })); });
       req.on('error', rej);
     });
+    done.catch(() => { });   /* при отмене ошибку никто не ждёт — не роняем процесс */
     resolve({
       write(buf) {
         return new Promise((res, rej) => {
@@ -258,6 +261,15 @@ function openUpload(href, length) {
 }
 
 async function doZip(token, target, entries) {
+  try {
+    return await doZipInner(token, target, entries);
+  } catch (e) {
+    console.log(JSON.stringify({ ev: 'zip_error', error: String(e && e.message || e) }));
+    return { status: 422, result: { error: 'Сборка архива: ' + String(e && e.message || e) } };
+  }
+}
+
+async function doZipInner(token, target, entries) {
   const t0 = Date.now();
   const dt = dosDateTime(new Date());
   const items = entries.map((e) => ({ from: e.from, name: Buffer.from(String(e.name).replace(/^\/+/, ''), 'utf8'), size: +e.size || 0 }));
@@ -312,6 +324,7 @@ async function doZip(token, target, entries) {
     return { status: 200, result: { path: target, bytes: total, files: items.length, ms: Date.now() - t0 } };
   } catch (e) {
     out.abort();
+    console.log(JSON.stringify({ ev: 'zip_error', error: String(e && e.message || e), ms: Date.now() - t0 }));
     return { status: 422, result: { error: String(e && e.message || e), ms: Date.now() - t0 } };
   }
 }

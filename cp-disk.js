@@ -275,6 +275,8 @@ var CPDisk = (function () {
       return fetch(url, init).then(function (resp) {
         if (resp.ok) return opts.as === 'json' ? resp.json() : resp.blob();
         return resp.text().then(function (body) {
+          /* ответ прослойки виден в консоли целиком — по нему и разбираемся */
+          if (window.console) console.warn('[CP] прослойка ' + (params.a || '') + ' ' + (params.path || '') + ' -> HTTP ' + resp.status + ': ' + String(body).slice(0, 500));
           if (RETRY[resp.status] && attempt < 3) return sleep(backoff(attempt++)).then(run);
           throw new DiskError(resp.status, body, url);
         });
