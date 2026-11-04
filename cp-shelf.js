@@ -100,10 +100,37 @@ var CP_DICT_TEMPLATE = [
 
 function cpServicePath(name) { return CP_CONFIG.serviceDir.replace(/\/+$/, '') + (name ? '/' + name : ''); }
 
+/* Служебные файлы читаем только если они есть в списке папки: так в консоли
+   нет лишних 404 и не тратим вызовы прослойки. Список живёт 20 с. */
+var _cpSvcList = null;
+function cpServiceNames(force) {
+  if (!force && _cpSvcList && Date.now() - _cpSvcList.ts < 20000) return _cpSvcList.p;
+  var entry = { ts: Date.now() };
+  entry.p = CPDisk.listDir(CP_CONFIG.serviceDir).then(function (items) {
+    var names = {};
+    items.forEach(function (x) { names[x.name] = true; });
+    return names;
+  }, function (e) {
+    if (e && e.status === 404) return {};
+    _cpSvcList = null;
+    throw e;
+  });
+  _cpSvcList = entry;
+  return entry.p;
+}
+
+/** Текст служебного файла; нет файла — ошибка со status 404 (без запроса к прослойке). */
+function cpReadServiceFile(name, force) {
+  return cpServiceNames(force).then(function (names) {
+    if (!names[name]) { var e = new Error('нет файла ' + name); e.status = 404; throw e; }
+    return CPDisk.proxyFile(cpServicePath(name)).then(function (b) { return b.text(); });
+  });
+}
+
 /** Словарь: [{tag, group}]. null — файла нет. Кэшируется до перезагрузки витрины. */
 function cpLoadDict(force) {
   if (CP.dict !== undefined && CP.dict !== null && !force) return Promise.resolve(CP.dict);
-  return CPDisk.proxyFile(cpServicePath(CP_TAGS_FILE)).then(function (b) { return b.text(); }).then(function (txt) {
+  return cpReadServiceFile(CP_TAGS_FILE, force).then(function (txt) {
     var out = [], group = '';
     txt.split(/\r?\n/).forEach(function (line) {
       var l = line.trim();
@@ -196,7 +223,7 @@ var _cpSettingsP = null;
 /** Прочитать настройки один раз за сессию (файла нет — всё по умолчанию). */
 function cpEnsureSettings(force) {
   if (_cpSettingsP && !force) return _cpSettingsP;
-  _cpSettingsP = CPDisk.proxyFile(cpServicePath(CP_SETTINGS_FILE)).then(function (b) { return b.text(); })
+  _cpSettingsP = cpReadServiceFile(CP_SETTINGS_FILE, force)
     .then(function (t) { CP.settingsText = t; CP.settings = cpParseSettings(t); }, function (e) {
       if (e && e.status === 404) { CP.settingsText = ''; CP.settings = {}; return; }
       _cpSettingsP = null;   /* сеть — попробуем в следующий раз */
