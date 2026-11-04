@@ -94,7 +94,8 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
     + '.cp-dlcard-head{display:flex;gap:8px;align-items:flex-start}.cp-dlcard-head b{flex:1;font-size:13px;word-break:break-word}'
     + '.cp-dlcard-head button{background:none;border:none;color:#a3a09a;font-size:18px;line-height:1;padding:0 4px;cursor:pointer}'
     + '.cp-dlcard-note{color:#a3a09a;font-size:11px;line-height:1.5;margin:8px 0}'
-    + '.cp-dlcard-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}'
+    + '.cp-dlcard-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}'
+    + '.cp-dlcard-size{flex:1;color:#a3a09a;font-size:11px}'
     + '.cp-dlcard-alt{background:none;border:1px solid #3a3a37;color:#f2f2f1;padding:6px 12px;border-radius:3px;font-size:12px;cursor:pointer}'
     + '.cp-dlcard-url{display:none;width:100%;margin-top:8px;background:#141413;border:1px solid #3a3a37;color:#a3a09a;font-size:10px;padding:4px 6px;box-sizing:border-box}'
     + '.cp-dlcard-btn{display:inline-block;margin-top:4px;background:#C9956B;color:#141413;text-decoration:none;padding:7px 14px;border-radius:3px;font-weight:600;font-size:12px}'
@@ -1186,20 +1187,110 @@ function cpFinishDownload(res, action, extra) {
   if (res.failed.length && window.console) console.error('[CP] download failed', res.failed);
 }
 
-/* Скачивание: браузеру нельзя забирать файлы у сервера Яндекса напрямую,
-   поэтому скачиваем обычной загрузкой браузера архив, который Яндекс
-   собирает сам из папки. Работает в Safari, Chrome и Edge. */
+/* ---------- скачивание ---------- */
+
+/* С октября 2026 Яндекс не отдаёт папки архивом (ссылка на папку — 500),
+   отдельные файлы отдаёт. Поэтому ZIP собирает наша прослойка в Yandex
+   Cloud: читает кадры по одному и кладёт архив на Диск компании, в
+   <_ContentPulse>/выгрузки/. Браузер скачивает этот один файл обычной
+   загрузкой. Большая выборка делится на части так, чтобы каждая
+   собиралась за полминуты; части распаковываются в одну папку. */
+
+var CP_EXPORTS = 'выгрузки';
+var CP_ZIP_PART_MS = 30000;              /* целимся в ~30 с на часть */
+var CP_ZIP_MIN = 150 * 1024 * 1024;
+var CP_ZIP_MAX = 1800 * 1024 * 1024;
+CP.zipTarget = 400 * 1024 * 1024;        /* первая часть; дальше — по замеру скорости */
+
+function cpExportsDir() { return CP_CONFIG.serviceDir.replace(/\/+$/, '') + '/' + CP_EXPORTS; }
+
+/** Следующее свободное имя выгрузки: <base>_<N>. */
+function cpNextExportName(base) {
+  return CPDisk.listDir(cpExportsDir()).then(function (items) {
+    var max = 0;
+    items.forEach(function (x) {
+      if (x.name.indexOf(base + '_') !== 0) return;
+      var n = parseInt(x.name.slice(base.length + 1), 10);
+      if (!isNaN(n) && n > max) max = n;
+    });
+    return base + '_' + (max + 1);
+  }, function (e) {
+    if (e && e.status === 404) return base + '_1';
+    throw e;
+  });
+}
+
+function cpMb(b) { return b >= 1024 * 1024 * 1024 ? (b / 1073741824).toFixed(1) + ' ГБ' : Math.max(1, Math.round(b / 1048576)) + ' МБ'; }
+
+/** Ссылка на готовый файл: сразу после загрузки Диск может ещё дообрабатывать его. */
+function cpHrefWhenReady(path) {
+  var tries = 0;
+  function run() {
+    return CPDisk.downloadHref(path).catch(function (e) {
+      if (tries++ < 6 && e && (e.status === 404 || e.status === 423 || e.status >= 500)) {
+        return new Promise(function (r) { setTimeout(r, 2000); }).then(run);
+      }
+      throw e;
+    });
+  }
+  return run();
+}
+
 /**
- * Загрузка архива. Яндекс собирает ZIP на лету: файл появляется в загрузках
- * браузера через секунды или минуты (зависит от объёма). Пробуем начать сами
- * (скрытый iframe) и всегда показываем карточку с кнопкой — нажатие кнопки
- * браузер точно не заблокирует.
+ * Собрать архив(ы) выгрузки и начать скачивание.
+ * entries: [{from: путь на Диске, name: путь внутри архива, size}]
+ * -> {parts:[{path, href, files, bytes}], files, bytes}
  */
-function cpNativeDownload(href, title, note) {
+function cpZipExport(name, entries, note) {
+  entries = entries.filter(function (e) { return e.size > 0; });
+  var total = entries.reduce(function (a, e) { return a + e.size; }, 0);
+  var single = total <= CP.zipTarget;
+  var dir = cpExportsDir();
+  var res = { parts: [], files: 0, bytes: 0 };
+  var i = 0, k = 0;
+  cpDlCard(name, note, [], 'Собираю архив...');
+  function nextPart() {
+    if (i >= entries.length) return Promise.resolve(res);
+    var chunk = [], bytes = 0;
+    while (i < entries.length && (!chunk.length || bytes + entries[i].size <= CP.zipTarget)) {
+      chunk.push(entries[i]); bytes += entries[i].size; i++;
+    }
+    k++;
+    var target = dir + '/' + name + (single ? '' : '_ч' + k) + '.zip';
+    var label = single ? 'архив' : 'часть ' + k;
+    var msg = 'Собираю ' + label + ' ' + name + ': ' + chunk.length + ' кадр(ов), ' + cpMb(bytes)
+      + ' · готово ' + res.files + ' / ' + entries.length;
+    cbBusyShow(msg, Math.max(0.03, res.bytes / Math.max(1, total)));
+    cpDlCard(name, note, res.parts, msg);
+    var t0 = Date.now();
+    return CPDisk.proxyZip(target, chunk.map(function (e) {
+      return { from: e.from, name: name + '/' + e.name, size: e.size };
+    })).then(function (out) {
+      /* подстроить размер следующей части под скорость */
+      var ms = Math.max(1000, Date.now() - t0);
+      CP.zipTarget = Math.max(CP_ZIP_MIN, Math.min(CP_ZIP_MAX, Math.round(bytes / ms * CP_ZIP_PART_MS)));
+      return cpHrefWhenReady(out.path || target).then(function (href) {
+        var part = { path: target, href: href, files: chunk.length, bytes: bytes, label: single ? 'Скачать ZIP' : 'Часть ' + k };
+        res.parts.push(part);
+        res.files += chunk.length;
+        res.bytes += bytes;
+        cpStartDownload(href);
+        cpDlCard(name, note, res.parts, i < entries.length ? 'Собираю следующую часть...' : '');
+        return nextPart();
+      });
+    });
+  }
+  return nextPart().then(function (r) { cbBusyHide(); return r; }, function (e) {
+    cbBusyHide();
+    cpDlCard(name, note, res.parts, '', 'Не удалось собрать архив: ' + ((e && (e.body || e.message)) || e));
+    throw e;
+  });
+}
+
+/** Обычная загрузка браузера; без Referer — файловый сервер Яндекс 360 строг к чужим страницам. */
+function cpStartDownload(href) {
   window.__cpLastDownload = href;
-  if (window.console) console.info('[CP] ссылка на архив', title || '', href);
-  /* Без Referer: файловый сервер Яндекс 360 отклоняет запросы со страниц
-     чужого сайта (так же, как fetch с Origin). */
+  if (window.console) console.info('[CP] скачивание', href);
   var fr = document.createElement('iframe');
   fr.style.display = 'none';
   fr.referrerPolicy = 'no-referrer';
@@ -1207,6 +1298,16 @@ function cpNativeDownload(href, title, note) {
   fr.src = href;
   document.body.appendChild(fr);
   setTimeout(function () { if (fr.parentNode) fr.parentNode.removeChild(fr); }, 120000);
+}
+
+/* старое имя — оставлено для совместимости */
+function cpNativeDownload(href, title, note) {
+  cpStartDownload(href);
+  cpDlCard(title || 'выгрузка', note, [{ href: href, label: 'Скачать ZIP' }], '');
+}
+
+/** Карточка скачивания слева внизу: части архива с кнопками и путь на Диске. */
+function cpDlCard(title, note, parts, progress, error) {
   var box = document.getElementById('cpDlCard');
   if (!box) {
     box = document.createElement('div');
@@ -1217,8 +1318,9 @@ function cpNativeDownload(href, title, note) {
       if (e.target.closest('[data-cp-dlclose]')) { box.style.display = 'none'; return; }
       var cp = e.target.closest('[data-cp-dlcopy]');
       if (!cp) return;
+      var link = cp.getAttribute('data-cp-dlcopy');
       var inp = box.querySelector('.cp-dlcard-url');
-      var link = inp.value;
+      inp.value = link;
       function shown() {
         inp.style.display = 'block'; inp.focus(); inp.select();
         cbToast('Ссылка скопирована. Вставьте её в адресную строку новой вкладки.');
@@ -1227,15 +1329,25 @@ function cpNativeDownload(href, title, note) {
       else { shown(); try { document.execCommand('copy'); } catch (x) { } }
     });
   }
-  box.innerHTML = '<div class="cp-dlcard-head"><b>Архив готов: ' + cbEsc(title || 'выгрузка') + '</b>'
-    + '<button data-cp-dlclose title="Закрыть">×</button></div>'
-    + (note ? '<div class="cp-dlcard-note">' + cbEsc(note) + '</div>' : '')
-    + '<div class="cp-dlcard-note">Яндекс собирает ZIP на лету: загрузка появляется в загрузках браузера '
-    + 'через несколько секунд, у больших съёмок — через минуту-две. Если не началась — «Скачать ZIP»; '
-    + 'если и так не скачивается — «Скопировать ссылку» и вставьте её в адресную строку.</div>'
-    + '<div class="cp-dlcard-row"><a class="cp-dlcard-btn" href="' + cbEsc(href) + '" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Скачать ZIP</a>'
-    + '<button class="cp-dlcard-alt" data-cp-dlcopy>Скопировать ссылку</button></div>'
-    + '<input class="cp-dlcard-url" readonly value="' + cbEsc(href) + '">';
+  var head = parts.length ? (progress ? 'Архив собирается: ' : 'Архив готов: ') : (error ? 'Архив: ' : 'Собираю архив: ');
+  var h = '<div class="cp-dlcard-head"><b>' + head + cbEsc(title) + '</b>'
+    + '<button data-cp-dlclose title="Закрыть">×</button></div>';
+  if (note) h += '<div class="cp-dlcard-note">' + cbEsc(note) + '</div>';
+  if (progress) h += '<div class="cp-dlcard-note cp-warn">' + cbEsc(progress) + '</div>';
+  if (error) h += '<div class="cp-dlcard-note cp-warn">' + cbEsc(error) + '</div>';
+  if (parts.length) {
+    h += '<div class="cp-dlcard-note">Загрузка начинается сама. Если не началась — нажмите кнопку; '
+      + 'если и так нет — «ссылка» и вставьте её в адресную строку. Файлы лежат на Диске: '
+      + cbEsc(cpExportsDir().replace(/^disk:/, '')) + '</div>';
+    parts.forEach(function (p) {
+      h += '<div class="cp-dlcard-row"><a class="cp-dlcard-btn" href="' + cbEsc(p.href) + '" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">'
+        + cbEsc(p.label || 'Скачать ZIP') + '</a>'
+        + '<small class="cp-dlcard-size">' + (p.files ? p.files + ' кадр(ов) · ' + cpMb(p.bytes) : '') + '</small>'
+        + '<button class="cp-dlcard-alt" data-cp-dlcopy="' + cbEsc(p.href) + '">ссылка</button></div>';
+    });
+  }
+  h += '<input class="cp-dlcard-url" readonly value="">';
+  box.innerHTML = h;
   box.style.display = 'block';
 }
 
@@ -1244,14 +1356,23 @@ function cpStamp() {
   return d.getFullYear() + '-' + cpPad(d.getMonth() + 1) + '-' + cpPad(d.getDate()) + ' ' + cpPad(d.getHours()) + '-' + cpPad(d.getMinutes());
 }
 
+/** Путь файла относительно съёмки. */
+function cpRelInShoot(disk) {
+  var root = CP.shoot.path + '/';
+  return disk.indexOf(root) === 0 ? disk.slice(root.length) : disk.split('/').pop();
+}
+
 function cpDownloadAll() {
   cbCloseAllPops();
   if (!CP.shoot) { cbToast('Сначала откройте съёмку'); return; }
-  cbBusyShow('Яндекс собирает архив съёмки...', 0.5);
-  CPDisk.downloadHref(CP.shoot.path).then(function (href) {
-    cbBusyHide();
-    cpNativeDownload(href, CP.shoot.name, 'Вся съёмка: ' + cpPhotoCount() + ' кадр(ов).');
-    cpEvent('download_shoot', [], { count: cpPhotoCount() });
+  var shoot = CP.shoot;
+  var files = (CP.files || []).slice();
+  if (!files.length) { cbToast('Кадры съёмки ещё не прочитаны — подождите или «Обновить съёмку»'); return; }
+  var entries = files.map(function (f) { return { from: f.path, name: cpRelInShoot(f.path), size: f.size }; });
+  cpNextExportName(CPDisk.safeName(shoot.name) + '_вся съёмка').then(function (name) {
+    return cpZipExport(name, entries, 'Вся съёмка: ' + entries.length + ' кадр(ов).').then(function (r) {
+      cpEvent('download_shoot', [], { count: r.files, export: name, parts: r.parts.length });
+    });
   }).catch(function (e) { cpHandleError(e, 'Скачивание съёмки'); });
 }
 
@@ -1267,7 +1388,7 @@ function cpSelectionJobs() {
       var p = pid ? cbPhotoById(pid) : null;
       if (!p || !p.disk || p.missing) return;
       order++;
-      jobs.push({ disk: p.disk, dir: [folder], file: cpPad(order) + '_' + p.name });   /* порядок слотов = номер */
+      jobs.push({ disk: p.disk, size: p.size, dir: [folder], file: cpPad(order) + '_' + p.name });   /* порядок слотов = номер */
     }
     if (card.mode === 'auto') (card.pids || []).forEach(add);
     else (card.slots || []).forEach(function (s) { add(s.pid); });
@@ -1277,7 +1398,7 @@ function cpSelectionJobs() {
     cont.photoIds.forEach(function (pid, i) {
       var p = cbPhotoById(pid);
       if (!p || !p.disk || p.missing) return;
-      jobs.push({ disk: p.disk, dir: ['Доп контент', folder], file: cpPad(i + 1) + '_' + p.name });
+      jobs.push({ disk: p.disk, size: p.size, dir: ['Доп контент', folder], file: cpPad(i + 1) + '_' + p.name });
     });
   });
   return jobs;
@@ -1288,22 +1409,13 @@ function cpDownloadSelection() {
   if (!CP.shoot) { cbToast('Сначала откройте съёмку'); return; }
   var jobs = cpSelectionJobs();
   if (!jobs.length) { cbToast('В карточках и доп. контенте пока нет кадров с Диска'); return; }
-  /* копии раскладываются на Диске в служебную папку, Яндекс отдаёт её архивом */
-  var root = CP.shoot.path + '/_выгрузка/' + CPDisk.safeName(CP.shoot.name + ' — отбор ' + cpStamp());
-  var dirs = {}, items = jobs.map(function (j) {
-    var dir = root + (j.dir.length ? '/' + j.dir.map(CPDisk.safeName).join('/') : '');
-    dirs[dir] = true;
-    return { from: j.disk, path: dir + '/' + CPDisk.safeName(j.file) };
+  var shoot = CP.shoot;
+  var entries = jobs.map(function (j) {
+    return { from: j.disk, size: j.size, name: (j.dir.length ? j.dir.map(CPDisk.safeName).join('/') + '/' : '') + CPDisk.safeName(j.file) };
   });
-  cbBusyShow('Раскладываю отбор по карточкам: 0 / ' + items.length, 0.05);
-  cpCopyOnDisk(items, Object.keys(dirs), 'Раскладываю отбор по карточкам').then(function (r) {
-    cbBusyShow('Яндекс собирает архив...', 1);
-    return CPDisk.downloadHref(root).then(function (href) {
-      cbBusyHide();
-      cpNativeDownload(href, CP.shoot.name + ' — отбор', (r.done + r.exists) + ' кадр(ов) по папкам карточек'
-        + (r.failed.length ? ' · не скопировано: ' + r.failed.length : '') + '.');
-      cpEvent('download_selection', [], { count: r.done + r.exists, note: 'карточек: ' + App.cards.length,
-        folder: root.replace(/^disk:/, ''), failed: r.failed.length ? r.failed : undefined });
+  cpNextExportName(CPDisk.safeName(shoot.name) + '_отбор').then(function (name) {
+    return cpZipExport(name, entries, 'Отбор по карточкам: ' + entries.length + ' кадр(ов).').then(function (r) {
+      cpEvent('download_selection', [], { count: r.files, note: 'карточек: ' + App.cards.length, export: name, parts: r.parts.length });
     });
   }).catch(function (e) { cpHandleError(e, 'Скачивание отбора'); });
 }

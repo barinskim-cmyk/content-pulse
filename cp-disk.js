@@ -288,6 +288,12 @@ var CPDisk = (function () {
 
   function proxyPreview(path, size) { return proxyReq({ a: 'preview', path: path, size: size || 'XL' }); }
   function proxyFile(path) { return proxyReq({ a: 'file', path: path }); }
+  /** Собрать ZIP из файлов Диска и положить на Диск: entries [{from, name, size}] -> {path, bytes, files, ms} */
+  function proxyZip(target, entries) {
+    return proxyReq({ a: 'zip' }, { method: 'POST', body: { target: target, entries: entries }, as: 'json' });
+  }
+  /** Диагностика: как Яндекс отвечает на ссылку скачивания path. */
+  function proxyDlTest(path) { return proxyReq({ a: 'dltest', path: path }, { as: 'json' }); }
   /** Пачка превью: -> {items:[{path, type, data(base64)} | {path, status, error}]} */
   function proxyPreviews(paths, size) {
     return proxyReq({ a: 'previews' }, { method: 'POST', body: { paths: paths, size: size || 'XL' }, as: 'json' });
@@ -331,7 +337,7 @@ var CPDisk = (function () {
     setToken: function (t) { token = t || ''; },
     setProxy: function (u) { proxy = (u || '').replace(/\/+$/, ''); },
     hasProxy: function () { return !!proxy; },
-    proxyPreview: proxyPreview, proxyPreviews: proxyPreviews, proxyFile: proxyFile, proxyCopy: proxyCopy,
+    proxyPreview: proxyPreview, proxyPreviews: proxyPreviews, proxyDlTest: proxyDlTest, proxyZip: proxyZip, proxyFile: proxyFile, proxyCopy: proxyCopy,
     hasToken: function () { return !!token; },
     DiskError: DiskError,
     STATE_FILE: STATE_FILE, RETOUCH_DIR: RETOUCH_DIR,

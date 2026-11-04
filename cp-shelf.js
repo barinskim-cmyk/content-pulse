@@ -7,13 +7,12 @@
      - «Присвоить тег» — съёмке или выбранным папкам (теги из словаря);
      - «Открыть» — отбор; «Скачать» — ровно то, что отфильтровано.
 
-   Скачивание: копии раскладываются в служебной папке
-   <_ContentPulse>/выгрузки/<код съёмки>_<тег>_<N>/ — кадры из карточек
-   по папкам карточек, остальные по исходным папкам; имена файлов
-   исходные (по ним потом сверяем возвращённую ретушь). Яндекс отдаёт
-   папку архивом, браузер скачивает обычной загрузкой. После этого у
-   кадров появляется отметка «скачано» (кто, когда, какая выгрузка,
-   сколько раз) — статус при этом не меняется.
+   Скачивание: прослойка собирает ZIP <_ContentPulse>/выгрузки/
+   <код съёмки>_<тег>_<N>.zip (большие — частями _ч1, _ч2...) — кадры из
+   карточек по папкам карточек, остальные по исходным папкам; имена файлов
+   исходные (по ним потом сверяем возвращённую ретушь). Браузер скачивает
+   готовый файл обычной загрузкой. После этого у кадров появляется отметка
+   «скачано» (кто, когда, какая выгрузка, сколько раз) — статус не меняется.
 
    Словарь тегов — простой файл <_ContentPulse>/теги.txt:
      строка = тег; [Группа] — заголовок группы; # — комментарий.
@@ -485,19 +484,7 @@ function cpExportName(sel) {
   var parts = [CPDisk.safeName(sel.name)];
   if (sel.tag) parts.push(CPDisk.safeName(sel.tag));
   else if (sel.status && sel.status !== 'none' && CP_STATUS[sel.status]) parts.push(CP_STATUS[sel.status].label);
-  var base = parts.join('_');
-  return CPDisk.listDir(cpServicePath(CP_EXPORTS_DIR)).then(function (items) {
-    var max = 0;
-    items.forEach(function (x) {
-      if (x.name.indexOf(base + '_') !== 0) return;
-      var n = parseInt(x.name.slice(base.length + 1), 10);
-      if (!isNaN(n) && n > max) max = n;
-    });
-    return base + '_' + (max + 1);
-  }, function (e) {
-    if (e && e.status === 404) return base + '_1';
-    throw e;
-  });
+  return cpNextExportName(parts.join('_'));
 }
 
 function cpShelfDownload() {
@@ -506,37 +493,28 @@ function cpShelfDownload() {
   if (!items.length) { cbToast('Под фильтры не попало ни одного кадра'); return; }
   var data = sel.data || {};
   var cards = data.cards || [];
-  var name, root;
+  var name;
   var used = {};
+  /* раскладка внутри архива: кадры из карточек — по папкам карточек,
+     остальные — по исходным папкам; имена файлов исходные */
+  var entries = items.map(function (x) {
+    var parts;
+    if (x.cards.length) {
+      var c = cards[x.cards[0]];
+      parts = [cpPad(x.cards[0] + 1) + ' ' + (c.title || c.category || 'Карточка')];
+    } else {
+      parts = x.dir ? x.dir.split('/') : [];
+    }
+    var dir = parts.map(CPDisk.safeName).join('/');
+    var fname = x.file.name, key = (dir ? dir + '/' : '') + fname, k = 2;
+    while (used[key]) { fname = x.file.name.replace(/(\.[^.]+)?$/, '_' + (k++) + '$1'); key = (dir ? dir + '/' : '') + fname; }
+    used[key] = true;
+    return { from: x.file.path, name: key, size: x.file.size };
+  });
   cbBusyShow('Готовлю архив: ' + items.length + ' кадр(ов)...', 0.02);
   cpExportName(sel).then(function (n) {
     name = n;
-    root = cpServicePath(CP_EXPORTS_DIR) + '/' + name;
-    var dirs = {}, copies = items.map(function (x) {
-      var parts;
-      if (x.cards.length) {
-        var c = cards[x.cards[0]];
-        parts = [cpPad(x.cards[0] + 1) + ' ' + (c.title || c.category || 'Карточка')];
-      } else {
-        parts = x.dir ? x.dir.split('/') : [];
-      }
-      var dir = root + (parts.length ? '/' + parts.map(CPDisk.safeName).join('/') : '');
-      dirs[dir] = true;
-      var fname = x.file.name, key = dir + '/' + fname, k = 2;
-      while (used[key]) { fname = x.file.name.replace(/(\.[^.]+)?$/, '_' + (k++) + '$1'); key = dir + '/' + fname; }
-      used[key] = true;
-      return { from: x.file.path, path: key };
-    });
-    return CPDisk.ensureDir(cpServicePath(CP_EXPORTS_DIR)).then(function () {
-      return cpCopyOnDisk(copies, Object.keys(dirs), 'Готовлю архив ' + name + ', копирую кадры');
-    });
-  }).then(function (r) {
-    cbBusyShow('Получаю ссылку на архив...', 1);
-    return CPDisk.downloadHref(root).then(function (href) {
-      cpNativeDownload(href, name, (r.done + r.exists) + ' кадр(ов)'
-        + (r.failed.length ? ' · не скопировано: ' + r.failed.length : '') + '. Кадры отмечаются как скачанные.');
-      return r;
-    });
+    return cpZipExport(name, entries, items.length + ' кадр(ов). После скачивания кадры отмечаются как скачанные.');
   }).then(function (r) {
     /* отметка «скачано» — статус не меняем */
     var stamp = { by: cpActor(), ts: new Date().toISOString(), export: name };
@@ -556,13 +534,10 @@ function cpShelfDownload() {
         var cur = d.meta.cp.downloads[pid];
         d.meta.cp.downloads[pid] = { n: (cur ? cur.n : 0) + 1, first: cur ? cur.first : stamp, last: stamp };
       });
-      cpShelfEvent(d, 'download', { export: name, count: r.done + r.exists, filters: filters,
-        again: items.filter(function (x) { return x.dl; }).length || undefined,
-        failed: r.failed.length ? r.failed : undefined });
+      cpShelfEvent(d, 'download', { export: name, count: r.files, parts: r.parts.length, filters: filters,
+        again: items.filter(function (x) { return x.dl; }).length || undefined });
     }).then(function () {
-      cbBusyHide();
       cpRenderPanel();
-
     });
   }).catch(function (e) { cpHandleError(e, 'Скачивание'); });
 }

@@ -6,7 +6,8 @@
 Что делает:
   1. По авторизованному ключу сервисного аккаунта получает IAM-токен.
   2. Находит или создаёт функцию content-pulse-proxy.
-  3. Выкладывает новую версию из proxy/index.js (nodejs18, 256 МБ, 120 с).
+  3. Выкладывает новую версию из proxy/index.js (nodejs18, 1 ГБ, 600 с —
+     сборка ZIP-архивов выгрузки).
   4. Делает функцию публичной (вызывать может страница без входа в облако;
      без токена Яндекс Диска функция ничего не делает).
 Печатает адрес вызова.
@@ -81,7 +82,7 @@ def main():
         z.write(os.path.join(HERE, 'index.js'), 'index.js')
     op = call('POST', FN_API + '/versions', {
         'functionId': fn['id'], 'runtime': 'nodejs18', 'entrypoint': 'index.handler',
-        'resources': {'memory': str(256 * 1024 * 1024)}, 'executionTimeout': '120s',
+        'resources': {'memory': str(1024 * 1024 * 1024)}, 'executionTimeout': '600s',
         'content': base64.b64encode(buf.getvalue()).decode(),
     }, token=tok)
     ver = wait(op, tok)

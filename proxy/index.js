@@ -129,6 +129,172 @@ async function doCopy(token, items, dirs) {
   return { status: 200, result: { results } };
 }
 
+/* ---------- ZIP без сжатия (JPEG всё равно не сжимается) ----------
+   С октября 2026 Яндекс отключил скачивание папок архивом (ссылка на папку
+   отдаёт 500), отдельные файлы скачиваются. Поэтому архив собираем сами:
+   читаем кадры по одному, пишем ZIP потоком прямо в загрузку на Диск,
+   в служебную папку выгрузок; страница потом скачивает один файл. */
+const CRC_TABLE = (() => {
+  const t = new Int32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c;
+  }
+  return t;
+})();
+
+function crc32(buf) {
+  let c = -1;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
+}
+
+function dosDateTime(d) {
+  const time = (d.getHours() << 11) | (d.getMinutes() << 5) | (Math.floor(d.getSeconds() / 2));
+  const date = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  return { time, date };
+}
+
+function localHeader(nameBuf, crc, size, dt) {
+  const h = Buffer.alloc(30);
+  h.writeUInt32LE(0x04034b50, 0);
+  h.writeUInt16LE(20, 4);
+  h.writeUInt16LE(0x0800, 6);           /* имена в UTF-8 */
+  h.writeUInt16LE(0, 8);                /* без сжатия */
+  h.writeUInt16LE(dt.time, 10);
+  h.writeUInt16LE(dt.date, 12);
+  h.writeUInt32LE(crc, 14);
+  h.writeUInt32LE(size, 18);
+  h.writeUInt32LE(size, 22);
+  h.writeUInt16LE(nameBuf.length, 26);
+  h.writeUInt16LE(0, 28);
+  return Buffer.concat([h, nameBuf]);
+}
+
+function centralHeader(nameBuf, crc, size, offset, dt) {
+  const h = Buffer.alloc(46);
+  h.writeUInt32LE(0x02014b50, 0);
+  h.writeUInt16LE(20, 4);
+  h.writeUInt16LE(20, 6);
+  h.writeUInt16LE(0x0800, 8);
+  h.writeUInt16LE(0, 10);
+  h.writeUInt16LE(dt.time, 12);
+  h.writeUInt16LE(dt.date, 14);
+  h.writeUInt32LE(crc, 16);
+  h.writeUInt32LE(size, 20);
+  h.writeUInt32LE(size, 24);
+  h.writeUInt16LE(nameBuf.length, 28);
+  h.writeUInt16LE(0, 30);
+  h.writeUInt16LE(0, 32);
+  h.writeUInt16LE(0, 34);
+  h.writeUInt16LE(0, 36);
+  h.writeUInt32LE(0, 38);
+  h.writeUInt32LE(offset, 42);
+  return Buffer.concat([h, nameBuf]);
+}
+
+function endRecord(count, cdSize, cdOffset) {
+  const h = Buffer.alloc(22);
+  h.writeUInt32LE(0x06054b50, 0);
+  h.writeUInt16LE(count, 8);
+  h.writeUInt16LE(count, 10);
+  h.writeUInt32LE(cdSize, 12);
+  h.writeUInt32LE(cdOffset, 16);
+  return h;
+}
+
+/** Скачать один файл Диска целиком (сервер-сервер, без Origin). */
+async function readDiskFile(token, path) {
+  const link = await disk(token, 'GET', '/resources/download', { path });
+  if (link.status !== 200) throw new Error(path.split('/').pop() + ': ссылка не выдана (' + link.status + ' ' + (link.data.message || '') + ')');
+  const f = await binary(link.data.href, null);
+  if (f.status !== 200) throw new Error(path.split('/').pop() + ': файл не отдан, HTTP ' + f.status);
+  return f.buf;
+}
+
+/** PUT потоком с известной длиной. */
+function openUpload(href, length) {
+  const https = require('https');
+  return new Promise((resolve, reject) => {
+    const u = new URL(href);
+    const req = https.request({ method: 'PUT', hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search,
+      headers: { 'Content-Length': length, 'Content-Type': 'application/zip' } });
+    const done = new Promise((res, rej) => {
+      req.on('response', (r) => { let t = ''; r.on('data', (c) => { t += c; }); r.on('end', () => res({ status: r.statusCode, body: t })); });
+      req.on('error', rej);
+    });
+    resolve({
+      write(buf) {
+        return new Promise((res, rej) => {
+          const ok = req.write(buf, (e) => (e ? rej(e) : null));
+          if (ok) res(); else req.once('drain', res);
+        });
+      },
+      end() { req.end(); return done; },
+      abort() { try { req.destroy(); } catch (e) { } },
+    });
+    req.on('error', reject);
+  });
+}
+
+async function doZip(token, target, entries) {
+  const t0 = Date.now();
+  const dt = dosDateTime(new Date());
+  const items = entries.map((e) => ({ from: e.from, name: Buffer.from(String(e.name).replace(/^\/+/, ''), 'utf8'), size: +e.size || 0 }));
+  if (!items.length) return { status: 400, result: { error: 'Нет файлов' } };
+  if (items.some((x) => !x.size)) return { status: 400, result: { error: 'Нет размеров файлов' } };
+  let total = 22;
+  for (const x of items) total += 30 + x.name.length + x.size + 46 + x.name.length;
+  if (total >= 0xFFFFFFFF || items.length >= 0xFFFF) return { status: 413, result: { error: 'Архив больше 4 ГБ — нужна разбивка на части' } };
+
+  const parent = target.slice(0, target.lastIndexOf('/'));
+  const d = await ensureDir(token, parent);
+  if (!d.ok) return { status: d.status || 500, result: { error: 'Не удалось создать папку ' + parent + ': ' + d.error } };
+  const up = await disk(token, 'GET', '/resources/upload', { path: target, overwrite: 'true' });
+  if (up.status !== 200) return { status: up.status, result: { error: 'Загрузка на Диск не выдана: ' + (up.data.message || up.status) } };
+
+  const out = await openUpload(up.data.href, total);
+  /* читаем вперёд до 4 файлов, пишем строго по порядку */
+  const AHEAD = 4;
+  const pending = [];
+  let next = 0;
+  function pump() {
+    while (next < items.length && pending.length < AHEAD) {
+      const x = items[next++];
+      const p = readDiskFile(token, x.from);
+      p.catch(() => { });
+      pending.push(p);
+    }
+  }
+  let offset = 0;
+  const central = [];
+  try {
+    pump();
+    for (let i = 0; i < items.length; i++) {
+      const x = items[i];
+      const buf = await pending.shift();
+      pump();
+      if (buf.length !== x.size) throw new Error(x.from.split('/').pop() + ': размер изменился (' + buf.length + ' вместо ' + x.size + '), обновите съёмку');
+      const crc = crc32(buf);
+      const lh = localHeader(x.name, crc, x.size, dt);
+      await out.write(lh);
+      await out.write(buf);
+      central.push(centralHeader(x.name, crc, x.size, offset, dt));
+      offset += lh.length + buf.length;
+    }
+    const cd = Buffer.concat(central);
+    await out.write(cd);
+    await out.write(endRecord(items.length, cd.length, offset));
+    const r = await out.end();
+    if (r.status !== 201 && r.status !== 202) throw new Error('Диск не принял архив: HTTP ' + r.status + ' ' + r.body.slice(0, 200));
+    return { status: 200, result: { path: target, bytes: total, files: items.length, ms: Date.now() - t0 } };
+  } catch (e) {
+    out.abort();
+    return { status: 422, result: { error: String(e && e.message || e), ms: Date.now() - t0 } };
+  }
+}
+
 module.exports.handler = async function (event) {
   const headers = event.headers || {};
   const origin = headers.Origin || headers.origin || '';
@@ -190,6 +356,80 @@ module.exports.handler = async function (event) {
       async function worker() { while (next < paths.length) { const i = next++; await one(i); } }
       await Promise.all([worker(), worker(), worker(), worker(), worker(), worker()]);
       return json(200, { items: out }, h);
+    }
+
+    /* Диагностика скачивания: получить ссылку Яндекса на path и попробовать
+       её открыть по-разному (как браузер со страницы, как адресная строка,
+       с токеном). Тело архива не качаем — только заголовки и начало ответа.
+       Токен и подпись ссылки в отчёт не попадают. */
+    if (a === 'dltest') {
+      if (!q.path) return json(400, { error: 'Нет path' }, h);
+      const link = await disk(token, 'GET', '/resources/download', { path: q.path });
+      const out = { path: q.path, link: { status: link.status, error: link.status === 200 ? undefined : (link.data.message || link.data.description) } };
+      if (link.status !== 200 || !link.data.href) return json(200, out, h);
+      const href = link.data.href;
+      const u = new URL(href);
+      out.link.host = u.host;
+      out.link.kind = u.pathname.split('/')[1] || '';
+      const page = 'https://barinskim-cmyk.github.io/content-pulse/';
+      const variants = [
+        ['как адресная строка (без заголовков)', {}],
+        ['со страницы: Referer', { Referer: page }],
+        ['со страницы: Origin', { Origin: 'https://barinskim-cmyk.github.io' }],
+        ['с токеном OAuth', { Authorization: 'OAuth ' + token }],
+      ];
+      out.tries = [];
+      for (const [name, headers] of variants) {
+        const t0 = Date.now();
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 20000);
+        const row = { name };
+        try {
+          let url = href, hops = [];
+          let r;
+          for (let i = 0; i < 5; i++) {
+            r = await fetch(url, { headers: Object.assign({ 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15' }, headers), redirect: 'manual', signal: ac.signal });
+            if (r.status >= 300 && r.status < 400 && r.headers.get('location')) {
+              const nx = new URL(r.headers.get('location'), url);
+              hops.push(r.status + ' -> ' + nx.host + nx.pathname.split('/').slice(0, 2).join('/'));
+              url = nx.toString();
+              try { await r.body?.cancel(); } catch (e) { }
+              continue;
+            }
+            break;
+          }
+          row.status = r.status;
+          row.type = r.headers.get('content-type') || '';
+          row.disposition = (r.headers.get('content-disposition') || '').slice(0, 120);
+          row.length = r.headers.get('content-length') || '';
+          if (hops.length) row.redirects = hops;
+          if (/text|json|html/.test(row.type) || r.status >= 400) {
+            const txt = await r.text();
+            row.body = txt.replace(/\s+/g, ' ').slice(0, 300);
+          } else {
+            try { await r.body?.cancel(); } catch (e) { }
+          }
+        } catch (e) {
+          row.error = String(e && e.name === 'AbortError' ? 'нет ответа за 20 с' : (e && e.message || e));
+        }
+        clearTimeout(timer);
+        row.ms = Date.now() - t0;
+        out.tries.push(row);
+      }
+      return json(200, out, h);
+    }
+
+    /* Собрать ZIP из файлов Диска и положить его на Диск:
+       POST {target, entries:[{from, name, size}]} */
+    if (a === 'zip') {
+      if (event.httpMethod !== 'POST') return json(405, { error: 'Нужен POST' }, h);
+      let body = event.body || '';
+      if (event.isBase64Encoded) body = Buffer.from(body, 'base64').toString('utf8');
+      let req;
+      try { req = JSON.parse(body); } catch (e) { return json(400, { error: 'Тело не JSON' }, h); }
+      if (!req.target || !/\.zip$/i.test(req.target)) return json(400, { error: 'Нет target .zip' }, h);
+      const r = await doZip(token, req.target, Array.isArray(req.entries) ? req.entries : []);
+      return json(r.status, r.result, h);
     }
 
     if (a === 'file') {

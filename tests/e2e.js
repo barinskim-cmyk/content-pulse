@@ -30,6 +30,7 @@ const FILES = new Map([
 const log = [];
 const DOWNLOADS = [];
 const DOWNLOADS_REFERER = [];
+const ZIPS = new Map();   /* путь .zip на Диске -> имена внутри архива */
 const PREVIEW_CALLS = { single: 0, batch: 0 };
 /* режим «превью заблокировано»: файлы — настоящие картинки, их будут уменьшать в браузере */
 if (process.env.BLOCK_PREVIEW) for (const k of [...FILES.keys()]) FILES.set(k, png(60, 40));
@@ -65,6 +66,8 @@ async function route(r) {
       return json(404, { message: 'not found' });
     }
     if (u.pathname === '/v1/disk/resources' && m === 'PUT') { if (DIRS.has(p)) return json(409, { message: 'exists' }); DIRS.add(p); return json(201, {}); }
+    /* с октября 2026 Яндекс не отдаёт папки архивом */
+    if (u.pathname === '/v1/disk/resources/download' && DIRS.has(p)) return json(500, { error: 'InternalServerError', message: 'Ошибка сервера.' });
     if (u.pathname === '/v1/disk/resources/download') return json(200, { href: 'https://downloader.disk.yandex.ru/dl?p=' + encodeURIComponent(p) });
     if (u.pathname === '/v1/disk/resources/upload') return json(200, { href: 'https://uploader1.disk.yandex.net/up?p=' + encodeURIComponent(p) });
     if (u.pathname === '/v1/disk/resources/copy' && m === 'POST') {
@@ -100,6 +103,17 @@ async function route(r) {
       if (process.env.FAIL_STATE_DL && /_contentpulse\.json$/.test(q.path)) return json(502, { error: 'fail' });
       if (!FILES.has(q.path)) return json(404, { error: 'nf' });
       return r.fulfill({ status: 200, headers: { ...CORS, 'content-type': 'application/octet-stream' }, body: FILES.get(q.path) });
+    }
+    if (q.a === 'zip' && m === 'POST') {
+      const b = JSON.parse(req.postData() || '{}');
+      for (const e of b.entries) {
+        if (!FILES.has(e.from)) return json(422, { error: 'нет файла ' + e.from });
+        if (FILES.get(e.from).length !== e.size) return json(422, { error: 'размер изменился ' + e.from });
+      }
+      const parts = b.target.split('/'); for (let i = 2; i < parts.length; i++) DIRS.add(parts.slice(0, i).join('/'));
+      ZIPS.set(b.target, b.entries.map(e => e.name));
+      FILES.set(b.target, Buffer.from('PK' + b.entries.map(e => e.name).join('\n')));
+      return json(200, { path: b.target, bytes: 1, files: b.entries.length, ms: 5 });
     }
     if (q.a === 'copy' && m === 'POST') {
       const b = JSON.parse(req.postData() || '{}');
@@ -209,10 +223,19 @@ async function route(r) {
   await page.evaluate(() => document.getElementById('cpMenuDlSel').click());
   await page.waitForFunction(() => App.projectMeta.cp.events.some(e => e.action === 'download_selection'), null, { timeout: 10000 });
   await page.waitForTimeout(500);
-  const exp = [...FILES.keys()].filter(k => k.includes('/_выгрузка/'));
-  check('отбор разложен на Диске по папкам карточек (копии, порядок)', exp.some(k => /\/_выгрузка\/LM-1043 — отбор [^/]+\/01 Лук 1[^/]*\/01_a\.jpg$/.test(k)) && exp.some(k => /\/02_b\.jpg$/.test(k)), exp.join(' | '));
-  check('архив отбора скачивается обычной загрузкой браузера', DOWNLOADS.some(p => /_выгрузка\/LM-1043 — отбор/.test(p)), DOWNLOADS.join(' | '));
-  check('служебная папка выгрузки не попадает в галерею', await page.evaluate(() => App.photos.every(p => !/_выгрузка/.test(p.disk || ''))));
+  const zSel = ZIPS.get('disk:/_ContentPulse/выгрузки/LM-1043_отбор_1.zip') || [];
+  check('архив отбора собран прослойкой: папки карточек и порядок', zSel.some(n => /^LM-1043_отбор_1\/01 Лук 1[^/]*\/01_a\.jpg$/.test(n)) && zSel.some(n => /\/02_b\.jpg$/.test(n)), zSel.join(' | '));
+  check('архив отбора скачивается обычной загрузкой браузера', DOWNLOADS.some(p => /выгрузки\/LM-1043_отбор_1\.zip$/.test(p)), DOWNLOADS.join(' | '));
+  check('ссылку на папку у Яндекса не просим (папки он не отдаёт)', !log.some(l => /resources\/download disk:\/_ContentPulse\/выгрузки\/[^.]*$/.test(l)));
+
+  /* вся съёмка большая: части по размеру */
+  await page.evaluate(() => { CP.zipTarget = 250; document.getElementById('cpMenuDlAll').click(); });
+  await page.waitForFunction(() => App.projectMeta.cp.events.some(e => e.action === 'download_shoot'), null, { timeout: 10000 });
+  const zAll = [...ZIPS.keys()].filter(k => /LM-1043_вся съёмка_1_ч\d+\.zip$/.test(k));
+  const allNames = zAll.flatMap(k => ZIPS.get(k));
+  check('вся съёмка частями _ч1, _ч2...: все кадры с исходными папками', zAll.length >= 2 && allNames.length === 4 && allNames.some(n => n === 'LM-1043_вся съёмка_1/part2/c.jpg'), zAll.join(' | ') + ' :: ' + allNames.join(' | '));
+  check('карточка: кнопка на каждую часть', await page.evaluate(n => document.querySelectorAll('#cpDlCard a.cp-dlcard-btn').length === n, zAll.length));
+  await page.evaluate(() => { CP.zipTarget = 400 * 1024 * 1024; });
 
   /* повторное открытие той же съёмки: отбор читается с Диска */
   await page.evaluate(() => { cpShowShelf(); });
@@ -261,9 +284,9 @@ async function route(r) {
   check('фильтр по статусу «Ретушь»', await page.evaluate(() => cpFiltered(CP.sel).length === 2));
   await page.click('[data-cp-p="download"]');
   await page.waitForFunction(() => CP.sel && CP.sel.data && Object.keys(CP.sel.data.meta.cp.downloads).length === 2, null, { timeout: 10000 });
-  const ex1 = [...FILES.keys()].filter(k => k.startsWith('disk:/_ContentPulse/выгрузки/'));
-  check('выгрузка: <код>_Ретушь_1, папка карточки, исходные имена файлов', ex1.some(k => /выгрузки\/LM-1043_Ретушь_1\/01 Лук 1[^/]*\/a\.jpg$/.test(k)), ex1.join(' | '));
-  check('архив выгрузки скачивается обычной загрузкой', DOWNLOADS.some(p => /выгрузки\/LM-1043_Ретушь_1$/.test(p)));
+  const ex1 = ZIPS.get('disk:/_ContentPulse/выгрузки/LM-1043_Ретушь_1.zip') || [];
+  check('выгрузка: LM-1043_Ретушь_1.zip, папка карточки, исходные имена файлов', ex1.some(n => /^LM-1043_Ретушь_1\/01 Лук 1[^/]*\/a\.jpg$/.test(n)), [...ZIPS.keys()].join(' | '));
+  check('архив выгрузки скачивается обычной загрузкой', DOWNLOADS.some(p => /выгрузки\/LM-1043_Ретушь_1\.zip$/.test(p)));
   check('карточка «Архив готов» с кнопкой «Скачать ZIP»', await page.evaluate(() => {
     const b = document.querySelector('#cpDlCard a.cp-dlcard-btn');
     return !!b && getComputedStyle(document.getElementById('cpDlCard')).display !== 'none' && /LM-1043_%D0%A0|LM-1043_Ретушь_1/.test(decodeURIComponent(b.href)) && b.target === '_blank';
@@ -275,7 +298,7 @@ async function route(r) {
   await page.selectOption('#cpFDl', '');
   await page.click('[data-cp-p="download"]');
   await page.waitForFunction(() => Object.values(CP.sel.data.meta.cp.downloads).every(d => d.n === 2), null, { timeout: 10000 });
-  check('повторное скачивание разрешено: _2 и счётчик ×2', [...FILES.keys()].some(k => /выгрузки\/LM-1043_Ретушь_2\//.test(k)));
+  check('повторное скачивание разрешено: _2 и счётчик ×2', ZIPS.has('disk:/_ContentPulse/выгрузки/LM-1043_Ретушь_2.zip'));
   await page.selectOption('#cpFStatus', '');
   await page.check('[data-cp-fold="part2"]');
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-panel.png') });
