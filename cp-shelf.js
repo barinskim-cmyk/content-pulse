@@ -428,6 +428,7 @@ function cpRenderPanel() {
     + '</select></div>';
   if (sel.stateError) body += '<div class="cp-note cp-warn">Отбор съёмки не прочитался — статусы и карточки не учитываются.</div>';
   else if (!sel.data) body += '<div class="cp-note">Съёмку ещё не открывали в Content Pulse: карточек и статусов пока нет.</div>';
+  body += '<div class="cp-note"><a href="#" data-cp-p="bench">Проверить скорость Диска</a> — замер на 3 кадрах этой съёмки, отчёт для разработки</div>';
 
   var items = cpFiltered(sel);
   var inCards = items.filter(function (x) { return x.cards.length; }).length;
@@ -569,6 +570,37 @@ function cpShelfDownload() {
   }).catch(function (e) { cpHandleError(e, 'Скачивание'); });
 }
 
+/* ---------- замер скорости ---------- */
+
+function cpBench() {
+  var sel = CP.sel;
+  if (!sel || !sel.files || !sel.files.length) { cbToast('Дождитесь, пока досчитаются кадры съёмки'); return; }
+  /* три кадра из разных мест списка */
+  var f = sel.files, n = f.length;
+  var pick = [f[0], f[Math.floor(n / 2)], f[n - 1]].filter(function (x, i, a) { return a.indexOf(x) === i; });
+  var t0 = Date.now();
+  cbBusyShow('Замеряю скорость Диска на ' + pick.length + ' кадрах...', 0.3);
+  var tick = setInterval(function () { cbBusyShow('Замеряю скорость Диска на ' + pick.length + ' кадрах... ' + Math.round((Date.now() - t0) / 1000) + ' с', 0.5); }, 1000);
+  CPDisk.proxyBench(pick.map(function (x) { return x.path; })).then(function (r) {
+    clearInterval(tick);
+    cbBusyHide();
+    var lines = ['Content Pulse — замер скорости Диска', new Date().toISOString(), 'съёмка: ' + sel.name + ' · кадров: ' + n, ''];
+    lines.push('По одному:');
+    (r.reads || []).forEach(function (x) {
+      lines.push('  ' + x.file + ': ' + (x.error ? 'ОШИБКА ' + x.error : (x.mb + ' МБ, ссылка ' + x.ms_link + ' мс, файл ' + x.ms_file + ' мс, ' + x.mb_s + ' МБ/с, HTTP ' + x.status + (x.body ? ' ' + x.body : ''))));
+    });
+    if (r.parallel) lines.push('Параллельно ' + r.parallel.files + ': ' + r.parallel.mb + ' МБ за ' + r.parallel.ms + ' мс = ' + r.parallel.mb_s + ' МБ/с' + (r.parallel.errors.length ? ' · ошибки: ' + r.parallel.errors.join('; ') : ''));
+    var u = r.upload || {};
+    lines.push('Загрузка на Диск: ' + (u.error ? 'ОШИБКА ' + u.error : (u.mb + ' МБ за ' + u.ms + ' мс = ' + u.mb_s + ' МБ/с, HTTP ' + u.status)));
+    lines.push('', 'всего ' + Math.round((Date.now() - t0) / 1000) + ' с · ' + navigator.userAgent);
+    cpReportCard('Замер скорости Диска', lines.join('\n'));
+  }).catch(function (e) {
+    clearInterval(tick);
+    cpHandleError(e, 'Замер скорости');
+    cpReportCard('Замер скорости Диска', 'ОШИБКА: ' + ((e && (e.status + ' ' + (e.body || e.message))) || e) + '\nчерез ' + Math.round((Date.now() - t0) / 1000) + ' с');
+  });
+}
+
 /* ---------- события панели ---------- */
 
 document.getElementById('cpPanel').addEventListener('click', function (e) {
@@ -588,6 +620,7 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
   if (act === 'close') { CP.sel = null; cpRenderPanel(); cpMarkSelected(); }
   else if (act === 'open') cpOpenShoot(sel.path, sel.name);
   else if (act === 'download') cpShelfDownload();
+  else if (act === 'bench') cpBench();
   else if (act === 'mkdict') cpCreateDict();
   else if (act === 'reloaddict') cpLoadDict(true).then(cpRenderPanel, function (er) { cpHandleError(er, 'Словарь'); });
   else if (act === 'assign') {

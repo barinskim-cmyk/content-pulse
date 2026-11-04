@@ -292,6 +292,10 @@ var CPDisk = (function () {
   function proxyZip(target, entries) {
     return proxyReq({ a: 'zip' }, { method: 'POST', body: { target: target, entries: entries }, as: 'json' });
   }
+  /** Замер скорости чтения кадров и загрузки на Диск: paths -> отчёт */
+  function proxyBench(paths) {
+    return proxyReq({ a: 'bench' }, { method: 'POST', body: { files: paths }, as: 'json' });
+  }
   /** Диагностика: как Яндекс отвечает на ссылку скачивания path. */
   function proxyDlTest(path) { return proxyReq({ a: 'dltest', path: path }, { as: 'json' }); }
   /** Пачка превью: -> {items:[{path, type, data(base64)} | {path, status, error}]} */
@@ -337,7 +341,7 @@ var CPDisk = (function () {
     setToken: function (t) { token = t || ''; },
     setProxy: function (u) { proxy = (u || '').replace(/\/+$/, ''); },
     hasProxy: function () { return !!proxy; },
-    proxyPreview: proxyPreview, proxyPreviews: proxyPreviews, proxyDlTest: proxyDlTest, proxyZip: proxyZip, proxyFile: proxyFile, proxyCopy: proxyCopy,
+    proxyPreview: proxyPreview, proxyPreviews: proxyPreviews, proxyDlTest: proxyDlTest, proxyZip: proxyZip, proxyBench: proxyBench, proxyFile: proxyFile, proxyCopy: proxyCopy,
     hasToken: function () { return !!token; },
     DiskError: DiskError,
     STATE_FILE: STATE_FILE, RETOUCH_DIR: RETOUCH_DIR,

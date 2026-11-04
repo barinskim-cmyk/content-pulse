@@ -104,6 +104,11 @@ async function route(r) {
       if (!FILES.has(q.path)) return json(404, { error: 'nf' });
       return r.fulfill({ status: 200, headers: { ...CORS, 'content-type': 'application/octet-stream' }, body: FILES.get(q.path) });
     }
+    if (q.a === 'bench' && m === 'POST') {
+      const b = JSON.parse(req.postData() || '{}');
+      const reads = b.files.map(p => ({ file: p.split('/').pop(), ms_link: 120, ms_file: 300, mb: 12.5, mb_s: 41.7, status: 200 }));
+      return json(200, { reads, parallel: { files: reads.length, ms: 400, mb: 37.5, mb_s: 93.7, errors: [] }, upload: { status: 201, mb: 8, ms: 900, mb_s: 8.9 } });
+    }
     if (q.a === 'zip' && m === 'POST') {
       const b = JSON.parse(req.postData() || '{}');
       for (const e of b.entries) {
@@ -303,6 +308,13 @@ async function route(r) {
   await page.check('[data-cp-fold="part2"]');
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-panel.png') });
   await page.uncheck('[data-cp-fold="part2"]');
+  await page.click('[data-cp-p="bench"]');
+  await page.waitForSelector('#cpDlCard textarea.cp-report', { timeout: 8000 });
+  check('замер скорости Диска: отчёт с чтением, параллелью и загрузкой', await page.evaluate(() => {
+    const t = document.querySelector('#cpDlCard textarea.cp-report').value;
+    return /По одному/.test(t) && /Параллельно 3/.test(t) && /Загрузка на Диск: 8 МБ/.test(t);
+  }));
+  await page.evaluate(() => { document.getElementById('cpDlCard').style.display = 'none'; });
   check('превью грузятся пачками через прослойку', PREVIEW_CALLS.batch > 0 && PREVIEW_CALLS.single === 0, JSON.stringify(PREVIEW_CALLS));
 
   /* ---------- папка ретуши из настроек на Диске ---------- */

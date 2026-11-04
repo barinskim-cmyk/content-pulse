@@ -25,6 +25,7 @@ const ALLOWED_ORIGINS = [
   'https://barinskim-cmyk.github.io',
 ];
 const MAX_FILE = 3 * 1024 * 1024;   /* лимит ответа функции ~3.5 МБ */
+const ZIP_BUDGET_MS = 480000;        /* функция живёт 600 с — оставляем запас на загрузку */
 const MAX_BATCH = 2.5 * 1024 * 1024; /* пачка превью: base64 + JSON укладываются в лимит */
 
 function cors(origin) {
@@ -61,12 +62,26 @@ async function disk(token, method, endpoint, params) {
   }
 }
 
-async function binary(url, token) {
+async function binary(url, token, timeoutMs) {
   const headers = token ? { Authorization: 'OAuth ' + token } : {};
   for (let attempt = 0; ; attempt++) {
-    const r = await fetch(url, { headers, redirect: 'follow' });
-    if ([429, 500, 502, 503, 504].includes(r.status) && attempt < 3) { await sleep(500 * Math.pow(2, attempt)); continue; }
-    return { status: r.status, type: r.headers.get('content-type') || 'application/octet-stream', buf: Buffer.from(await r.arrayBuffer()) };
+    const ac = new AbortController();
+    const timer = timeoutMs ? setTimeout(() => ac.abort(), timeoutMs) : null;
+    let r;
+    try {
+      r = await fetch(url, { headers, redirect: 'follow', signal: ac.signal });
+      if (![429, 500, 502, 503, 504].includes(r.status) || attempt >= 3) {
+        const buf = Buffer.from(await r.arrayBuffer());
+        if (timer) clearTimeout(timer);
+        return { status: r.status, type: r.headers.get('content-type') || 'application/octet-stream', buf };
+      }
+    } catch (e) {
+      if (timer) clearTimeout(timer);
+      if (e && e.name === 'AbortError') throw new Error('нет ответа за ' + Math.round(timeoutMs / 1000) + ' с');
+      throw e;
+    }
+    if (timer) clearTimeout(timer);
+    await sleep(500 * Math.pow(2, attempt));
   }
 }
 
@@ -206,9 +221,13 @@ function endRecord(count, cdSize, cdOffset) {
 
 /** Скачать один файл Диска целиком (сервер-сервер, без Origin). */
 async function readDiskFile(token, path) {
+  const t0 = Date.now();
   const link = await disk(token, 'GET', '/resources/download', { path });
   if (link.status !== 200) throw new Error(path.split('/').pop() + ': ссылка не выдана (' + link.status + ' ' + (link.data.message || '') + ')');
-  const f = await binary(link.data.href, null);
+  const t1 = Date.now();
+  let f;
+  try { f = await binary(link.data.href, null, 90000); } catch (e) { throw new Error(path.split('/').pop() + ': ' + e.message); }
+  console.log(JSON.stringify({ ev: 'read', ms_link: t1 - t0, ms_file: Date.now() - t1, bytes: f.buf.length, status: f.status }));
   if (f.status !== 200) throw new Error(path.split('/').pop() + ': файл не отдан, HTTP ' + f.status);
   return f.buf;
 }
@@ -273,6 +292,7 @@ async function doZip(token, target, entries) {
     pump();
     for (let i = 0; i < items.length; i++) {
       const x = items[i];
+      if (Date.now() - t0 > ZIP_BUDGET_MS) throw new Error('Яндекс отдаёт файлы слишком медленно: за ' + Math.round((Date.now() - t0) / 1000) + ' с прочитано ' + i + ' из ' + items.length + ' кадров');
       const buf = await pending.shift();
       pump();
       if (buf.length !== x.size) throw new Error(x.from.split('/').pop() + ': размер изменился (' + buf.length + ' вместо ' + x.size + '), обновите съёмку');
@@ -288,6 +308,7 @@ async function doZip(token, target, entries) {
     await out.write(endRecord(items.length, cd.length, offset));
     const r = await out.end();
     if (r.status !== 201 && r.status !== 202) throw new Error('Диск не принял архив: HTTP ' + r.status + ' ' + r.body.slice(0, 200));
+    console.log(JSON.stringify({ ev: 'zip', files: items.length, bytes: total, ms: Date.now() - t0 }));
     return { status: 200, result: { path: target, bytes: total, files: items.length, ms: Date.now() - t0 } };
   } catch (e) {
     out.abort();
@@ -430,6 +451,59 @@ module.exports.handler = async function (event) {
       if (!req.target || !/\.zip$/i.test(req.target)) return json(400, { error: 'Нет target .zip' }, h);
       const r = await doZip(token, req.target, Array.isArray(req.entries) ? req.entries : []);
       return json(r.status, r.result, h);
+    }
+
+    /* Замер: как быстро Диск отдаёт кадры этой функции и принимает загрузку.
+       POST {files:[до 4 путей]} -> {reads:[...], parallel:{...}, upload:{...}} */
+    if (a === 'bench') {
+      if (event.httpMethod !== 'POST') return json(405, { error: 'Нужен POST' }, h);
+      let body = event.body || '';
+      if (event.isBase64Encoded) body = Buffer.from(body, 'base64').toString('utf8');
+      let req;
+      try { req = JSON.parse(body); } catch (e) { return json(400, { error: 'Тело не JSON' }, h); }
+      const files = (Array.isArray(req.files) ? req.files : []).slice(0, 4);
+      const out = { reads: [], parallel: null, upload: null };
+      async function measure(path) {
+        const row = { file: path.split('/').pop() };
+        const t0 = Date.now();
+        try {
+          const link = await disk(token, 'GET', '/resources/download', { path });
+          row.ms_link = Date.now() - t0;
+          row.link_status = link.status;
+          if (link.status !== 200) { row.error = link.data.message || link.data.description || ('HTTP ' + link.status); return row; }
+          const t1 = Date.now();
+          const f = await binary(link.data.href, null, 40000);
+          row.ms_file = Date.now() - t1;
+          row.status = f.status;
+          row.mb = +(f.buf.length / 1048576).toFixed(2);
+          row.mb_s = row.ms_file ? +(row.mb / (row.ms_file / 1000)).toFixed(2) : null;
+          if (f.status !== 200) row.body = f.buf.toString('utf8', 0, 200);
+        } catch (e) { row.error = String(e && e.message || e); row.ms_total = Date.now() - t0; }
+        return row;
+      }
+      for (const p of files) out.reads.push(await measure(p));
+      if (files.length > 1) {
+        const t0 = Date.now();
+        const rows = await Promise.all(files.map(measure));
+        const mb = rows.reduce((a, r) => a + (r.mb || 0), 0);
+        out.parallel = { files: rows.length, ms: Date.now() - t0, mb: +mb.toFixed(2), mb_s: +(mb / ((Date.now() - t0) / 1000)).toFixed(2), errors: rows.filter(r => r.error || r.status !== 200).map(r => r.file + ': ' + (r.error || r.status)) };
+      }
+      try {
+        const target = 'disk:/_ContentPulse/проверка_скорости.bin';
+        await ensureDir(token, 'disk:/_ContentPulse');
+        const t0 = Date.now();
+        const up = await disk(token, 'GET', '/resources/upload', { path: target, overwrite: 'true' });
+        if (up.status !== 200) out.upload = { error: 'ссылка на загрузку: ' + up.status + ' ' + (up.data.message || '') };
+        else {
+          const size = 8 * 1048576;
+          const w = await openUpload(up.data.href, size);
+          await w.write(Buffer.alloc(size, 7));
+          const r = await w.end();
+          const ms = Date.now() - t0;
+          out.upload = { status: r.status, mb: 8, ms, mb_s: +(8 / (ms / 1000)).toFixed(2) };
+        }
+      } catch (e) { out.upload = { error: String(e && e.message || e) }; }
+      return json(200, out, h);
     }
 
     if (a === 'file') {

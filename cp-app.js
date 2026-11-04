@@ -96,6 +96,7 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
     + '.cp-dlcard-note{color:#a3a09a;font-size:11px;line-height:1.5;margin:8px 0}'
     + '.cp-dlcard-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}'
     + '.cp-dlcard-size{flex:1;color:#a3a09a;font-size:11px}'
+    + '.cp-report{width:100%;height:220px;margin:8px 0;background:#141413;border:1px solid #3a3a37;color:#f2f2f1;font:11px/1.4 \"IBM Plex Mono\",monospace;box-sizing:border-box;padding:6px}'
     + '.cp-dlcard-alt{background:none;border:1px solid #3a3a37;color:#f2f2f1;padding:6px 12px;border-radius:3px;font-size:12px;cursor:pointer}'
     + '.cp-dlcard-url{display:none;width:100%;margin-top:8px;background:#141413;border:1px solid #3a3a37;color:#a3a09a;font-size:10px;padding:4px 6px;box-sizing:border-box}'
     + '.cp-dlcard-btn{display:inline-block;margin-top:4px;background:#C9956B;color:#141413;text-decoration:none;padding:7px 14px;border-radius:3px;font-weight:600;font-size:12px}'
@@ -1198,9 +1199,9 @@ function cpFinishDownload(res, action, extra) {
 
 var CP_EXPORTS = 'выгрузки';
 var CP_ZIP_PART_MS = 30000;              /* целимся в ~30 с на часть */
-var CP_ZIP_MIN = 150 * 1024 * 1024;
+var CP_ZIP_MIN = 40 * 1024 * 1024;
 var CP_ZIP_MAX = 1800 * 1024 * 1024;
-CP.zipTarget = 400 * 1024 * 1024;        /* первая часть; дальше — по замеру скорости */
+CP.zipTarget = 100 * 1024 * 1024;        /* первая часть; дальше — по замеру скорости */
 
 function cpExportsDir() { return CP_CONFIG.serviceDir.replace(/\/+$/, '') + '/' + CP_EXPORTS; }
 
@@ -1263,9 +1264,15 @@ function cpZipExport(name, entries, note) {
     cbBusyShow(msg, Math.max(0.03, res.bytes / Math.max(1, total)));
     cpDlCard(name, note, res.parts, msg);
     var t0 = Date.now();
+    /* вызов идёт до нескольких минут — показываем, что время идёт */
+    var tick = setInterval(function () {
+      var sec = Math.round((Date.now() - t0) / 1000);
+      cbBusyShow(msg + ' · ' + sec + ' с', Math.max(0.03, res.bytes / Math.max(1, total)));
+    }, 1000);
     return CPDisk.proxyZip(target, chunk.map(function (e) {
       return { from: e.from, name: name + '/' + e.name, size: e.size };
     })).then(function (out) {
+      clearInterval(tick);
       /* подстроить размер следующей части под скорость */
       var ms = Math.max(1000, Date.now() - t0);
       CP.zipTarget = Math.max(CP_ZIP_MIN, Math.min(CP_ZIP_MAX, Math.round(bytes / ms * CP_ZIP_PART_MS)));
@@ -1278,7 +1285,7 @@ function cpZipExport(name, entries, note) {
         cpDlCard(name, note, res.parts, i < entries.length ? 'Собираю следующую часть...' : '');
         return nextPart();
       });
-    });
+    }, function (e) { clearInterval(tick); throw e; });
   }
   return nextPart().then(function (r) { cbBusyHide(); return r; }, function (e) {
     cbBusyHide();
@@ -1349,6 +1356,27 @@ function cpDlCard(title, note, parts, progress, error) {
   h += '<input class="cp-dlcard-url" readonly value="">';
   box.innerHTML = h;
   box.style.display = 'block';
+}
+
+/** Карточка с текстовым отчётом и кнопкой «Скопировать отчёт». */
+function cpReportCard(title, text) {
+  cpDlCard(title, '', [], '');
+  var box = document.getElementById('cpDlCard');
+  var ta = document.createElement('textarea');
+  ta.className = 'cp-report';
+  ta.readOnly = true;
+  ta.value = text;
+  var btn = document.createElement('button');
+  btn.className = 'cp-dlcard-alt';
+  btn.textContent = 'Скопировать отчёт';
+  btn.onclick = function () {
+    ta.focus(); ta.select();
+    var done = function () { cbToast('Отчёт скопирован — пришлите его в чат'); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, function () { try { document.execCommand('copy'); } catch (x) { } done(); });
+    else { try { document.execCommand('copy'); } catch (x) { } done(); }
+  };
+  box.appendChild(ta);
+  box.appendChild(btn);
 }
 
 function cpStamp() {
