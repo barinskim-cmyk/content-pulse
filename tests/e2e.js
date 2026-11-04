@@ -109,6 +109,12 @@ async function route(r) {
   await page.waitForFunction(() => App.photos.filter(p => p.dataUrl).length === 3, null, { timeout: 8000 });
   check('съёмка: 3 JPEG включая часть в подпапке, превью загружены', true);
   check('галерея отрисована', (await page.$$('#cbTrayGrid .cb-thumb')).length === 3);
+  await page.selectOption('#cpFolderFilter', 'part2');
+  check('фильтр по папке: только содержимое part2', (await page.$$('#cbTrayGrid .cb-thumb')).length === 1);
+  await page.selectOption('#cpFolderFilter', '/');
+  check('фильтр: только корень съёмки', (await page.$$('#cbTrayGrid .cb-thumb')).length === 2);
+  await page.selectOption('#cpFolderFilter', '');
+  check('фильтр сброшен: все папки', (await page.$$('#cbTrayGrid .cb-thumb')).length === 3);
   await page.waitForFunction(() => !App.dirty, null, { timeout: 8000 });
   check('общий файл отбора создан на Диске', FILES.has('disk:/Архив/LM-1043/_contentpulse.json'));
 

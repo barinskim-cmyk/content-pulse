@@ -42,6 +42,7 @@ var CP = {
   pollTimer: null,
   shoots: [],
   previews: {},        /* disk path -> ссылка превью из последнего обхода */
+  folder: '',          /* фильтр галереи по папке съёмки ('' = все, '/' = только корень) */
   previewMode: '',     /* '' | 'preview' | 'download' — как получаем картинки */
   files: [],           /* последний обход папки съёмки на Диске */
   editSeq: 0           /* счётчик правок: сохранение снимает dirty, только если новых не было */
@@ -351,6 +352,7 @@ function cpOpenShoot(path, name) {
     CP.shoot = { path: path, name: name };
     CP.rev = st.rev;
     CP.files = [];
+    CP.folder = '';
     cpApplyRemote(st.data || cpBlankProject(name));
     cpSetTitle();
     cbBusyShow('Читаю файлы съёмки...', 0.4);
@@ -727,6 +729,7 @@ function cpDecorate(rootId) {
     if (!pid) return;
     var p = cbPhotoById(pid);
     if (!p || (p.kind || 'photo') === 'ref') return;
+    if (p.disk) el.title = (cpRelDir(p) ? cpRelDir(p) + '/' : '') + p.name;
     el.insertAdjacentHTML('beforeend', cpBadgeHTML(pid)
       + '<button class="cp-act" data-cp-pid="' + pid + '" title="Действия с кадром">...</button>');
   });
@@ -767,6 +770,85 @@ function cpCardPids(card) {
   else (card.slots || []).forEach(function (s) { if (s.pid) out.push(s.pid); });
   return out;
 }
+
+/* ---------- фильтр галереи по папкам съёмки ---------- */
+
+/** Путь кадра внутри съёмки без имени файла: 'Папка 1/Подпапка' или '' для корня. */
+function cpRelDir(p) {
+  if (!p.disk || !CP.shoot) return '';
+  var root = CP.shoot.path.replace(/\/+$/, '') + '/';
+  var rel = p.disk.indexOf(root) === 0 ? p.disk.slice(root.length) : p.name;
+  var i = rel.lastIndexOf('/');
+  return i < 0 ? '' : rel.slice(0, i);
+}
+
+function cpPhotoInFolder(p) {
+  if (!CP.folder || !p.disk) return true;   /* рефы и локальные — всегда видны */
+  var d = cpRelDir(p);
+  if (CP.folder === '/') return d === '';
+  return d === CP.folder || d.indexOf(CP.folder + '/') === 0;
+}
+
+/** Список папок: первый и второй уровень, с числом кадров (включая вложенные). */
+function cpRenderFolderFilter() {
+  var sel = document.getElementById('cpFolderFilter');
+  if (!sel) return;
+  var counts = {}, root = 0, total = 0;
+  App.photos.forEach(function (p) {
+    if (!p.disk || (p.kind || 'photo') === 'ref') return;
+    total++;
+    var d = cpRelDir(p);
+    if (!d) { root++; return; }
+    var parts = d.split('/');
+    counts[parts[0]] = (counts[parts[0]] || 0) + 1;
+    if (parts.length > 1) {
+      var k2 = parts[0] + '/' + parts[1];
+      counts[k2] = (counts[k2] || 0) + 1;
+    }
+  });
+  var keys = Object.keys(counts).sort(function (a, b) {
+    return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+  });
+  sel.parentNode.style.display = (CP.shoot && keys.length) ? '' : 'none';
+  if (CP.folder && CP.folder !== '/' && !counts[CP.folder]) CP.folder = '';
+  var html = '<option value="">Все папки · ' + total + '</option>';
+  if (root && keys.length) html += '<option value="/">Корень съёмки · ' + root + '</option>';
+  keys.forEach(function (k) {
+    var lvl2 = k.indexOf('/') !== -1;
+    var label = lvl2 ? '\u00a0\u00a0\u00a0\u00a0' + k.slice(k.indexOf('/') + 1) : k;
+    html += '<option value="' + cbEsc(k) + '">' + cbEsc(label) + ' · ' + counts[k] + '</option>';
+  });
+  sel.innerHTML = html;
+  sel.value = CP.folder;
+}
+
+(function cpInjectFolderFilter() {
+  var head = document.querySelector('.cb-tray-head');
+  if (!head) return;
+  var row = document.createElement('div');
+  row.className = 'cb-row';
+  row.style.display = 'none';
+  row.style.marginTop = '6px';
+  row.innerHTML = '<select id="cpFolderFilter" title="Показать только содержимое папки (со всеми вложенными)" style="width:100%"></select>';
+  head.appendChild(row);
+  document.getElementById('cpFolderFilter').onchange = function () {
+    CP.folder = this.value;
+    cbRenderTray();
+  };
+})();
+
+/* галерея: рисуем только кадры выбранной папки (Cardboard об этом не знает —
+   на время отрисовки подставляем ему отфильтрованный список) */
+cbRenderTray = (function (orig) {
+  return function () {
+    cpRenderFolderFilter();
+    if (!CP.shoot || !CP.folder) return orig.apply(this, arguments);
+    var all = App.photos;
+    App.photos = all.filter(cpPhotoInFolder);
+    try { return orig.apply(this, arguments); }
+    finally { App.photos = all; }
+  };
+})(cbRenderTray);
 
 ['cbRenderCards', 'cbRenderConts', 'cbRenderTray'].forEach(function (fn) {
   var orig = window[fn];
