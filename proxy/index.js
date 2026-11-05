@@ -250,6 +250,12 @@ function s3Call(method, key, query, body, headers) {
    функции переносит один кусок (Range с Диска -> часть в бакете) за
    секунды, поэтому ни функция, ни браузер не упираются во время ожидания.
    Страница ведёт цикл: start -> part × N -> done (ссылка на 3 дня). */
+function mimeOf(fname) {
+  const ext = ((/\.([a-z0-9]+)$/i.exec(fname || '') || [])[1] || '').toLowerCase();
+  const types = { mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/x-m4v', avi: 'video/x-msvideo', mkv: 'video/x-matroska', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', tif: 'image/tiff', tiff: 'image/tiff', pdf: 'application/pdf', zip: 'application/zip' };
+  return types[ext] || 'application/octet-stream';
+}
+
 async function doMultipart(token, req) {
   if (!s3Ready()) return { status: 501, result: { error: 'Хранилище не настроено' } };
   const op = req.op;
@@ -270,6 +276,8 @@ async function doMultipart(token, req) {
     const r = await fetch(href, { redirect: 'follow', headers: { Range: 'bytes=' + start + '-' + end } });
     if (r.status !== 206 && !(r.status === 200 && start === 0 && +r.headers.get('content-length') === len)) {
       try { await r.body?.cancel(); } catch (e) { }
+      /* Диск отдаёт файл только целиком — страница перейдёт на перенос одним проходом */
+      if (r.status === 200) return { status: 422, result: { error: 'Диск не отдаёт файл кусками', code: 'range_unsupported' } };
       return { status: 422, result: { error: 'Диск не отдал кусок файла: HTTP ' + r.status } };
     }
     const out = await openS3Upload(req.key, len, { partNumber: String(req.n), uploadId: req.uploadId }, 'application/octet-stream');
@@ -299,9 +307,38 @@ async function doMultipart(token, req) {
     const r = await s3Call('POST', req.key, { uploadId: req.uploadId }, xml, { 'content-type': 'application/xml' });
     if (r.status !== 200 || /<Error>/.test(r.body)) return { status: 502, result: { error: 'Хранилище не собрало файл: HTTP ' + r.status + ' ' + r.body.slice(0, 200) } };
     const fname = String(req.filename || 'file');
-    const ext = (/\.([a-z0-9]+)$/i.exec(fname) || [])[1] || '';
-    const types = { mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/x-m4v', avi: 'video/x-msvideo', mkv: 'video/x-matroska', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', tif: 'image/tiff', tiff: 'image/tiff', pdf: 'application/pdf', zip: 'application/zip' };
-    return { status: 200, result: { url: s3Presign(req.key, S3_LINK_TTL, fname, types[ext.toLowerCase()] || 'application/octet-stream'), store: 'cloud' } };
+    return { status: 200, result: { url: s3Presign(req.key, S3_LINK_TTL, fname, mimeOf(fname)), store: 'cloud' } };
+  }
+  /* запасной путь: файл целиком одним потоком в бакет */
+  if (op === 'whole') {
+    const t0 = Date.now();
+    const href = await diskHref(token, req.from);
+    const r = await fetch(href, { redirect: 'follow' });
+    if (r.status !== 200) { try { await r.body?.cancel(); } catch (e) { } return { status: 422, result: { error: 'Диск не отдал файл: HTTP ' + r.status } }; }
+    const len = +r.headers.get('content-length') || +req.size;
+    if (!(len > 0)) return { status: 422, result: { error: 'Неизвестен размер файла' } };
+    const fname = String(req.filename || 'file');
+    const key = 'exports/' + crypto.randomBytes(16).toString('hex') + '/file';
+    const out = await openS3Upload(key, len, {}, mimeOf(fname));
+    let n = 0;
+    try {
+      const reader = r.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const b = Buffer.from(value);
+        n += b.length;
+        await out.write(b);
+      }
+      if (n !== len) throw new Error('Файл пришёл не целиком: ' + n + ' из ' + len);
+      const w = await out.end();
+      if (w.status !== 201) throw new Error('Хранилище не приняло файл: HTTP ' + w.status + ' ' + w.body.slice(0, 200));
+      console.log(JSON.stringify({ ev: 'whole', bytes: len, ms: Date.now() - t0 }));
+      return { status: 200, result: { url: s3Presign(key, S3_LINK_TTL, fname, mimeOf(fname)), store: 'cloud' } };
+    } catch (e) {
+      out.abort();
+      return { status: 422, result: { error: String(e && e.message || e) } };
+    }
   }
   if (op === 'abort') {
     await s3Call('DELETE', req.key, { uploadId: req.uploadId }, '');
@@ -736,8 +773,9 @@ module.exports.handler = async function (event) {
         out.parallel = { files: rows.length, ms: Date.now() - t0, mb: +mb.toFixed(2), mb_s: +(mb / ((Date.now() - t0) / 1000)).toFixed(2), errors: rows.filter(r => r.error || r.status !== 200).map(r => r.file + ': ' + (r.error || r.status)) };
       }
       try {
-        const target = 'disk:/_ContentPulse/проверка_скорости.bin';
-        await ensureDir(token, 'disk:/_ContentPulse');
+        const sdir = /^disk:\/.+_ContentPulse$/.test(req.dir || '') ? req.dir : 'disk:/_ContentPulse';
+        const target = sdir + '/проверка_скорости.bin';
+        await ensureDir(token, sdir);
         const t0 = Date.now();
         const up = await disk(token, 'GET', '/resources/upload', { path: target, overwrite: 'true' });
         if (up.status !== 200) out.upload = { error: 'ссылка на загрузку: ' + up.status + ' ' + (up.data.message || '') };

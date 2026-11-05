@@ -295,7 +295,7 @@ var CP_SERVICE_FILES = [
   var btn = document.createElement('button');
   btn.id = 'cpFilesOpen';
   btn.textContent = 'Файлы настроек';
-  btn.title = 'Словарь тегов, структура съёмок и настройки — простые файлы в _ContentPulse на Диске';
+  btn.title = 'Словарь тегов, структура съёмок и настройки — простые файлы в служебной папке _ContentPulse рядом с архивом';
   document.getElementById('cpShelfBar').appendChild(btn);
   btn.onclick = function () { cpFilesOpen(0); };
 
@@ -379,6 +379,21 @@ function cpFilesSave() {
 
 if (CPDisk.hasToken()) cpLoadRules();
 
+/** Служебная папка сменилась (другой архив) — перечитать настройки оттуда. */
+function cpServiceReset() {
+  _cpSvcList = null;
+  _cpRulesP = null;
+  _cpSettingsP = null;
+  CP.dict = undefined;
+  CP.rules = null;
+  CP.settings = null;
+  var sd = document.getElementById('cpSetServiceDir');
+  if (sd) sd.textContent = CP_CONFIG.serviceDir.replace(/^disk:/, '');
+  cpEnsureSettings();
+  cpLoadRules();
+  cpLoadDict().then(function () { if (CP.shoot) cbRenderCards(); if (CP.sel) cpRenderPanel(); }, function () { });
+}
+
 /* ---------- настройки за шестерёнкой ----------
    Архив, папка ретуши и файлы настроек убраны с витрины в одну кнопку
    в правом верхнем углу, чтобы не мешали. Элементы переносятся как есть,
@@ -395,7 +410,8 @@ if (CPDisk.hasToken()) cpLoadRules();
     + '.cp-settings h5:first-child{margin-top:0}'
     + '.cp-set-line{display:flex;gap:8px;align-items:center;flex-wrap:wrap}'
     + '.cp-settings input{flex:1;min-width:0;width:auto !important;background:#141413;border:1px solid #3a3a37;color:#f2f2f1;padding:8px 10px;border-radius:3px;font:inherit;font-size:13px}'
-    + '.cp-settings input:focus{outline:none;border-color:#C9956B}';
+    + '.cp-settings input:focus{outline:none;border-color:#C9956B}'
+    + '.cp-set-dir{font-size:11px;color:#a3a09a;margin:-2px 0 8px;font-family:"IBM Plex Mono",monospace;word-break:break-all}';
   var st = document.createElement('style');
   st.textContent = css;
   document.head.appendChild(st);
@@ -414,7 +430,7 @@ if (CPDisk.hasToken()) cpLoadRules();
   box.id = 'cpSettings';
   box.innerHTML = '<h5>Архив съёмок</h5><div class="cp-set-line" id="cpSetArchive"></div>'
     + '<h5>Папка ретуши</h5><div class="cp-set-line" id="cpSetRetouch"></div>'
-    + '<h5>Файлы настроек</h5><div class="cp-set-line">'
+    + '<h5>Файлы настроек</h5><div class="cp-set-dir">лежат в <span id="cpSetServiceDir">' + cbEsc(CP_CONFIG.serviceDir.replace(/^disk:/, '')) + '</span> — рядом с архивом</div><div class="cp-set-line">'
     + CP_SERVICE_FILES.map(function (f, i) { return '<button data-cp-setfile="' + i + '">' + cbEsc(f.label) + '</button>'; }).join('')
     + '</div>';
   document.body.appendChild(box);

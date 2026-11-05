@@ -25,6 +25,7 @@ const DIRS = new Set(['disk:/Архив', 'disk:/Архив/LM-1043', 'disk:/А�
   /* съёмки по структуре SK: моделька (лук/артикул) и оптика (бренд/артикул) */
   'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST', 'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1', 'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74595_модель',
   'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74596_модель', 'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/видео',
+  'disk:/КАТАЛОГ', 'disk:/КАТАЛОГ/00_АРХИВ', 'disk:/КАТАЛОГ/00_АРХИВ/2026-11-01_SV_ПРЕДМЕТКА',
   'disk:/Архив/2026-09-21_SV_ОПТИКА_N', 'disk:/Архив/2026-09-21_SV_ОПТИКА_N/maxmara_оптика', 'disk:/Архив/2026-09-21_SV_ОПТИКА_N/maxmara_оптика/75327_оптика_N']);
 const FILES = new Map([
   ['disk:/Архив/LM-1043/a.jpg', Buffer.from('A'.repeat(100))],
@@ -44,7 +45,8 @@ const ZIPS = new Map();
 const FRESH = new Map();   /* как у Яндекса: новый файл появляется в списке папки не сразу */
 const CLOUD = new Map();
 const MPU = new Map();
-const MPU_PARTS = [];   /* ключ в бакете -> путь архива */   /* путь .zip на Диске -> имена внутри архива */
+const MPU_PARTS = [];
+const WHOLE = [];   /* ключ в бакете -> путь архива */   /* путь .zip на Диске -> имена внутри архива */
 const PREVIEW_CALLS = { single: 0, batch: 0, big: 0 };
 /* режим «превью заблокировано»: файлы — настоящие картинки, их будут уменьшать в браузере */
 if (process.env.BLOCK_PREVIEW) for (const k of [...FILES.keys()]) FILES.set(k, png(60, 40));
@@ -126,6 +128,9 @@ async function route(r) {
     if (q.a === 'mpu' && m === 'POST') {
       const b = JSON.parse(req.postData() || '{}');
       if (b.op === 'start') { const key = 'exports/mpu' + (MPU.size + 1) + '/file'; MPU.set(key, { parts: {} }); return json(200, { key, uploadId: 'U' + MPU.size }); }
+      if (b.op === 'whole') { const key = 'exports/whole' + (MPU.size + 1) + '/file'; MPU.set(key, {}); CLOUD.set(key, b.from); WHOLE.push(b.from);
+        return json(200, { url: 'https://storage.yandexcloud.net/content-pulse-exports-test/' + key + '?X-Amz-Signature=x', store: 'cloud' }); }
+      if (b.op === 'part' && process.env.NO_RANGE && b.start > 0) return json(422, { error: 'Диск не отдаёт файл кусками', code: 'range_unsupported' });
       if (b.op === 'part') {
         const u = MPU.get(b.key); const f = FILES.get(b.from);
         if (!u || !f) return json(422, { error: 'нет' });
@@ -558,6 +563,21 @@ async function route(r) {
   await page.evaluate(() => { var b = App.photos.find(p => /\/b\.jpg$/.test(p.disk)); cpAddAutoCard(b.id); });
   check('кадр, брошенный на «+», сразу в новой карточке', await page.evaluate(() => App.cards[App.cards.length - 1].pids.length === 1));
   await page.waitForFunction(() => !App.dirty, null, { timeout: 8000 });
+
+  /* служебная папка рядом с архивом: КАТАЛОГ/_ContentPulse, настройки переезжают из корня */
+  await page.evaluate(() => cpShowShelf());
+  await page.click('#cpGear');
+  await page.fill('#cpArchiveInput', 'КАТАЛОГ/00_АРХИВ');
+  await page.click('#cpArchiveApply');
+  await page.waitForFunction(() => CP_CONFIG.serviceDir === 'disk:/КАТАЛОГ/_ContentPulse' && CP.dict && CP.dict.length, null, { timeout: 10000 });
+  check('служебная папка — рядом с архивом, в КАТАЛОГ', await page.evaluate(() => /КАТАЛОГ\/_ContentPulse/.test(document.getElementById('cpSetServiceDir').textContent)));
+  check('файлы настроек скопированы из корня в КАТАЛОГ/_ContentPulse', ['теги.txt', 'структура.txt', 'настройки.txt'].every(n => FILES.has('disk:/КАТАЛОГ/_ContentPulse/' + n)) && FILES.has('disk:/_ContentPulse/теги.txt'),
+    [...FILES.keys()].filter(k => /КАТАЛОГ/.test(k)).join(' | '));
+  await page.fill('#cpArchiveInput', 'Архив');
+  await page.click('#cpArchiveApply');
+  await page.waitForFunction(() => CP_CONFIG.serviceDir === 'disk:/_ContentPulse', null, { timeout: 5000 });
+  await page.keyboard.press('Escape');
+  await page.fill('#cpShelfSearch', '1043');
 
   check('служебная папка не видна на витрине', await page.evaluate(() => CP.shoots.every(s => s.name.charAt(0) !== '_')));
 

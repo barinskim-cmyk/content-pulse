@@ -61,6 +61,19 @@ var CP = {
 
 function cpGet(k, d) { try { var v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } }
 function cpSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { } }
+
+/* Служебная папка _ContentPulse лежит рядом с архивом — в его родительской
+   папке (у SK: КАТАЛОГ/_ContentPulse рядом с 00_АРХИВ, 01_ИСХОДНИКИ...),
+   чтобы настройки были общими для всех, у кого есть доступ к каталогу.
+   Архив прямо в корне Диска — служебная папка тоже в корне, как раньше. */
+var CP_LEGACY_SERVICE = 'disk:/_ContentPulse';
+function cpServiceDirFor(archive) {
+  var a = String(archive || '').replace(/\/+$/, '');
+  var i = a.lastIndexOf('/');
+  var parent = i > 'disk:'.length ? a.slice(0, i) : 'disk:';
+  return parent + '/_ContentPulse';
+}
+CP_CONFIG.serviceDir = cpServiceDirFor(cpGet('cp_archive', CP_CONFIG.defaultArchive));
 function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
 
 /* ---------- стили ---------- */
@@ -369,6 +382,11 @@ document.getElementById('cpArchiveApply').onclick = function () {
   document.getElementById('cpArchiveInput').value = v;
   CP.archive = v;
   cpSet('cp_archive', v);
+  var sd = cpServiceDirFor(v);
+  if (sd !== CP_CONFIG.serviceDir) {
+    CP_CONFIG.serviceDir = sd;
+    if (typeof cpServiceReset === 'function') cpServiceReset();
+  }
   cpLoadShoots();
 };
 document.getElementById('cpLogout').onclick = cpLogout;
@@ -1423,7 +1441,7 @@ function cpZipExport(name, entries, note) {
 
 /* Крупные файлы (видео) идут не в архив, а отдельной ссылкой: функция
    переносит их в облако кусками по CP.directPart — каждый вызов короткий. */
-CP.directMin = 200 * 1024 * 1024;
+CP.directMin = 48 * 1024 * 1024;   /* всё крупнее (видео) — отдельной ссылкой, не в архив */
 CP.directPart = 256 * 1024 * 1024;
 
 function cpDirectExport(e, onProgress) {
@@ -1448,6 +1466,11 @@ function cpDirectExport(e, onProgress) {
     return CPDisk.proxyMpu({ op: 'done', key: up.key, uploadId: up.uploadId, parts: parts, filename: e.name.split('/').pop() });
   }).catch(function (err) {
     if (up) CPDisk.proxyMpu({ op: 'abort', key: up.key, uploadId: up.uploadId }).catch(function () { });
+    /* Диск не отдаёт файл кусками — переносим целиком одним вызовом */
+    if (err && /range_unsupported/.test(err.body || '')) {
+      if (onProgress) onProgress(0, total);
+      return CPDisk.proxyMpu({ op: 'whole', from: e.from, size: e.size, filename: e.name.split('/').pop() });
+    }
     throw err;
   });
 }

@@ -302,8 +302,8 @@ var CPDisk = (function () {
     return proxyReq({ a: 'mpu' }, { method: 'POST', body: body, as: 'json' });
   }
   /** Замер скорости чтения кадров и загрузки на Диск: paths -> отчёт */
-  function proxyBench(paths) {
-    return proxyReq({ a: 'bench' }, { method: 'POST', body: { files: paths }, as: 'json' });
+  function proxyBench(paths, dir) {
+    return proxyReq({ a: 'bench' }, { method: 'POST', body: { files: paths, dir: dir }, as: 'json' });
   }
   /** Диагностика: как Яндекс отвечает на ссылку скачивания path. */
   function proxyDlTest(path) { return proxyReq({ a: 'dltest', path: path }, { as: 'json' }); }

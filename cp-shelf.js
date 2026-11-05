@@ -120,8 +120,45 @@ function cpServicePath(name) { return CP_CONFIG.serviceDir.replace(/\/+$/, '') +
 /* Служебные файлы читаем только если они есть в списке папки: так в консоли
    нет лишних 404 и не тратим вызовы прослойки. Список живёт 20 с. */
 var _cpSvcList = null;
+
+/* Служебная папка переехала из корня Диска к архиву: один раз копируем
+   туда файлы настроек из старой (копия на стороне Яндекса, старая остаётся). */
+var _cpMigrateP = null;
+function cpMigrateService() {
+  var dir = CP_CONFIG.serviceDir.replace(/\/+$/, '');
+  if (dir === CP_LEGACY_SERVICE) return Promise.resolve();
+  if (_cpMigrateP && _cpMigrateP.dir === dir) return _cpMigrateP;
+  var none = function (e) { if (e && e.status === 404) return []; throw e; };
+  var p = Promise.all([CPDisk.listDir(dir).catch(none), CPDisk.listDir(CP_LEGACY_SERVICE).catch(none)]).then(function (r) {
+    var have = {};
+    r[0].forEach(function (x) { have[x.name] = true; });
+    var items = r[1].filter(function (x) { return x.type === 'file' && /\.txt$/i.test(x.name) && !have[x.name]; })
+      .map(function (x) { return { from: x.path, path: dir + '/' + x.name }; });
+    if (!items.length) return;
+    return CPDisk.proxyCopy(items, [dir]).then(function (out) {
+      var ok = (out.results || []).filter(function (x) { return x.status === 'done' || x.status === 'exists'; }).length;
+      /* Диск показывает новые файлы в списке не сразу — список задаём сами */
+      var names = {};
+      r[0].forEach(function (x) { names[x.name] = true; });
+      items.forEach(function (x) { names[x.path.split('/').pop()] = true; });
+      _cpSvcList = { ts: Date.now(), p: Promise.resolve(names) };
+      if (ok) cbToast('Файлы настроек перенесены в ' + dir.replace(/^disk:/, ''));
+    });
+  }).catch(function (e) { if (window.console) console.warn('[CP] перенос служебной папки', e && (e.body || e.message)); });
+  p.dir = dir;
+  _cpMigrateP = p;
+  return p;
+}
+
 function cpServiceNames(force) {
   if (!force && _cpSvcList && Date.now() - _cpSvcList.ts < 20000) return _cpSvcList.p;
+  return cpMigrateService().then(function () {
+    if (!force && _cpSvcList && Date.now() - _cpSvcList.ts < 20000) return _cpSvcList.p;
+    return cpServiceNamesNow();
+  });
+}
+
+function cpServiceNamesNow() {
   var entry = { ts: Date.now() };
   entry.p = CPDisk.listDir(CP_CONFIG.serviceDir).then(function (items) {
     var names = {};
@@ -317,7 +354,7 @@ function cpSettingsToUi() {
   var wrap = document.createElement('span');
   wrap.className = 'cp-set';
   wrap.innerHTML = '<span class="cp-user">Ретушь:</span>'
-    + '<input id="cpRetouchInput" spellcheck="false" placeholder="папка Ретушь внутри съёмки" title="Куда копировать кадры при отправке на ретушь. Общая настройка для всех, хранится на Диске в _ContentPulse/настройки.txt">'
+    + '<input id="cpRetouchInput" spellcheck="false" placeholder="папка Ретушь внутри съёмки" title="Куда копировать кадры при отправке на ретушь. Общая настройка для всех, хранится в настройки.txt в служебной папке">'
     + '<button id="cpRetouchApply">Сохранить</button>';
   bar.appendChild(wrap);
   document.getElementById('cpRetouchApply').onclick = function () {
@@ -729,7 +766,7 @@ function cpBench() {
   var t0 = Date.now();
   cbBusyShow('Замеряю скорость Диска на ' + pick.length + ' кадрах...', 0.3);
   var tick = setInterval(function () { cbBusyShow('Замеряю скорость Диска на ' + pick.length + ' кадрах... ' + Math.round((Date.now() - t0) / 1000) + ' с', 0.5); }, 1000);
-  CPDisk.proxyBench(pick.map(function (x) { return x.path; })).then(function (r) {
+  CPDisk.proxyBench(pick.map(function (x) { return x.path; }), CP_CONFIG.serviceDir).then(function (r) {
     clearInterval(tick);
     cbBusyHide();
     var lines = ['Content Pulse — замер скорости Диска', new Date().toISOString(), 'съёмка: ' + sel.name + ' · кадров: ' + n, ''];
