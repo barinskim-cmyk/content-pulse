@@ -42,9 +42,10 @@ var CP_DICT_TEMPLATE = [
   '# Словарь тегов Content Pulse.',
   '# Один тег в строке. [Название] — группа тегов. Строки с # — комментарии,',
   '# после тега можно пояснить: «Y  # Юля».',
-  '# Присвоить можно только теги из этого файла.',
+  '# Настройки группы после двоеточия: [Ретушёры: один] — из группы только один тег;',
+  '# [Служебные: не в карточке] — группа не показывается на карточке.',
   '',
-  '[Ретушёры]',
+  '[Ретушёры: один]',
   'Яна',
   '',
   '[Срочность]',
@@ -144,15 +145,50 @@ function cpReadServiceFile(name, force) {
 }
 
 /** Разбор словаря: [{tag, group}]. «Y  # Юля» — тег Y, пояснение после #. */
+/**
+ * Разбор словаря: [{tag, group}] + CP.dictGroups {группа: {card, single}}.
+ * Заголовок группы с настройками: [Ретушёры: один] — из группы выбирается
+ * только один тег; [Служебные: не в карточке] — группа не показывается на
+ * карточке для выбора. По умолчанию группа видна на карточке, тегов — сколько угодно.
+ */
 function cpParseDict(txt) {
-  var out = [], group = '';
+  var out = [], group = '', groups = {};
   String(txt || '').split(/\r?\n/).forEach(function (line) {
     var l = line.replace(/\s+#.*$/, '').trim();
     if (!l || l.charAt(0) === '#') return;
     var g = /^\[(.+)\]$/.exec(l);
-    if (g) { group = g[1].trim(); return; }
+    if (g) {
+      var parts = g[1].split(':');
+      group = parts[0].trim();
+      var opts = (parts.slice(1).join(':') || '').toLowerCase();
+      groups[group] = {
+        card: !/не\s+в\s+карточке|скрыт/.test(opts),
+        single: /(^|[\s,])один([\s,]|$)|одиночн/.test(opts)
+      };
+      return;
+    }
+    if (!groups[group]) groups[group] = { card: true, single: false };
     if (!out.some(function (x) { return x.tag.toLowerCase() === l.toLowerCase(); })) out.push({ tag: l, group: group });
   });
+  CP.dictGroups = groups;
+  return out;
+}
+
+/** Группа тега и её настройки. */
+function cpTagGroup(tag) {
+  var d = (CP.dict || []).filter(function (x) { return x.tag === tag; })[0];
+  var g = d ? d.group : '';
+  return { name: g, opts: (CP.dictGroups || {})[g] || { card: true, single: false } };
+}
+
+/** Добавить тег в список с учётом «один из группы»: остальные теги группы убираются. */
+function cpTagsWith(list, tag) {
+  var tg = cpTagGroup(tag);
+  var out = (list || []).filter(function (t) {
+    if (t === tag) return false;
+    return !(tg.opts.single && tg.name && cpTagGroup(t).name === tg.name);
+  });
+  out.push(tag);
   return out;
 }
 
@@ -565,8 +601,8 @@ function cpAssignTag(tag, folders) {
   cbBusyShow('Присваиваю тег «' + tag + '»...', 0.5);
   cpMutateState(sel, function (data) {
     targets.forEach(function (fp) {
-      var list = data.meta.cp.folderTags[fp] = data.meta.cp.folderTags[fp] || [];
-      if (list.indexOf(tag) === -1) list.push(tag);
+      /* «один из группы» (словарь): другой тег той же группы заменяется */
+      data.meta.cp.folderTags[fp] = cpTagsWith(data.meta.cp.folderTags[fp] || [], tag);
     });
     cpShelfEvent(data, 'tag_folder', { tag: tag, folders: targets.map(function (f) { return f || '(вся съёмка)'; }) });
   }).then(function () {

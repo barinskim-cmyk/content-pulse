@@ -512,11 +512,22 @@ async function route(r) {
     var ev = cpMeta().events.map(e => e.action);
     return ev.includes('changed_after_download') && ev.includes('removed_after_download') && ev.includes('added_to_retouch_card');
   }));
-  /* тег карточки из меню «ещё» */
-  await page.click('#cbCards [data-cp-card]');
-  await page.waitForSelector('#cpMenu.cp-open [data-x="tag"][data-tag="Яна"]', { timeout: 5000 });
-  await page.click('#cpMenu [data-x="tag"][data-tag="Яна"]');
-  check('тег карточки из меню «ещё» — на шапке', await page.evaluate(() => (App.cards[0].tags || []).includes('Яна') && !!document.querySelector('#cbCards .cp-card-tag')));
+  /* теги словаря прямо на шапке карточки; в группе «один» — один тег */
+  await page.evaluate(() => { CP.dict = cpParseDict('[Ретушёры: один]\nY\nU\n[Срочность]\nСрочно\n[Служебные: не в карточке]\nтест'); cbRenderCards(); });
+  check('на шапке карточки все теги словаря, кроме групп «не в карточке»', await page.evaluate(() => {
+    var b = [...document.querySelectorAll('#cbCards .cb-card:first-child [data-cp-cardtag]')].map(x => x.getAttribute('data-cp-cardtag'));
+    return ['Y', 'U', 'Срочно'].every(t => b.includes(t)) && !b.includes('тест');
+  }));
+  await page.click('#cbCards .cb-card:first-child [data-cp-cardtag="Y"]');
+  await page.click('#cbCards .cb-card:first-child [data-cp-cardtag="U"]');
+  await page.click('#cbCards .cb-card:first-child [data-cp-cardtag="Срочно"]');
+  check('нажал — тег стоит; в группе «один» выбранный заменяет прежний', await page.evaluate(() => {
+    var t = App.cards[0].tags || [];
+    return t.includes('U') && !t.includes('Y') && t.includes('Срочно') && !!document.querySelector('#cbCards .cb-card:first-child .cp-tg-on[data-cp-cardtag="U"]');
+  }), JSON.stringify(await page.evaluate(() => App.cards[0].tags)));
+  await page.locator('#cbCards .cb-card').first().locator('.cb-card-head').screenshot({ path: path.join(ROOT, 'tests', 'shot-cardhead.png') });
+  await page.click('#cbCards .cb-card:first-child [data-cp-cardtag="Срочно"]');
+  check('повторное нажатие снимает тег', await page.evaluate(() => !(App.cards[0].tags || []).includes('Срочно')));
   /* большой «+» */
   const nCards = await page.evaluate(() => App.cards.length);
   await page.click('#cbCards .cp-addcard');

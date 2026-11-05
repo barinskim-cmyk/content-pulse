@@ -31,6 +31,13 @@
     + 'border:2px dashed #3a3a37;border-radius:8px;background:transparent;color:#a3a09a;font-size:15px;cursor:pointer}'
     + '.cp-addcard b{font-size:56px;line-height:1;font-weight:300;color:#C9956B}'
     + '.cp-addcard:hover,.cp-addcard.cp-over{border-color:#C9956B;color:#e7c9a8;background:#1d1a17}'
+    + '.cp-card-tags{flex-basis:100%;display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin-top:2px}'
+    + '.cp-tg-name{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#a3a09a;margin:0 2px 0 6px}'
+    + '.cp-tg-name:first-child{margin-left:0}'
+    + '.cp-tg{font-size:12px;min-width:28px;padding:2px 9px;border-radius:12px;border:1px solid #3a3a37;background:transparent;color:#a3a09a;cursor:pointer;line-height:1.4}'
+    + '.cp-tg:hover{border-color:#C9956B;color:#e7c9a8}'
+    + '.cp-tg.cp-tg-on{background:#C9956B;border-color:#C9956B;color:#141413;font-weight:600}'
+    + '.cp-tg.cp-tg-old{background:#5a4632;border-color:#5a4632;color:#e7c9a8}'
     + '.cp-card-tag{font-size:11px;color:#e7c9a8;border:1px solid #5a4632;background:#2b241d;border-radius:10px;padding:1px 4px 1px 8px}'
     + '.cp-card-tag button{background:none;border:none;color:#a3a09a;padding:0 4px;font-size:12px;line-height:1;cursor:pointer}'
     + '.cp-card-warn{font-size:11px;color:#f2b8a0;border:1px solid #8a4a32;background:#2a1a16;border-radius:10px;padding:1px 8px}'
@@ -152,17 +159,13 @@ function cpGuardDecorate() {
       var card = cbCardById(el.getAttribute('data-cid'));
       var head = el.querySelector('.cb-card-head');
       if (!card || !head || head.querySelector('.cp-card-tags')) return;
-      var box = document.createElement('span');
+      var box = document.createElement('div');
       box.className = 'cp-card-tags';
-      box.style.display = 'contents';
-      (card.tags || []).forEach(function (t) {
-        box.insertAdjacentHTML('beforeend', '<span class="cp-card-tag">' + cbEsc(t)
-          + '<button data-cp-card-untag="' + cbEsc(t) + '" data-cid="' + card.id + '" title="Снять тег">×</button></span>');
-      });
       if (card.cpChangedAfterDl) {
         box.insertAdjacentHTML('beforeend', '<span class="cp-card-warn" title="' + cbEsc(card.cpChangedAfterDl.by + ' · ' + cpFmtDate(card.cpChangedAfterDl.ts))
           + '">изменена после скачивания</span>');
       }
+      box.insertAdjacentHTML('beforeend', cpCardTagChips(card));
       head.appendChild(box);
     });
   }
@@ -204,10 +207,12 @@ function cpAddAutoCard(pid) {
   root.addEventListener('click', function (e) {
     var plus = e.target.closest('.cp-addcard');
     if (plus) { e.preventDefault(); cpAddAutoCard(); return; }
-    var un = e.target.closest('[data-cp-card-untag]');
-    if (un) {
+    var tg = e.target.closest('[data-cp-cardtag]');
+    if (tg) {
       e.preventDefault(); e.stopPropagation();
-      cpCardTag(cbCardById(un.getAttribute('data-cid')), un.getAttribute('data-cp-card-untag'), false);
+      var c = cbCardById(tg.getAttribute('data-cid'));
+      var t = tg.getAttribute('data-cp-cardtag');
+      cpCardTag(c, t, !(c && (c.tags || []).indexOf(t) !== -1));
     }
   });
   root.addEventListener('dragover', function (e) {
@@ -232,8 +237,38 @@ function cpAddAutoCard(pid) {
 
 /* ---------- теги карточки ---------- */
 
-/** Пункты тегов для меню «ещё» карточки. */
+/**
+ * Все теги словаря прямо на шапке карточки: нажал — тег стоит, ещё раз — снят.
+ * Группы «не в карточке» не показываются; в группе «один» выбирается один тег.
+ * Теги, которых больше нет в словаре, видны и снимаются.
+ */
+function cpCardTagChips(card) {
+  var have = card.tags || [];
+  var html = '', group = null;
+  (CP.dict || []).forEach(function (d) {
+    var g = (CP.dictGroups || {})[d.group] || { card: true, single: false };
+    if (!g.card) return;
+    if (d.group !== group) {
+      group = d.group;
+      if (group) html += '<span class="cp-tg-name">' + cbEsc(group) + '</span>';
+    }
+    var on = have.indexOf(d.tag) !== -1;
+    html += '<button class="cp-tg' + (on ? ' cp-tg-on' : '') + '" data-cp-cardtag="' + cbEsc(d.tag) + '" data-cid="' + card.id + '"'
+      + ' aria-pressed="' + on + '" title="' + (on ? 'Снять тег' : 'Поставить тег') + (g.single ? ' (из группы — один)' : '') + '">' + cbEsc(d.tag) + '</button>';
+  });
+  have.forEach(function (t) {
+    if ((CP.dict || []).some(function (d) { return d.tag === t; })) return;
+    html += '<button class="cp-tg cp-tg-on cp-tg-old" data-cp-cardtag="' + cbEsc(t) + '" data-cid="' + card.id + '" aria-pressed="true" title="Тега нет в словаре — снять">' + cbEsc(t) + '</button>';
+  });
+  return html;
+}
+
+/** Пункты тегов для меню «ещё» карточки (больше не используется: теги — на шапке). */
 function cpCardTagMenu(card) {
+  return null;
+}
+
+function cpCardTagMenuOld(card) {
   if (CP.dict === undefined) cpLoadDict().catch(function () { });
   var html = '<div class="cp-menu-sub">Тег карточки</div>';
   if (!CP.dict || !CP.dict.length) {
@@ -258,11 +293,10 @@ function cpCardTagMenu(card) {
 
 function cpCardTag(card, tag, on) {
   if (!card || !tag) return;
-  card.tags = (card.tags || []).filter(function (t) { return t !== tag; });
-  if (on) card.tags.push(tag);
+  card.tags = on ? cpTagsWith(card.tags, tag) : (card.tags || []).filter(function (t) { return t !== tag; });
   cpEvent(on ? 'card_tag' : 'card_untag', [], { card: card.title, tag: tag }, true);
   cbMarkDirty();
   cbRenderCards();
 }
 
-if (CPDisk.hasToken()) cpLoadDict().catch(function () { });
+if (CPDisk.hasToken()) cpLoadDict().then(function () { if (CP.shoot) cbRenderCards(); }, function () { });
