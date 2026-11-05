@@ -608,16 +608,24 @@ function cpShelfDownload() {
      остальные — по исходным папкам; имена файлов исходные */
   var stype = typeof cpShootType === 'function' ? cpShootType(sel.name) : null;
   var asFolders = !!(stype && stype.exportMode === 'folders');   /* правило из структура.txt */
+  var numbered = !!(stype && stype.exportNames === 'numbered');
   var entries = items.map(function (x) {
     var parts;
     if (x.cards.length && !asFolders) {
       var c = cards[x.cards[0]];
-      parts = [cpPad(x.cards[0] + 1) + ' ' + (c.title || c.category || 'Карточка')];
+      /* карточка артикула — исходная папка артикула (с луком), иначе «NN название» */
+      parts = c.cpArticleDir ? c.cpArticleDir.split('/') : [cpPad(x.cards[0] + 1) + ' ' + (c.title || c.category || 'Карточка')];
     } else {
       parts = x.dir ? x.dir.split('/') : [];
     }
     var dir = parts.map(CPDisk.safeName).join('/');
-    var fname = x.file.name, key = (dir ? dir + '/' : '') + fname, k = 2;
+    var fname = x.file.name;
+    if (numbered && x.cards.length) {
+      var cc = cards[x.cards[0]];
+      var order = (cc.mode === 'auto' ? (cc.pids || []) : (cc.slots || []).map(function (sl) { return sl.pid; })).filter(Boolean).indexOf(x.pid);
+      if (order >= 0) fname = cpPad(order + 1) + '_' + fname;
+    }
+    var key = (dir ? dir + '/' : '') + fname, k = 2;
     while (used[key]) { fname = x.file.name.replace(/(\.[^.]+)?$/, '_' + (k++) + '$1'); key = (dir ? dir + '/' : '') + fname; }
     used[key] = true;
     return { from: x.file.path, name: key, size: x.file.size };

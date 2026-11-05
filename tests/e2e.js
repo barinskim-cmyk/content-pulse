@@ -446,6 +446,7 @@ async function route(r) {
   }));
   await page.waitForFunction(() => !App.dirty, null, { timeout: 8000 });
   const stM = JSON.parse(FILES.get('disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/_contentpulse.json').toString());
+  check('у карточки записана папка артикула', stM.cards.some(c => c.cpArticleDir === '1/74595_модель'));
   check('артикул карточки сохранён в отборе', stM.cards.some(c => c.cpArticle === '74595'), JSON.stringify(stM.cards.map(c => [c.title, c.cpArticle])));
 
   /* все файлы: видео тоже уходит в архив */
@@ -459,6 +460,7 @@ async function route(r) {
   await page.click('[data-cp-p="download"]');
   await page.waitForFunction(() => [...document.querySelectorAll('#cpDlCard a.cp-dlcard-btn')].some(a => /МОДЕЛЬ/.test(decodeURIComponent(a.href))), null, { timeout: 10000 });
   const zVid = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST_1\.zip$/.test(k)).flatMap(([, v]) => v);
+  check('карточка артикула в выгрузке — исходная папка артикула с луком', zVid.some(n => /_1\/1\/74595_модель\/IMG_0101\.jpg$/.test(n)) && zVid.some(n => /_1\/1\/74595_модель\/manekin\.jpg$/.test(n)), zVid.join(' | '));
   check('«Все файлы»: видео в архиве по исходной папке', zVid.some(n => /\/видео\/clip\.mp4$/.test(n)) && zVid.filter(n => /\.jpg$/.test(n)).length === 3, zVid.join(' | '));
 
   /* оптика: выгрузка как в папках */

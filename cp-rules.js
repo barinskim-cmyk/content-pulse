@@ -38,6 +38,8 @@ var CP_RULES_TEMPLATE = [
   '# код артикула — «цифры 4-7»: код = первые 4–7 цифр в названии папки артикула.',
   '# артикул карточке — «из папки артикула»: кадр из папки артикула в карточке ставит ей артикул.',
   '# выгрузка — «по карточкам» (папки карточек) или «как в папках» (исходные папки и имена).',
+  '#   Карточка с артикулом ложится в выгрузку папкой артикула с исходным именем (с луком): 1/74595_модель.',
+  '# имена в выгрузке — «исходные» или «с номером» (01_, 02_ — порядок кадров в карточке).',
   '',
   '[Модельная]',
   'название содержит: _МОДЕЛЬ',
@@ -88,6 +90,8 @@ function cpParseRules(text) {
       cur.cardArticle = !/^(нет|no|-)$/i.test(val);
     } else if (key === 'выгрузка') {
       cur.exportMode = /папк/i.test(val) ? 'folders' : 'cards';
+    } else if (key === 'имена в выгрузке') {
+      cur.exportNames = /номер/i.test(val) ? 'numbered' : 'original';
     }
   });
   return types.filter(function (t) { return t.match.length; });
@@ -141,6 +145,7 @@ function cpFacets(type, rel) {
   type.roles.forEach(function (role, i) {
     if (role === '*' || dirs[i] === undefined) return;
     out[role] = dirs[i];
+    if (role === 'артикул') out.articlePath = dirs.slice(0, i + 1).join('/');
   });
   if (out['артикул']) {
     var m = type.codeRe.exec(out['артикул']);
@@ -152,7 +157,7 @@ function cpFacets(type, rel) {
   if (!out.code && type.roles.indexOf('артикул') !== -1) {
     for (var i = dirs.length - 1; i >= 0; i--) {
       var mm = type.codeRe.exec(dirs[i]);
-      if (mm) { out['артикул'] = dirs[i]; out.code = mm[1]; break; }
+      if (mm) { out['артикул'] = dirs[i]; out.code = mm[1]; out.articlePath = dirs.slice(0, i + 1).join('/'); break; }
     }
   }
   return out;
@@ -178,15 +183,18 @@ function cpAutoArticles() {
   var changed = false;
   CP.artLogged = CP.artLogged || {};
   App.cards.forEach(function (card) {
-    var codes = [], rels = [];
+    var codes = [], rels = [], paths = [];
     cpCardPids(card).forEach(function (pid) {
       var p = cbPhotoById(pid);
       var rel = cpRelPath(p);
       var f = cpFacets(type, rel);
       rels.push(rel + ' → ' + (f.code || 'нет'));
-      if (f.code && codes.indexOf(f.code) === -1) codes.push(f.code);
+      if (f.code && codes.indexOf(f.code) === -1) { codes.push(f.code); paths.push(f.articlePath || ''); }
     });
     var auto = codes.join(', ');
+    /* папка артикула (с луком) — по ней карточка ложится в выгрузку с исходным именем */
+    var dir = codes.length === 1 ? paths[0] : '';
+    if ((card.cpArticleDir || '') !== dir) { card.cpArticleDir = dir; changed = true; }
     var prev = card.cpArticle || '';
     /* для разбора по консоли: какие пути и что из них вышло (один раз на состав) */
     var sig = card.id + '|' + rels.join(';');

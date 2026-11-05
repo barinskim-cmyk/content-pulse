@@ -1543,14 +1543,18 @@ function cpPad(n) { return (n < 10 ? '0' : '') + n; }
 /** Раскладка отбора: [{disk, dir:[папки], file}] по карточкам и доп. контенту. */
 function cpSelectionJobs() {
   var jobs = [];
+  var stype = typeof cpShootType === 'function' && CP.shoot ? cpShootType(CP.shoot.name) : null;
+  /* имена: по умолчанию с номером порядка; в структура.txt можно «исходные» */
+  var numbered = !(stype && stype.exportNames === 'original');
   App.cards.forEach(function (card, ci) {
-    var folder = cpPad(ci + 1) + ' ' + (card.title || card.category || 'Карточка');
+    /* карточка артикула — исходная папка артикула (с луком), иначе «NN название» */
+    var folder = card.cpArticleDir ? card.cpArticleDir.split('/') : [cpPad(ci + 1) + ' ' + (card.title || card.category || 'Карточка')];
     var order = 0;
     function add(pid) {
       var p = pid ? cbPhotoById(pid) : null;
       if (!p || !p.disk || p.missing) return;
       order++;
-      jobs.push({ disk: p.disk, size: p.size, dir: [folder], file: cpPad(order) + '_' + p.name });   /* порядок слотов = номер */
+      jobs.push({ disk: p.disk, size: p.size, dir: folder, file: numbered ? cpPad(order) + '_' + p.name : p.name });   /* порядок слотов = номер */
     }
     if (card.mode === 'auto') (card.pids || []).forEach(add);
     else (card.slots || []).forEach(function (s) { add(s.pid); });
