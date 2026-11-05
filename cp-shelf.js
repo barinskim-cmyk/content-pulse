@@ -634,6 +634,18 @@ function cpExportName(sel) {
 
 function cpShelfDownload() {
   var sel = CP.sel;
+  /* «все файлы» выбраны, а список видео ещё считается — дождаться, иначе архив уйдёт без них */
+  if (sel.allFiles && !sel.allList) {
+    cbBusyShow('Считаю видео и прочие файлы...', 0.05);
+    cpWalkAll(sel.path).then(function (list) {
+      cbBusyHide();
+      if (CP.sel !== sel) return;
+      sel.allList = list;
+      cpRenderPanel();
+      cpShelfDownload();
+    }, function (e) { cpHandleError(e, 'Не удалось прочитать файлы съёмки'); });
+    return;
+  }
   var items = cpFiltered(sel);
   if (!items.length) { cbToast('Под фильтры не попало ни одного кадра'); return; }
   var data = sel.data || {};
@@ -668,18 +680,16 @@ function cpShelfDownload() {
   });
   /* видео и прочие файлы (галка «Все файлы») — по исходным папкам */
   var others = cpFilteredOthers(sel);
-  var tooBig = others.filter(function (x) { return x.file.size >= CP_ZIP_FILE_MAX; });
-  others.filter(function (x) { return x.file.size < CP_ZIP_FILE_MAX; }).forEach(function (x) {
+  others.forEach(function (x) {
     if (used[x.rel]) return;
     used[x.rel] = true;
-    entries.push({ from: x.file.path, name: x.rel, size: x.file.size });
+    entries.push({ from: x.file.path, name: x.rel, size: x.file.size });   /* крупные уйдут отдельной ссылкой */
   });
-  if (tooBig.length) cbToast('Не входят в архив (больше 3,9 ГБ), скачайте с Диска отдельно: ' + tooBig.map(function (x) { return x.file.name; }).join(', '));
   if (!entries.length) { cbToast('Нечего скачивать'); return; }
   cbBusyShow('Готовлю архив: ' + entries.length + ' файл(ов)...', 0.02);
   cpExportName(sel).then(function (n) {
     name = n;
-    return cpZipExport(name, entries, items.length + ' кадр(ов)' + (others.length ? ' и других файлов: ' + (entries.length - items.length) : '')
+    return cpExportBundle(name, entries, items.length + ' кадр(ов)' + (others.length ? ' и других файлов: ' + (entries.length - items.length) : '')
       + '. После скачивания кадры отмечаются как скачанные.');
   }).then(function (r) {
     /* отметка «скачано» — статус не меняем */

@@ -188,7 +188,7 @@ function s3Sign(method, key, query, headers) {
 }
 
 /** Ссылка на скачивание объекта: действует ttl секунд, имя файла — русское, как в выгрузке. */
-function s3Presign(key, ttl, filename) {
+function s3Presign(key, ttl, filename, contentType) {
   const ad = amzDate(new Date()), date = ad.slice(0, 8);
   const scope = date + '/' + S3.region + '/s3/aws4_request';
   const ascii = filename.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, '');
@@ -196,7 +196,7 @@ function s3Presign(key, ttl, filename) {
     'X-Amz-Algorithm': 'AWS4-HMAC-SHA256', 'X-Amz-Credential': S3.key + '/' + scope, 'X-Amz-Date': ad,
     'X-Amz-Expires': String(ttl), 'X-Amz-SignedHeaders': 'host',
     'response-content-disposition': 'attachment; filename="' + ascii + '"; filename*=UTF-8\'\'' + uriEnc(filename),
-    'response-content-type': 'application/zip',
+    'response-content-type': contentType || 'application/zip',
   };
   const qs = s3Query(q);
   const canon = ['GET', s3Path(key), qs, 'host:' + S3.host + '\n', 'host', 'UNSIGNED-PAYLOAD'].join('\n');
@@ -206,14 +206,14 @@ function s3Presign(key, ttl, filename) {
 }
 
 /** PUT в бакет потоком с известной длиной. Интерфейс как у openUpload. */
-function openS3Upload(key, length) {
+function openS3Upload(key, length, query, contentType) {
   const https = require('https');
-  const signed = s3Sign('PUT', key, {}, { 'content-type': 'application/zip' });
+  const signed = s3Sign('PUT', key, query || {}, { 'content-type': contentType || 'application/zip' });
   return new Promise((resolve) => {
     const req = https.request({ method: 'PUT', hostname: S3.host, port: 443, path: signed.path,
       headers: Object.assign({}, signed.headers, { 'Content-Length': length }) });
     const done = new Promise((res, rej) => {
-      req.on('response', (r) => { let t = ''; r.on('data', (c) => { t += c; }); r.on('end', () => res({ status: r.statusCode === 200 ? 201 : r.statusCode, body: t })); });
+      req.on('response', (r) => { let t = ''; r.on('data', (c) => { t += c; }); r.on('end', () => res({ status: r.statusCode === 200 ? 201 : r.statusCode, body: t, etag: r.headers.etag || '' })); });
       req.on('error', rej);
     });
     done.catch(() => { });
@@ -228,6 +228,83 @@ function openS3Upload(key, length) {
       abort() { try { req.destroy(); } catch (e) { } },
     });
   });
+}
+
+/** Короткий запрос к бакету (тело — строка). */
+function s3Call(method, key, query, body, headers) {
+  const https = require('https');
+  const signed = s3Sign(method, key, query || {}, headers || {});
+  return new Promise((resolve, reject) => {
+    const req = https.request({ method, hostname: S3.host, port: 443, path: signed.path,
+      headers: Object.assign({}, signed.headers, { 'Content-Length': body ? Buffer.byteLength(body) : 0 }) }, (r) => {
+      let t = ''; r.on('data', (c) => { t += c; }); r.on('end', () => resolve({ status: r.statusCode, body: t }));
+    });
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+/* ---------- крупные файлы (видео) — отдельной ссылкой, частями ----------
+   Большой файл переносим в бакет многочастной загрузкой: каждый вызов
+   функции переносит один кусок (Range с Диска -> часть в бакете) за
+   секунды, поэтому ни функция, ни браузер не упираются во время ожидания.
+   Страница ведёт цикл: start -> part × N -> done (ссылка на 3 дня). */
+async function doMultipart(token, req) {
+  if (!s3Ready()) return { status: 501, result: { error: 'Хранилище не настроено' } };
+  const op = req.op;
+  if (op === 'start') {
+    const key = 'exports/' + crypto.randomBytes(16).toString('hex') + '/file';
+    const r = await s3Call('POST', key, { uploads: '' }, '', { 'content-type': req.type || 'application/octet-stream' });
+    const m = /<UploadId>([^<]+)<\/UploadId>/.exec(r.body);
+    if (r.status !== 200 || !m) return { status: 502, result: { error: 'Хранилище не начало загрузку: HTTP ' + r.status + ' ' + r.body.slice(0, 200) } };
+    return { status: 200, result: { key, uploadId: m[1] } };
+  }
+  if (op === 'part') {
+    const start = +req.start, end = +req.end, len = end - start + 1;
+    if (!req.key || !req.uploadId || !(req.n >= 1) || !(len > 0)) return { status: 400, result: { error: 'Нет части' } };
+    const href = await diskHref(token, req.from);
+    const r = await fetch(href, { redirect: 'follow', headers: { Range: 'bytes=' + start + '-' + end } });
+    if (r.status !== 206 && !(r.status === 200 && start === 0 && +r.headers.get('content-length') === len)) {
+      try { await r.body?.cancel(); } catch (e) { }
+      return { status: 422, result: { error: 'Диск не отдал кусок файла: HTTP ' + r.status } };
+    }
+    const out = await openS3Upload(req.key, len, { partNumber: String(req.n), uploadId: req.uploadId }, 'application/octet-stream');
+    let n = 0;
+    try {
+      const reader = r.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const b = Buffer.from(value);
+        n += b.length;
+        if (n > len) throw new Error('Диск отдал больше, чем просили');
+        await out.write(b);
+      }
+      if (n !== len) throw new Error('Кусок файла пришёл не целиком: ' + n + ' из ' + len);
+      const w = await out.end();
+      if (w.status !== 201 || !w.etag) throw new Error('Хранилище не приняло часть: HTTP ' + w.status + ' ' + w.body.slice(0, 200));
+      return { status: 200, result: { n: req.n, etag: w.etag } };
+    } catch (e) {
+      out.abort();
+      return { status: 422, result: { error: String(e && e.message || e) } };
+    }
+  }
+  if (op === 'done') {
+    const parts = (req.parts || []).slice().sort((a, b) => a.n - b.n);
+    const xml = '<CompleteMultipartUpload>' + parts.map((p) => '<Part><PartNumber>' + p.n + '</PartNumber><ETag>' + String(p.etag).replace(/[<>&]/g, '') + '</ETag></Part>').join('') + '</CompleteMultipartUpload>';
+    const r = await s3Call('POST', req.key, { uploadId: req.uploadId }, xml, { 'content-type': 'application/xml' });
+    if (r.status !== 200 || /<Error>/.test(r.body)) return { status: 502, result: { error: 'Хранилище не собрало файл: HTTP ' + r.status + ' ' + r.body.slice(0, 200) } };
+    const fname = String(req.filename || 'file');
+    const ext = (/\.([a-z0-9]+)$/i.exec(fname) || [])[1] || '';
+    const types = { mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/x-m4v', avi: 'video/x-msvideo', mkv: 'video/x-matroska', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', tif: 'image/tiff', tiff: 'image/tiff', pdf: 'application/pdf', zip: 'application/zip' };
+    return { status: 200, result: { url: s3Presign(req.key, S3_LINK_TTL, fname, types[ext.toLowerCase()] || 'application/octet-stream'), store: 'cloud' } };
+  }
+  if (op === 'abort') {
+    await s3Call('DELETE', req.key, { uploadId: req.uploadId }, '');
+    return { status: 200, result: { ok: true } };
+  }
+  return { status: 400, result: { error: 'Неизвестный шаг: ' + op } };
 }
 
 /* ---------- ZIP без сжатия (JPEG всё равно не сжимается) ----------
@@ -599,6 +676,16 @@ module.exports.handler = async function (event) {
 
     /* Собрать ZIP из файлов Диска и положить его на Диск:
        POST {target, entries:[{from, name, size}]} */
+    if (a === 'mpu') {
+      if (event.httpMethod !== 'POST') return json(405, { error: 'Нужен POST' }, h);
+      let body = event.body || '';
+      if (event.isBase64Encoded) body = Buffer.from(body, 'base64').toString('utf8');
+      let req;
+      try { req = JSON.parse(body); } catch (e) { return json(400, { error: 'Тело не JSON' }, h); }
+      const r = await doMultipart(token, req);
+      return json(r.status, r.result, h);
+    }
+
     if (a === 'zip') {
       if (event.httpMethod !== 'POST') return json(405, { error: 'Нужен POST' }, h);
       let body = event.body || '';
@@ -698,4 +785,4 @@ module.exports.handler = async function (event) {
 };
 
 /* для скриптов настройки и проверки (proxy/s3setup.js) */
-module.exports._s3 = { S3, s3Sign, s3Presign, openS3Upload, s3Ready };
+module.exports._s3 = { S3, s3Sign, s3Presign, openS3Upload, s3Ready, s3Call };

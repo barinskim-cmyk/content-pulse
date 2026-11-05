@@ -42,7 +42,9 @@ const DOWNLOADS = [];
 const DOWNLOADS_REFERER = [];
 const ZIPS = new Map();
 const FRESH = new Map();   /* как у Яндекса: новый файл появляется в списке папки не сразу */
-const CLOUD = new Map();   /* ключ в бакете -> путь архива */   /* путь .zip на Диске -> имена внутри архива */
+const CLOUD = new Map();
+const MPU = new Map();
+const MPU_PARTS = [];   /* ключ в бакете -> путь архива */   /* путь .zip на Диске -> имена внутри архива */
 const PREVIEW_CALLS = { single: 0, batch: 0, big: 0 };
 /* режим «превью заблокировано»: файлы — настоящие картинки, их будут уменьшать в браузере */
 if (process.env.BLOCK_PREVIEW) for (const k of [...FILES.keys()]) FILES.set(k, png(60, 40));
@@ -120,6 +122,24 @@ async function route(r) {
       const b = JSON.parse(req.postData() || '{}');
       const reads = b.files.map(p => ({ file: p.split('/').pop(), ms_link: 120, ms_file: 300, mb: 12.5, mb_s: 41.7, status: 200 }));
       return json(200, { reads, parallel: { files: reads.length, ms: 400, mb: 37.5, mb_s: 93.7, errors: [] }, upload: { status: 201, mb: 8, ms: 900, mb_s: 8.9 } });
+    }
+    if (q.a === 'mpu' && m === 'POST') {
+      const b = JSON.parse(req.postData() || '{}');
+      if (b.op === 'start') { const key = 'exports/mpu' + (MPU.size + 1) + '/file'; MPU.set(key, { parts: {} }); return json(200, { key, uploadId: 'U' + MPU.size }); }
+      if (b.op === 'part') {
+        const u = MPU.get(b.key); const f = FILES.get(b.from);
+        if (!u || !f) return json(422, { error: 'нет' });
+        u.from = b.from; u.parts[b.n] = f.slice(b.start, b.end + 1); MPU_PARTS.push(b.n);
+        return json(200, { n: b.n, etag: '"e' + b.n + '"' });
+      }
+      if (b.op === 'done') {
+        const u = MPU.get(b.key);
+        const whole = Buffer.concat(Object.keys(u.parts).sort((a, c) => a - c).map(k => u.parts[k]));
+        if (!whole.equals(FILES.get(u.from))) return json(502, { error: 'собрано неверно' });
+        CLOUD.set(b.key, u.from);
+        return json(200, { url: 'https://storage.yandexcloud.net/content-pulse-exports-test/' + b.key + '?X-Amz-Signature=x', store: 'cloud' });
+      }
+      return json(200, { ok: true });
     }
     if (q.a === 'zip' && m === 'POST') {
       const b = JSON.parse(req.postData() || '{}');
@@ -454,14 +474,17 @@ async function route(r) {
   await page.fill('#cpShelfSearch', 'МОДЕЛЬ');
   await page.click('.cp-shoot');
   await page.waitForSelector('#cpPanel.cp-open #cpFAll', { timeout: 10000 });
+  await page.evaluate(() => { CP.directMin = 400; CP.directPart = 200; });   /* clip.mp4 (500 байт) — «крупный» */
   await page.selectOption('#cpFAll', 'all');
   await page.waitForFunction(() => CP.sel && CP.sel.allList && /других файлов: 1/.test(document.querySelector('#cpPanel .cp-sum').textContent), null, { timeout: 8000 });
   check('«Все файлы»: видео посчитано, мусор (.DS_Store) — нет', true);
   await page.click('[data-cp-p="download"]');
-  await page.waitForFunction(() => [...document.querySelectorAll('#cpDlCard a.cp-dlcard-btn')].some(a => /МОДЕЛЬ/.test(decodeURIComponent(a.href))), null, { timeout: 10000 });
+  await page.waitForFunction(() => [...document.querySelectorAll('#cpDlCard a.cp-dlcard-btn')].some(a => a.textContent === 'clip.mp4'), null, { timeout: 10000 });
+  check('крупное видео — отдельной ссылкой, перенесено частями и скачивается', MPU_PARTS.length === 3 && DOWNLOADS.some(p => /видео\/clip\.mp4$/.test(p)), MPU_PARTS.join(',') + ' :: ' + DOWNLOADS.slice(-3).join(' | '));
+  await page.evaluate(() => { CP.directMin = 200 * 1024 * 1024; CP.directPart = 256 * 1024 * 1024; });
   const zVid = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST_1\.zip$/.test(k)).flatMap(([, v]) => v);
   check('карточка артикула в выгрузке — исходная папка артикула с луком', zVid.some(n => /_1\/1\/74595_модель\/IMG_0101\.jpg$/.test(n)) && zVid.some(n => /_1\/1\/74595_модель\/manekin\.jpg$/.test(n)), zVid.join(' | '));
-  check('«Все файлы»: видео в архиве по исходной папке', zVid.some(n => /\/видео\/clip\.mp4$/.test(n)) && zVid.filter(n => /\.jpg$/.test(n)).length === 3, zVid.join(' | '));
+  check('«Все файлы»: кадры в архиве, видео в архив не попало', !zVid.some(n => /clip\.mp4$/.test(n)) && zVid.filter(n => /\.jpg$/.test(n)).length === 3, zVid.join(' | '));
 
   /* оптика: выгрузка как в папках */
   await page.evaluate(() => cpShowShelf());

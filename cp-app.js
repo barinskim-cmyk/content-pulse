@@ -1421,6 +1421,73 @@ function cpZipExport(name, entries, note) {
   });
 }
 
+/* Крупные файлы (видео) идут не в архив, а отдельной ссылкой: функция
+   переносит их в облако кусками по CP.directPart — каждый вызов короткий. */
+CP.directMin = 200 * 1024 * 1024;
+CP.directPart = 256 * 1024 * 1024;
+
+function cpDirectExport(e, onProgress) {
+  var parts = [], up = null;
+  var total = e.size, n = Math.max(1, Math.ceil(total / CP.directPart));
+  return CPDisk.proxyMpu({ op: 'start' }).then(function (st) {
+    up = st;
+    var chain = Promise.resolve();
+    for (var i = 0; i < n; i++) {
+      (function (i) {
+        chain = chain.then(function () {
+          var start = i * CP.directPart, end = Math.min(total, start + CP.directPart) - 1;
+          if (onProgress) onProgress(start, total);
+          return CPDisk.proxyMpu({ op: 'part', key: up.key, uploadId: up.uploadId, n: i + 1, from: e.from, start: start, end: end })
+            .then(function (r) { parts.push({ n: r.n, etag: r.etag }); });
+        });
+      })(i);
+    }
+    return chain;
+  }).then(function () {
+    if (onProgress) onProgress(total, total);
+    return CPDisk.proxyMpu({ op: 'done', key: up.key, uploadId: up.uploadId, parts: parts, filename: e.name.split('/').pop() });
+  }).catch(function (err) {
+    if (up) CPDisk.proxyMpu({ op: 'abort', key: up.key, uploadId: up.uploadId }).catch(function () { });
+    throw err;
+  });
+}
+
+/**
+ * Выгрузка целиком: обычные файлы — ZIP (частями, если много), крупные
+ * (видео) — отдельными ссылками рядом. Возвращает {parts, files, bytes}.
+ */
+function cpExportBundle(name, entries, note) {
+  var small = entries.filter(function (e) { return !(e.size > CP.directMin); });
+  var big = entries.filter(function (e) { return e.size > CP.directMin; });
+  var zipP = small.length ? cpZipExport(name, small, note) : Promise.resolve({ parts: [], files: 0, bytes: 0 });
+  return zipP.then(function (res) {
+    var chain = Promise.resolve(res);
+    big.forEach(function (e, bi) {
+      chain = chain.then(function (r) {
+        var fname = e.name.split('/').pop();
+        var msg = 'Переношу ' + fname + ' (' + (bi + 1) + ' из ' + big.length + ')';
+        cpDlCard(name, note, r.parts, msg + '...');
+        return cpDirectExport(e, function (done, total) {
+          var t = msg + ': ' + cpMb(done) + ' из ' + cpMb(total);
+          cbBusyShow(t, done / Math.max(1, total));
+        }).then(function (out) {
+          r.parts.push({ path: e.from, href: out.url, files: 1, bytes: e.size, label: fname, cloud: true });
+          r.files += 1;
+          r.bytes += e.size;
+          cpStartDownload(out.url);
+          cbBusyHide();
+          cpDlCard(name, note, r.parts, bi + 1 < big.length ? 'Переношу следующий крупный файл...' : '');
+          return r;
+        });
+      });
+    });
+    return chain;
+  }).catch(function (e) {
+    cbBusyHide();
+    throw e;
+  });
+}
+
 /** Обычная загрузка браузера; без Referer — файловый сервер Яндекс 360 строг к чужим страницам. */
 function cpStartDownload(href) {
   window.__cpLastDownload = href;
@@ -1526,13 +1593,11 @@ function cpDownloadAll(withAll) {
   if (!files.length && !withAll) { cbToast('Кадры съёмки ещё не прочитаны — подождите или «Обновить съёмку»'); return; }
   var list = withAll ? (cbBusyShow('Считаю все файлы съёмки...', 0.05), cpWalkAll(shoot.path)) : Promise.resolve(files);
   list.then(function (all) {
-    var big = all.filter(function (f) { return f.size >= CP_ZIP_FILE_MAX; });
-    var entries = all.filter(function (f) { return f.size < CP_ZIP_FILE_MAX; })
-      .map(function (f) { return { from: f.path, name: cpRelInShoot(f.path), size: f.size }; });
-    if (big.length) cbToast('Не входят в архив (больше 3,9 ГБ), скачайте с Диска отдельно: ' + big.map(function (f) { return f.name; }).join(', '));
+    /* крупные файлы (видео) уйдут отдельными ссылками — без ограничения по размеру */
+    var entries = all.map(function (f) { return { from: f.path, name: cpRelInShoot(f.path), size: f.size }; });
     var photos = entries.filter(function (e) { return CPDisk.isPhoto(e.name); }).length;
     return cpNextExportName(CPDisk.safeName(shoot.name) + '_вся съёмка', cpMeta().events).then(function (name) {
-      return cpZipExport(name, entries, 'Вся съёмка: ' + photos + ' кадр(ов)' + (entries.length > photos ? ' и других файлов: ' + (entries.length - photos) : '') + '.')
+      return cpExportBundle(name, entries, 'Вся съёмка: ' + photos + ' кадр(ов)' + (entries.length > photos ? ' и других файлов: ' + (entries.length - photos) : '') + '.')
         .then(function (r) { cpEvent('download_shoot', [], { count: r.files, export: name, parts: r.parts.length, all: withAll || undefined }); });
     });
   }).catch(function (e) { cpHandleError(e, 'Скачивание съёмки'); });
@@ -1586,7 +1651,7 @@ function cpDownloadSelection() {
       return { from: j.disk, size: j.size, name: (j.dir.length ? j.dir.map(CPDisk.safeName).join('/') + '/' : '') + CPDisk.safeName(j.file) };
     });
   cpNextExportName(CPDisk.safeName(shoot.name) + '_отбор', cpMeta().events).then(function (name) {
-    return cpZipExport(name, entries, 'Отбор по карточкам: ' + entries.length + ' кадр(ов).').then(function (r) {
+    return cpExportBundle(name, entries, 'Отбор по карточкам: ' + entries.length + ' кадр(ов).').then(function (r) {
       cpEvent('download_selection', [], { count: r.files, note: 'карточек: ' + App.cards.length, export: name, parts: r.parts.length });
     });
   }).catch(function (e) { cpHandleError(e, 'Скачивание отбора'); });

@@ -297,6 +297,10 @@ var CPDisk = (function () {
   function proxyZip(target, entries) {
     return proxyReq({ a: 'zip' }, { method: 'POST', body: { target: target, entries: entries }, as: 'json' });
   }
+  /** Крупный файл в облако частями: body {op: start|part|done|abort, ...} */
+  function proxyMpu(body) {
+    return proxyReq({ a: 'mpu' }, { method: 'POST', body: body, as: 'json' });
+  }
   /** Замер скорости чтения кадров и загрузки на Диск: paths -> отчёт */
   function proxyBench(paths) {
     return proxyReq({ a: 'bench' }, { method: 'POST', body: { files: paths }, as: 'json' });
@@ -346,7 +350,7 @@ var CPDisk = (function () {
     setToken: function (t) { token = t || ''; },
     setProxy: function (u) { proxy = (u || '').replace(/\/+$/, ''); },
     hasProxy: function () { return !!proxy; },
-    proxyPreview: proxyPreview, proxyPreviews: proxyPreviews, proxyDlTest: proxyDlTest, proxyZip: proxyZip, proxyBench: proxyBench, proxyFile: proxyFile, proxyCopy: proxyCopy,
+    proxyPreview: proxyPreview, proxyPreviews: proxyPreviews, proxyDlTest: proxyDlTest, proxyZip: proxyZip, proxyBench: proxyBench, proxyMpu: proxyMpu, proxyFile: proxyFile, proxyCopy: proxyCopy,
     hasToken: function () { return !!token; },
     isPhoto: function (name) { return PHOTO_RE.test(name || ''); },
     DiskError: DiskError,
