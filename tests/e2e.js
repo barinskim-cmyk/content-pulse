@@ -705,6 +705,25 @@ async function route(r) {
   await page.waitForSelector('.cp-shoot');
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-shelf.png') });
 
+  /* медленная сеть: наши файлы грузятся дольше таймера лаунчера Cardboard — всё равно витрина, а не «Проекты» */
+  {
+    const slow = await ctx.newPage();
+    await slow.route(/cp-disk\.js/, async r => { await new Promise(res => setTimeout(res, 900)); r.continue(); });
+    await slow.goto(base);
+    await slow.waitForFunction(() => window.CP && CP.booted, null, { timeout: 10000 });
+    await slow.waitForTimeout(400);
+    check('медленная загрузка: открыта витрина, лаунчер «Проекты» закрыт', await slow.evaluate(() =>
+      document.getElementById('cpShelf').classList.contains('cp-open') && !document.getElementById('cbProjModal').classList.contains('cb-open')));
+    const fast = await ctx.newPage();
+    let shelfLoads = 0;
+    fast.on('request', rq => { if (/\/v1\/disk\/resources\?/.test(rq.url()) && /path=disk%3A%2F%D0%90%D1%80%D1%85%D0%B8%D0%B2&/.test(rq.url())) shelfLoads++; });
+    await fast.goto(base);
+    await fast.waitForSelector('.cp-shoot', { timeout: 8000 });
+    await fast.waitForTimeout(600);
+    check('обычная загрузка: витрина читается один раз', shelfLoads === 1, 'запросов архива: ' + shelfLoads);
+    await slow.close(); await fast.close();
+  }
+
   await browser.close(); srv.close();
   const failed = results.filter(r => !r[1]);
   console.log('\n' + (results.length - failed.length) + '/' + results.length + ' PASS');

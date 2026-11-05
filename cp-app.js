@@ -2040,7 +2040,12 @@ document.getElementById('cpMenuRefresh').onclick = function () {
 
 var _cbProjModalOpenOrig = cbProjModalOpen;
 cbProjModalOpen = function (mode, startup) {
-  if (mode === 'launcher' || mode === 'new') { cpShowShelf(); return; }
+  if (mode === 'launcher' || mode === 'new') {
+    /* таймер запуска Cardboard: витрину уже открыли при загрузке (cp-guard.js) — не перечитываем */
+    if (startup && CP.booted) return;
+    cpShowShelf();
+    return;
+  }
   return _cbProjModalOpenOrig(mode, startup);
 };
 

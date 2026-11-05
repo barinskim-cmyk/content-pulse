@@ -393,3 +393,30 @@ function cpCardTag(card, tag, on) {
 }
 
 if (CPDisk.hasToken()) cpLoadDict().then(function () { if (CP.shoot) cbRenderCards(); }, function () { });
+
+/* ---------- запуск ----------
+   Cardboard открывает свой лаунчер («Проекты · Недавние проекты») по
+   таймеру через 150 мс. Если наши файлы грузятся дольше (медленная сеть,
+   новая версия без кэша), лаунчер успевал открыться раньше, чем мы его
+   подменим, и вместо витрины висел он. Поэтому здесь, в последнем файле:
+   лаунчер закрываем, витрину открываем сами. */
+(function cpBoot() {
+  var m = document.getElementById('cbProjModal');
+  if (m) m.classList.remove('cb-open');
+  CP.booted = true;
+  if (!CP.shoot) cpShowShelf();
+})();
+
+/* подсказка пустой галереи — про съёмки с Диска, а не про импорт и Capture One */
+cbRenderTray = (function (orig) {
+  return function () {
+    var r = orig.apply(this, arguments);
+    var empty = document.querySelector('#cbTrayGrid .cb-tray-empty');
+    if (empty && App.trayTab !== 'ref') {
+      empty.innerHTML = CP.shoot
+        ? (CP.folder || CP.likedOnly ? 'Здесь кадров нет — выберите «Все папки»' : 'Кадров нет: съёмка ещё читается с Диска или папка пуста')
+        : 'Откройте съёмку на витрине:<br>Файл → Витрина съёмок';
+    }
+    return r;
+  };
+})(cbRenderTray);
