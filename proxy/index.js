@@ -149,15 +149,15 @@ async function doCopy(token, items, dirs) {
 
 /* ---------- Object Storage (S3) для архивов выгрузки ----------
    Запись на Яндекс Диск сейчас ~0,1 МБ/с, поэтому готовый ZIP кладём в
-   закрытый бакет в Yandex Cloud (удаляется через сутки, правило жизненного цикла),
-   а странице отдаём подписанную ссылку на сутки. Ключи — в переменных
+   закрытый бакет в Yandex Cloud (живёт 3 дня, правило жизненного цикла),
+   а странице отдаём подписанную ссылку на те же 3 дня. Ключи — в переменных
    окружения функции, в репозиторий не попадают. */
 const crypto = require('crypto');
 const S3 = {
   host: 'storage.yandexcloud.net', region: 'ru-central1',
   key: process.env.S3_KEY_ID || '', secret: process.env.S3_SECRET || '', bucket: process.env.S3_BUCKET || '',
 };
-const S3_LINK_TTL = 24 * 3600;
+const S3_LINK_TTL = 3 * 24 * 3600;   /* как и сам архив в бакете — 3 дня */
 
 function s3Ready() { return !!(S3.key && S3.secret && S3.bucket); }
 function hmac(k, str) { return crypto.createHmac('sha256', k).update(str, 'utf8').digest(); }
