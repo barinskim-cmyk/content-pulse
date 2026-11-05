@@ -325,6 +325,8 @@ async function route(r) {
   await page.click('#cpTagPop [data-cp-poptag="Яна"]');
   await page.waitForFunction(() => CP.sel && CP.sel.data && CP.sel.data.meta.cp.folderTags.part2, null, { timeout: 8000 });
   await page.check('[data-cp-fold="part2"]');
+  check('галочки работают и на скачивании: «Скачать отмеченные», счёт по отмеченным', /Скачать отмеченные/.test(await page.textContent('[data-cp-p="download"]'))
+    && /из отмеченных папок: 1/.test(await page.textContent('#cpPanel .cp-sum')) && await page.evaluate(() => cpFiltered(CP.sel).every(x => x.dir === 'part2')));
   check('тег сразу нескольким: выбор появляется, когда отмечены папки', !!(await page.$('#cpAssignTag')) && /Отмеченным \(1\)/.test(await page.textContent('[data-cp-p="assign"]')));
   const st1 = JSON.parse(FILES.get('disk:/Архив/LM-1043/_contentpulse.json').toString());
   check('тег папки записан в отбор на Диске', (st1.meta.cp.folderTags.part2 || []).includes('Яна'));

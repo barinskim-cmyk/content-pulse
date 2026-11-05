@@ -463,7 +463,9 @@ function cpRenderPanel() {
     + untagAttr(cpTagChips(meta.folderTags[''] || [], true), '') + plus('') + '</span></div>';
 
   /* папки следующего уровня: что внутри (ретушь, скачано...) и теги, «+» — тег из словаря */
-  body += '<h4>Папки · ' + sel.dirs.length + '</h4>';
+  var nChecked = Object.keys(sel.folders).filter(function (k) { return sel.folders[k]; }).length;
+  body += '<h4>Папки · ' + sel.dirs.length
+    + (sel.dirs.length > 1 ? ' · <a href="#" data-cp-p="foldall">' + (nChecked === sel.dirs.length ? 'снять все' : 'отметить все') + '</a>' : '') + '</h4>';
   if (!sel.dirs.length) body += '<div class="cp-note">Вложенных папок нет — все кадры лежат в корне съёмки.</div>';
   sel.dirs.forEach(function (d) {
     var fp = d.name;
@@ -508,6 +510,7 @@ function cpRenderPanel() {
   var others = cpFilteredOthers(sel);
   var othersBytes = others.reduce(function (a, x) { return a + (x.file.size || 0); }, 0);
   var sum = 'Будет скачано: <b>' + items.length + '</b> из ' + Object.keys(idx).length
+    + (nChecked ? ' · из отмеченных папок: ' + nChecked : '')
     + (inCards ? ' · в карточках ' + inCards : '')
     + (others.length ? '<br>и других файлов: <b>' + others.length + '</b> · ' + cpMb(othersBytes) : '')
     + (again ? '<br><span class="cp-warn">уже скачивали: ' + again + '</span>' : '');
@@ -515,7 +518,8 @@ function cpRenderPanel() {
   panel.innerHTML = head + '<div class="cp-panel-body">' + body + '</div>'
     + '<div class="cp-panel-actions"><div class="cp-sum">' + sum + '</div>'
     + '<button data-cp-p="open">Открыть</button>'
-    + '<button class="cb-primary" data-cp-p="download"' + (items.length || others.length ? '' : ' disabled') + '>Скачать</button></div>';
+    + '<button class="cb-primary" data-cp-p="download"' + (items.length || others.length ? '' : ' disabled') + '>'
+    + (nChecked ? 'Скачать отмеченные' : 'Скачать') + '</button></div>';
 }
 
 /* ---------- изменения отбора с витрины (чтение-правка-запись) ---------- */
@@ -762,6 +766,11 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
   if (act === 'close') { CP.sel = null; cpRenderPanel(); cpMarkSelected(); }
   else if (act === 'open') cpOpenShoot(sel.path, sel.name);
   else if (act === 'download') cpShelfDownload();
+  else if (act === 'foldall') {
+    var allOn = sel.dirs.every(function (d) { return sel.folders[d.name]; });
+    sel.dirs.forEach(function (d) { sel.folders[d.name] = !allOn; });
+    cpRenderPanel();
+  }
   else if (act === 'bench') cpBench();
   else if (act === 'mkdict') cpCreateDict();
   else if (act === 'reloaddict') cpLoadDict(true).then(cpRenderPanel, function (er) { cpHandleError(er, 'Словарь'); });
