@@ -33,7 +33,9 @@ var CP_CONFIG = {
 var CP_STATUS = {
   retouch: { label: 'Ретушь', short: 'РЕТУШЬ' },
   reshoot: { label: 'Пересъём', short: 'ПЕРЕСЪЁМ' },
-  approval: { label: 'Согласование', short: 'СОГЛАС.' }
+  approval: { label: 'Согласование', short: 'СОГЛАС.' },
+  /* скачали на ретушь, а потом убрали из отбора: ретушёру — не делать */
+  removed: { label: 'Удалено из отбора', short: 'УДАЛЕНО' }
 };
 
 var CP = {
@@ -86,6 +88,7 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
     + '.cp-link{background:none;border:none;color:#a3a09a;text-decoration:underline;padding:4px;font-size:11px}'
     + '.cp-badge{position:absolute;left:4px;bottom:4px;background:#C9956B;color:#131313;font:600 9px/1 "IBM Plex Mono",monospace;letter-spacing:.06em;padding:3px 5px;border-radius:2px;pointer-events:none;z-index:2}'
     + '.cp-badge.cp-reshoot{background:#d9534f;color:#fff}.cp-badge.cp-approval{background:#e8d27a}'
+    + '.cp-badge.cp-removed{background:#5a2a24;color:#f2b8a0}'
     + '.cp-badge.cp-dl{left:auto;right:4px;top:4px;bottom:auto;background:#3d6b52;color:#fff}'
     + '.cp-badge.cp-like{top:4px;bottom:auto;left:4px;background:#e7c9a8}'
     + '.cp-badge.cp-badge-inline{position:static;display:inline-block;margin-left:6px;vertical-align:middle}'
@@ -839,14 +842,18 @@ var CP_ACTION_LABEL = {
   open: 'открыл(а) съёмку', files_found: 'найдены файлы', new_batch: 'пришла новая часть',
   to_retouch: 'отправил(а) на ретушь', to_reshoot: 'отправил(а) на пересъём',
   to_approval: 'отправил(а) на согласование', clear_status: 'снял(а) статус',
-  download_shoot: 'скачал(а) всю съёмку', download_selection: 'скачал(а) отбор'
+  download_shoot: 'скачал(а) всю съёмку', download_selection: 'скачал(а) отбор',
+  changed_after_download: 'изменил(а) карточку после скачивания',
+  removed_after_download: 'убрал(а) из отбора уже скачанное',
+  added_to_retouch_card: 'добавил(а) кадры в карточку на ретуши',
+  card_tag: 'поставил(а) тег карточке', card_untag: 'снял(а) тег с карточки'
 };
 
 function cpSetStatus(pids, status, cardId) {
   var m = cpMeta();
   var stamp = { by: cpActor(), ts: new Date().toISOString() };
   pids.forEach(function (pid) {
-    if (status) m.status[pid] = { s: status, by: stamp.by, ts: stamp.ts };
+    if (status) m.status[pid] = { s: status, by: stamp.by, ts: stamp.ts, card: cardId || undefined };
     else delete m.status[pid];
   });
   if (cardId) {
@@ -1141,19 +1148,22 @@ cbRenderTray = (function (orig) {
 });
 
 /* меню действий */
-function cpOpenMenu(anchor, title, onPick) {
+function cpOpenMenu(anchor, title, onPick, extra) {
   var menu = document.getElementById('cpMenu');
   menu.innerHTML = '<div class="cp-menu-title">' + cbEsc(title) + '</div>'
     + '<button data-s="retouch">На ретушь (копия в папку ретуши)</button>'
     + '<button data-s="reshoot">На пересъём</button>'
     + '<button data-s="approval">На согласование</button>'
-    + '<button data-s="">Снять статус</button>';
+    + '<button data-s="">Снять статус</button>'
+    + (extra ? extra.html : '');
   menu.classList.add('cp-open');
   var r = anchor.getBoundingClientRect();
   var w = menu.offsetWidth, h = menu.offsetHeight;
   menu.style.left = Math.max(8, Math.min(r.right - w, innerWidth - w - 8)) + 'px';
   menu.style.top = (r.bottom + h + 8 > innerHeight ? Math.max(8, r.top - h - 4) : r.bottom + 4) + 'px';
   menu.onclick = function (e) {
+    var x = extra && e.target.closest('[data-x]');
+    if (x) { menu.classList.remove('cp-open'); extra.onClick(x); return; }
     var b = e.target.closest('button[data-s]');
     if (!b) return;
     menu.classList.remove('cp-open');
@@ -1194,7 +1204,8 @@ document.addEventListener('click', function (e) {
     if (!card) return;
     var pids = cpCardPids(card);
     cpOpenMenu(actCard, 'Карточка: ' + (card.title || 'без названия') + ' · кадров ' + pids.length,
-      function (s) { cpDoAction(s, pids, card.id); });
+      function (s) { cpDoAction(s, pids, card.id); },
+      typeof cpCardTagMenu === 'function' ? cpCardTagMenu(card) : null);
     return;
   }
   if (!e.target.closest('#cpMenu')) menu.classList.remove('cp-open');

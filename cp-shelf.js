@@ -79,6 +79,21 @@ var CP_DICT_TEMPLATE = [
     + '.cp-note{color:#a3a09a;font-size:11px;line-height:1.5;margin:8px 0}'
     + '.cp-warn{color:#e7c9a8}'
     + '.cp-panel a{color:#C9956B}'
+    + '.cp-fold{flex-wrap:wrap}'
+    + '.cp-fold-all{border-bottom:1px solid #2a2a28;margin-top:10px}'
+    + '.cp-fold-name{flex:1;font-weight:600}'
+    + '.cp-fold-props{display:flex;flex-wrap:wrap;gap:4px;align-items:center;justify-content:flex-end}'
+    + '.cp-state{font-size:10px;color:#a3a09a;border:1px solid #3a3a37;border-radius:10px;padding:1px 7px;white-space:nowrap}'
+    + '.cp-state-retouch{color:#e7c9a8;border-color:#5a4632}.cp-state-dl{color:#9fc2a3;border-color:#3d5a40}'
+    + '.cp-state-removed{color:#f2b8a0;border-color:#8a4a32}'
+    + '.cp-addtag{width:22px;height:22px;padding:0;border-radius:11px;font-size:15px;line-height:1;color:#C9956B;border:1px solid #5a4632;background:transparent}'
+    + '.cp-addtag:hover{background:#2b241d}'
+    + '.cp-tagpop{position:fixed;z-index:3600;background:#1d1d1b;border:1px solid #3a3a37;border-radius:4px;padding:4px;min-width:160px;max-height:320px;overflow:auto;box-shadow:0 6px 24px #0008;display:none}'
+    + '.cp-tagpop.cp-open{display:block}'
+    + '.cp-tagpop small{display:block;color:#a3a09a;font-size:10px;letter-spacing:.1em;text-transform:uppercase;padding:6px 8px 2px}'
+    + '.cp-tagpop button{display:block;width:100%;text-align:left;border:none;background:none;color:#f2f2f1;padding:5px 8px;font-size:12px;cursor:pointer}'
+    + '.cp-tagpop button:hover{background:#2b241d}'
+    + '.cp-tagpop button.cp-on{color:#a3a09a}'
     + '.cp-set{display:inline-flex;gap:8px;align-items:center}#cpRetouchInput{width:260px}';
   var st = document.createElement('style');
   st.textContent = css;
@@ -366,6 +381,26 @@ function cpFiltered(sel) {
 
 /* ---------- отрисовка панели ---------- */
 
+/** Что внутри папки (с вложенными): сколько на ретуши, скачано и т. д. fp=null — вся съёмка. */
+function cpFolderState(idx, fp) {
+  var st = { retouch: 0, approval: 0, reshoot: 0, removed: 0, dl: 0 };
+  Object.keys(idx).forEach(function (k) {
+    var x = idx[k];
+    if (fp !== null && !(x.dir === fp || x.dir.indexOf(fp + '/') === 0)) return;
+    if (x.status && st[x.status] !== undefined) st[x.status]++;
+    if (x.dl) st.dl++;
+  });
+  return st;
+}
+
+function cpStateChips(st) {
+  var out = '';
+  [['retouch', 'на ретуши'], ['dl', 'скачано'], ['approval', 'на согласовании'], ['reshoot', 'пересъём'], ['removed', 'удалено']].forEach(function (c) {
+    if (st[c[0]]) out += '<span class="cp-state cp-state-' + c[0] + '">' + c[1] + ' ' + st[c[0]] + '</span>';
+  });
+  return out;
+}
+
 function cpTagChips(tags, removable, inherited) {
   return tags.map(function (t) {
     return '<span class="cp-chip' + (inherited ? ' cp-chip-inh' : '') + '">' + cbEsc(t)
@@ -419,12 +454,15 @@ function cpRenderPanel() {
     return Object.keys(idx).filter(function (k) { var d = idx[k].dir; return d === fp || d.indexOf(fp + '/') === 0; }).length;
   };
   var body = '';
+  var untagAttr = function (html, fp) { return html.replace(/data-cp-untag=/g, 'data-cp-fold-untag="' + cbEsc(fp) + '" data-cp-untag='); };
+  var plus = function (fp) { return '<button class="cp-addtag" data-cp-addtag="' + cbEsc(fp) + '" title="Добавить тег">+</button>'; };
 
-  /* теги всей съёмки */
-  body += '<h4>Теги съёмки</h4><div>' + (meta.folderTags[''] && meta.folderTags[''].length
-    ? cpTagChips(meta.folderTags[''], true) : '<span class="cp-note">нет</span>') + '</div>';
+  /* вся съёмка: что внутри и теги */
+  body += '<div class="cp-fold cp-fold-all"><span class="cp-fold-name">Вся съёмка <small>· ' + Object.keys(idx).length + '</small></span>'
+    + '<span class="cp-fold-props">' + cpStateChips(cpFolderState(idx, null))
+    + untagAttr(cpTagChips(meta.folderTags[''] || [], true), '') + plus('') + '</span></div>';
 
-  /* папки следующего уровня */
+  /* папки следующего уровня: что внутри (ретушь, скачано...) и теги, «+» — тег из словаря */
   body += '<h4>Папки · ' + sel.dirs.length + '</h4>';
   if (!sel.dirs.length) body += '<div class="cp-note">Вложенных папок нет — все кадры лежат в корне съёмки.</div>';
   sel.dirs.forEach(function (d) {
@@ -432,28 +470,23 @@ function cpRenderPanel() {
     var own = meta.folderTags[fp] || [];
     body += '<div class="cp-fold"><label><input type="checkbox" data-cp-fold="' + cbEsc(fp) + '"'
       + (sel.folders[fp] ? ' checked' : '') + '><span>' + cbEsc(d.name) + ' <small>· ' + countIn(fp) + '</small></span></label>'
-      + '<span>' + cpTagChips(own, true).replace(/data-cp-untag=/g, 'data-cp-fold-untag="' + cbEsc(fp) + '" data-cp-untag=') + '</span></div>';
+      + '<span class="cp-fold-props">' + cpStateChips(cpFolderState(idx, fp)) + untagAttr(cpTagChips(own, true), fp) + plus(fp) + '</span></div>';
   });
 
-  /* присвоить тег */
-  body += '<h4>Присвоить тег</h4>';
+  /* тег сразу нескольким отмеченным папкам */
+  var nf = Object.keys(sel.folders).filter(function (k) { return sel.folders[k]; }).length;
   if (CP.dict === null) {
-    body += '<div class="cp-note cp-warn">Словарь тегов не найден: ' + cbEsc(cpServicePath(CP_TAGS_FILE).replace(/^disk:/, ''))
-      + '.<br>Теги берутся только из него — так они одинаковые у всех.</div>'
-      + '<button data-cp-p="mkdict">Создать словарь-образец</button>';
-  } else {
-    var nf = Object.keys(sel.folders).filter(function (k) { return sel.folders[k]; }).length;
-    body += '<div class="cp-row"><select id="cpAssignTag">' + cpDictOptions('', 'Выберите тег из словаря') + '</select>'
-      + '<button data-cp-p="assign">' + (nf ? 'Папкам (' + nf + ')' : 'Всей съёмке') + '</button></div>'
-      + '<div class="cp-note">Тег папки действует на все её кадры и вложенные папки. Словарь: '
-      + cbEsc(cpServicePath(CP_TAGS_FILE).replace(/^disk:/, '')) + ' · <a href="#" data-cp-p="reloaddict">перечитать</a></div>';
+    body += '<div class="cp-note cp-warn">Словаря тегов нет. <a href="#" data-cp-p="mkdict">Создать</a></div>';
+  } else if (nf) {
+    body += '<div class="cp-row"><select id="cpAssignTag">' + cpDictOptions('', 'Тег') + '</select>'
+      + '<button data-cp-p="assign">Отмеченным (' + nf + ')</button></div>';
   }
 
   /* фильтры */
   body += '<h4>Фильтры для скачивания</h4>';
   body += '<div class="cp-row"><span>Тег</span><select id="cpFTag">' + cpDictOptions(sel.tag, 'Все') + '</select></div>';
   body += '<div class="cp-row"><span>Статус</span><select id="cpFStatus">'
-    + [['', 'Все'], ['retouch', 'Ретушь'], ['approval', 'Согласование'], ['reshoot', 'Пересъём'], ['none', 'Без статуса']]
+    + [['', 'Все'], ['retouch', 'Ретушь'], ['approval', 'Согласование'], ['reshoot', 'Пересъём'], ['removed', 'Удалено из отбора'], ['none', 'Без статуса']]
       .map(function (o) { return '<option value="' + o[0] + '"' + (sel.status === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('')
     + '</select></div>';
   body += '<div class="cp-row"><span>Скачано</span><select id="cpFDl">'
@@ -467,7 +500,7 @@ function cpRenderPanel() {
   else if (sel.allFiles && (sel.status || sel.dl)) body += '<div class="cp-note">Фильтры «Статус» и «Скачано» есть только у кадров — видео и прочие файлы с ними не скачиваются.</div>';
   if (sel.stateError) body += '<div class="cp-note cp-warn">Отбор съёмки не прочитался — статусы и карточки не учитываются.</div>';
   else if (!sel.data) body += '<div class="cp-note">Съёмку ещё не открывали в Content Pulse: карточек и статусов пока нет.</div>';
-  body += '<div class="cp-note"><a href="#" data-cp-p="bench">Проверить скорость Диска</a> — замер на 3 кадрах этой съёмки, отчёт для разработки</div>';
+  body += '<div class="cp-note"><a href="#" data-cp-p="bench">Проверить скорость Диска</a></div>';
 
   var items = cpFiltered(sel);
   var inCards = items.filter(function (x) { return x.cards.length; }).length;
@@ -658,6 +691,51 @@ function cpBench() {
   });
 }
 
+/* ---------- «+» у папки: словарь тегов ---------- */
+
+(function cpTagPopDom() {
+  var pop = document.createElement('div');
+  pop.className = 'cp-tagpop';
+  pop.id = 'cpTagPop';
+  document.body.appendChild(pop);
+  pop.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-cp-poptag]');
+    if (b) {
+      pop.classList.remove('cp-open');
+      var fp = pop.getAttribute('data-fp');
+      if (b.classList.contains('cp-on')) return;
+      cpAssignTag(b.getAttribute('data-cp-poptag'), fp ? [fp] : []);
+      return;
+    }
+    if (e.target.closest('[data-cp-popmk]')) { pop.classList.remove('cp-open'); cpCreateDict(); }
+  });
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('#cpTagPop') && !e.target.closest('[data-cp-addtag]')) pop.classList.remove('cp-open');
+  });
+})();
+
+function cpOpenTagPop(anchor, fp) {
+  var pop = document.getElementById('cpTagPop');
+  var have = (cpSelMeta(CP.sel.data).folderTags[fp] || []);
+  var html = '', group = null;
+  if (!CP.dict || !CP.dict.length) {
+    html = '<button data-cp-popmk>Словаря тегов нет — создать</button>';
+  } else {
+    CP.dict.forEach(function (d) {
+      if (d.group !== group) { group = d.group; if (group) html += '<small>' + cbEsc(group) + '</small>'; }
+      var on = have.indexOf(d.tag) !== -1;
+      html += '<button data-cp-poptag="' + cbEsc(d.tag) + '"' + (on ? ' class="cp-on" title="Уже стоит"' : '') + '>' + cbEsc(d.tag) + '</button>';
+    });
+  }
+  pop.innerHTML = html;
+  pop.setAttribute('data-fp', fp);
+  pop.classList.add('cp-open');
+  var r = anchor.getBoundingClientRect();
+  var w = pop.offsetWidth, h = pop.offsetHeight;
+  pop.style.left = Math.max(8, Math.min(r.right - w, innerWidth - w - 8)) + 'px';
+  pop.style.top = (r.bottom + h + 8 > innerHeight ? Math.max(8, r.top - h - 4) : r.bottom + 4) + 'px';
+}
+
 /* ---------- события панели ---------- */
 
 document.getElementById('cpPanel').addEventListener('click', function (e) {
@@ -668,6 +746,13 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
     var folder = untag.getAttribute('data-cp-fold-untag') || '';
     var tag = untag.getAttribute('data-cp-untag');
     if (confirm('Снять тег «' + tag + '» с ' + (folder ? 'папки «' + folder + '»' : 'всей съёмки') + '?')) cpRemoveTag(tag, folder);
+    return;
+  }
+  var add = e.target.closest('[data-cp-addtag]');
+  if (add) {
+    e.preventDefault();
+    var openPop = function () { cpOpenTagPop(add, add.getAttribute('data-cp-addtag')); };
+    if (CP.dict === undefined) cpLoadDict().then(openPop, openPop); else openPop();
     return;
   }
   var b = e.target.closest('[data-cp-p]');

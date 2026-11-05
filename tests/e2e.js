@@ -314,13 +314,18 @@ async function route(r) {
   await page.waitForSelector('#cpPanel.cp-open [data-cp-fold]', { timeout: 10000 });
   check('клик выбирает съёмку, а не открывает: панель справа с папками',
     await page.evaluate(() => document.getElementById('cpShelf').classList.contains('cp-open') && CP.sel && CP.sel.dirs.length === 1));
+  check('у папок и всей съёмки — «+» для тега', (await page.$$('#cpPanel [data-cp-addtag]')).length === 2);
+  check('что внутри съёмки видно сразу: «на ретуши»', /на ретуши 2/.test(await page.textContent('#cpPanel .cp-fold-all')));
   await page.click('[data-cp-p="mkdict"]');
-  await page.waitForSelector('#cpAssignTag', { timeout: 8000 });
+  await page.waitForFunction(() => CP.dict && CP.dict.length, null, { timeout: 8000 });
   check('словарь тегов создан в служебной папке', FILES.has('disk:/_ContentPulse/теги.txt'));
-  await page.check('[data-cp-fold="part2"]');
-  await page.selectOption('#cpAssignTag', 'Яна');
-  await page.click('[data-cp-p="assign"]');
+  await page.click('[data-cp-addtag="part2"]');
+  await page.waitForSelector('#cpTagPop.cp-open [data-cp-poptag="Яна"]', { timeout: 5000 });
+  check('«+» у папки открывает словарь тегов', true);
+  await page.click('#cpTagPop [data-cp-poptag="Яна"]');
   await page.waitForFunction(() => CP.sel && CP.sel.data && CP.sel.data.meta.cp.folderTags.part2, null, { timeout: 8000 });
+  await page.check('[data-cp-fold="part2"]');
+  check('тег сразу нескольким: выбор появляется, когда отмечены папки', !!(await page.$('#cpAssignTag')) && /Отмеченным \(1\)/.test(await page.textContent('[data-cp-p="assign"]')));
   const st1 = JSON.parse(FILES.get('disk:/Архив/LM-1043/_contentpulse.json').toString());
   check('тег папки записан в отбор на Диске', (st1.meta.cp.folderTags.part2 || []).includes('Яна'));
   await page.selectOption('#cpFTag', 'Яна');
@@ -460,6 +465,56 @@ async function route(r) {
   const zOpt = ZIPS.get('disk:/_ContentPulse/выгрузки/2026-09-21_SV_ОПТИКА_N_1.zip') || [];
   check('оптика: в архиве исходные папки бренда и артикула', zOpt.includes('2026-09-21_SV_ОПТИКА_N_1/maxmara_оптика/75327_оптика_N/s1.jpg'), [...ZIPS.keys()].join(' | ') + ' :: ' + zOpt.join(' | '));
   await page.fill('#cpShelfSearch', '1043');
+
+  /* ---------- отбор после ретуши и скачивания ---------- */
+  await page.evaluate(() => cpShowShelf());
+  await page.fill('#cpShelfSearch', '1043');
+  await page.dblclick('.cp-shoot');
+  await page.waitForFunction(() => CP.shoot && CP.shoot.name === 'LM-1043' && !document.getElementById('cpShelf').classList.contains('cp-open') && App.cards.length, null, { timeout: 10000 });
+  await page.waitForTimeout(300);
+  const g = await page.evaluate(() => {
+    var c = App.cards[0], m = cpMeta();
+    var a = App.photos.find(p => /\/a\.jpg$/.test(p.disk));
+    return { a: a.id, dl: (m.downloads[a.id] || {}).n || 0, st: (m.status[a.id] || {}).s, cst: (m.cardStatus[c.id] || {}).s, mode: c.mode };
+  });
+  check('исходное: кадр a скачан и на ретуши, карточка на ретуши', g.dl >= 1 && g.st === 'retouch' && g.cst === 'retouch', JSON.stringify(g));
+  await page.evaluate(() => {
+    var c = App.cards[0];
+    var a = App.photos.find(p => /\/a\.jpg$/.test(p.disk));
+    if (c.mode === 'auto') c.pids = c.pids.filter(x => x !== a.id); else c.slots.forEach(s => { if (s.pid === a.id) s.pid = null; });
+    cbMarkDirty(); cbRenderCards();
+  });
+  check('убрали скачанный кадр — «Удалено из отбора», карточка «изменена после скачивания»', await page.evaluate(() => {
+    var a = App.photos.find(p => /\/a\.jpg$/.test(p.disk));
+    return cpMeta().status[a.id].s === 'removed' && !!App.cards[0].cpChangedAfterDl && !!document.querySelector('#cbCards .cp-card-warn');
+  }));
+  await page.evaluate(() => {
+    var c = App.cards[0];
+    var d = App.photos.find(p => /\/d\.jpg$/.test(p.disk));
+    if (c.mode === 'auto') c.pids.push(d.id); else { var s = c.slots.find(x => !x.pid); s.pid = d.id; }
+    cbMarkDirty(); cbRenderCards();
+  });
+  await page.waitForFunction(() => {
+    var d = App.photos.find(p => /\/d\.jpg$/.test(p.disk));
+    return cpMeta().status[d.id] && cpMeta().status[d.id].s === 'retouch';
+  }, null, { timeout: 8000 });
+  check('добавили в карточку на ретуши — кадр сам ушёл на ретушь (и копия)', FILES.has('disk:/Архив/РЕТУШЬ/LM-1043/part2/d.jpg'));
+  check('журнал: изменение после скачивания и удалённое', await page.evaluate(() => {
+    var ev = cpMeta().events.map(e => e.action);
+    return ev.includes('changed_after_download') && ev.includes('removed_after_download') && ev.includes('added_to_retouch_card');
+  }));
+  /* тег карточки из меню «ещё» */
+  await page.click('#cbCards [data-cp-card]');
+  await page.waitForSelector('#cpMenu.cp-open [data-x="tag"][data-tag="Яна"]', { timeout: 5000 });
+  await page.click('#cpMenu [data-x="tag"][data-tag="Яна"]');
+  check('тег карточки из меню «ещё» — на шапке', await page.evaluate(() => (App.cards[0].tags || []).includes('Яна') && !!document.querySelector('#cbCards .cp-card-tag')));
+  /* большой «+» */
+  const nCards = await page.evaluate(() => App.cards.length);
+  await page.click('#cbCards .cp-addcard');
+  check('большой «+» в поле карточек создаёт карточку-автоленту', await page.evaluate(n => App.cards.length === n + 1 && App.cards[App.cards.length - 1].mode === 'auto', nCards));
+  await page.evaluate(() => { var b = App.photos.find(p => /\/b\.jpg$/.test(p.disk)); cpAddAutoCard(b.id); });
+  check('кадр, брошенный на «+», сразу в новой карточке', await page.evaluate(() => App.cards[App.cards.length - 1].pids.length === 1));
+  await page.waitForFunction(() => !App.dirty, null, { timeout: 8000 });
 
   check('служебная папка не видна на витрине', await page.evaluate(() => CP.shoots.every(s => s.name.charAt(0) !== '_')));
 
