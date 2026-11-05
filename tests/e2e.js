@@ -25,6 +25,7 @@ const DIRS = new Set(['disk:/Архив', 'disk:/Архив/LM-1043', 'disk:/А�
   /* съёмки по структуре SK: моделька (лук/артикул) и оптика (бренд/артикул) */
   'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST', 'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1', 'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74595_модель',
   'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74596_модель', 'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/видео',
+  'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74598_модель',
   'disk:/КАТАЛОГ', 'disk:/КАТАЛОГ/00_АРХИВ', 'disk:/КАТАЛОГ/00_АРХИВ/2026-11-01_SV_ПРЕДМЕТКА',
   'disk:/Архив/2026-09-21_SV_ОПТИКА_N', 'disk:/Архив/2026-09-21_SV_ОПТИКА_N/maxmara_оптика', 'disk:/Архив/2026-09-21_SV_ОПТИКА_N/maxmara_оптика/75327_оптика_N']);
 const FILES = new Map([
@@ -428,6 +429,31 @@ async function route(r) {
   check('тип съёмки по названию виден на панели', (await page.textContent('#cpPanel .cp-panel-head small')).includes('Модельная'));
   await page.dblclick('.cp-shoot');
   await page.waitForFunction(() => CP.shoot && /МОДЕЛЬ/.test(CP.shoot.name) && App.photos.length === 3 && !document.getElementById('cpShelf').classList.contains('cp-open'), null, { timeout: 10000 });
+  /* карточки товара по папкам артикулов — сами, пустая папка — пустая карточка */
+  await page.waitForFunction(() => App.cards.filter(c => c.cpAuto).length === 3, null, { timeout: 8000 });
+  check('на каждую папку артикула — своя карточка товара с её кадрами', await page.evaluate(() => {
+    var by = {}; App.cards.filter(c => c.cpAuto).forEach(c => { by[c.title] = cpCardPids(c).map(pid => cbPhotoById(pid).name); });
+    return by['74595'] && by['74595'].join() === 'manekin.jpg' && by['74596'] && by['74596'].join() === 'manekin2.jpg' && by['74598'] && by['74598'].length === 0;
+  }), JSON.stringify(await page.evaluate(() => App.cards.map(c => [c.title, cpCardPids(c).length]))));
+  check('у карточки товара нет кнопки «Удалить» (удалять карточки товара: нет)', await page.evaluate(() => {
+    var el = document.querySelector('#cbCards .cb-card[data-cid="' + App.cards.find(c => c.title === '74598').id + '"]');
+    var del = el.querySelector('[data-act="del"]');
+    var n = App.cards.length;
+    del.click();
+    return del.style.display === 'none' && App.cards.length === n;
+  }));
+  await page.evaluate(() => {
+    var c = App.cards.find(x => x.title === '74596');
+    c.pids = [];
+    cbMarkDirty(); cbRenderCards();
+  });
+  await page.evaluate(() => cpSyncPhotos(false));
+  check('кадр, убранный из карточки товара руками, сам не возвращается', await page.evaluate(() => App.cards.find(x => x.title === '74596').pids.length === 0));
+  await page.click('#cbCards .cb-card[data-cid="' + (await page.evaluate(() => App.cards.find(c => c.title === '74595').id)) + '"] [data-cp-card-brak]');
+  check('«В брак» на карточке — пересъём для карточки и её кадров', await page.evaluate(() => {
+    var c = App.cards.find(x => x.title === '74595'), m = cpMeta();
+    return m.cardStatus[c.id].s === 'reshoot' && cpCardPids(c).every(pid => m.status[pid].s === 'reshoot') && !!document.querySelector('#cbCards .cp-badge.cp-reshoot');
+  }));
   await page.evaluate(() => {
     var tpl = App.templates[0];
     cbAddCardFromTpl(tpl.id);

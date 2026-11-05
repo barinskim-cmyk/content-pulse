@@ -40,24 +40,33 @@ var CP_RULES_TEMPLATE = [
   '# выгрузка — «по карточкам» (папки карточек) или «как в папках» (исходные папки и имена).',
   '#   Карточка с артикулом ложится в выгрузку папкой артикула с исходным именем (с луком): 1/74595_модель.',
   '# имена в выгрузке — «исходные» или «с номером» (01_, 02_ — порядок кадров в карточке).',
+  '# карточки по артикулам — «да»: на каждую папку артикула сама заводится карточка товара,',
+  '#   в неё собирается всё, что лежит в папке (пустая папка — пустая карточка).',
+  '# удалять карточки товара — «нет»: кнопки «Удалить» у карточек товара нет.',
   '',
   '[Модельная]',
   'название содержит: _МОДЕЛЬ',
   'папки: лук/артикул',
   'код артикула: цифры 4-7',
   'артикул карточке: из папки артикула',
+  'карточки по артикулам: да',
+  'удалять карточки товара: нет',
   'выгрузка: по карточкам',
   '',
   '[Предметка]',
   'название содержит: _ПРЕДМЕТКА',
   'папки: бренд/артикул',
   'код артикула: цифры 4-7',
+  'карточки по артикулам: да',
+  'удалять карточки товара: нет',
   'выгрузка: как в папках',
   '',
   '[Оптика]',
   'название содержит: _ОПТИКА',
   'папки: бренд/артикул',
   'код артикула: цифры 4-7',
+  'карточки по артикулам: да',
+  'удалять карточки товара: нет',
   'выгрузка: как в папках',
   ''
 ].join('\n');
@@ -71,7 +80,7 @@ function cpParseRules(text) {
     if (!l || l.charAt(0) === '#') return;
     var h = /^\[(.+)\]$/.exec(l);
     if (h) {
-      cur = { name: h[1].trim(), match: [], roles: [], codeRe: /^(\d{4,7})(?!\d)/, cardArticle: false, exportMode: 'cards' };
+      cur = { name: h[1].trim(), match: [], roles: [], codeRe: /^(\d{4,7})(?!\d)/, cardArticle: false, exportMode: 'cards', autoCards: false, cardDelete: true };
       types.push(cur);
       return;
     }
@@ -90,6 +99,10 @@ function cpParseRules(text) {
       cur.cardArticle = !/^(нет|no|-)$/i.test(val);
     } else if (key === 'выгрузка') {
       cur.exportMode = /папк/i.test(val) ? 'folders' : 'cards';
+    } else if (key === 'карточки по артикулам') {
+      cur.autoCards = !/^(нет|no|-)$/i.test(val);
+    } else if (key === 'удалять карточки товара') {
+      cur.cardDelete = !/^(нет|no|-)$/i.test(val);
     } else if (key === 'имена в выгрузке') {
       cur.exportNames = /номер/i.test(val) ? 'numbered' : 'original';
     }
@@ -120,7 +133,7 @@ function cpLoadRules(force) {
     _cpRulesP = null;
     if (window.console) console.warn('[CP] структура не прочиталась', e && (e.body || e.message));
   }).then(function () {
-    if (CP.shoot && typeof cbRenderCards === 'function') { cbRenderCards(); cpUpdateStatusLine(); }
+    if (CP.shoot && typeof cbRenderCards === 'function') { cbRenderCards(); cpUpdateStatusLine(); cpAutoCards(); }
     return CP.rules;
   });
   return _cpRulesP;
@@ -183,6 +196,8 @@ function cpAutoArticles() {
   var changed = false;
   CP.artLogged = CP.artLogged || {};
   App.cards.forEach(function (card) {
+    /* карточка товара, заведённая по папке артикула, — артикул и папка у неё постоянные */
+    if (card.cpAuto) return;
     var codes = [], rels = [], paths = [];
     cpCardPids(card).forEach(function (pid) {
       var p = cbPhotoById(pid);
@@ -235,6 +250,11 @@ function cpAutoArticles() {
 
 function cpDecorateArticles() {
   if (!CP.shoot) return;
+  Array.prototype.forEach.call(document.querySelectorAll('#cbCards .cb-card'), function (el) {
+    var c = cbCardById(el.getAttribute('data-cid'));
+    var del = el.querySelector('.cb-card-head [data-act="del"]');
+    if (del && cpCardDeleteBlocked(c)) del.style.display = 'none';
+  });
   var type = cpShootType(CP.shoot.name);
   if (!type || !type.cardArticle) return;
   Array.prototype.forEach.call(document.querySelectorAll('#cbCards .cb-card'), function (el) {
@@ -249,6 +269,116 @@ function cpDecorateArticles() {
     head.appendChild(chip);
   });
 }
+
+/* ---------- карточки товара по папкам артикулов ----------
+   Правило «карточки по артикулам: да»: на каждую папку артикула в съёмке
+   заводится карточка (автолента), заголовок — код, и в неё собирается всё,
+   что лежит в папке. Пустая папка — пустая карточка. Кадр, который раз
+   положили сам и потом убрали руками, второй раз не добавляется. */
+
+function cpMakeCard(t, title) {
+  return {
+    id: cbId(), title: title, category: '', tplName: t.name,
+    canvas: t.canvas, mode: t.mode, hasHero: t.hasHero, rows: t.rows, perRow: t.perRow,
+    hAspect: t.hAspect, vAspect: t.vAspect,
+    slots: t.mode === 'manual' ? t.slots.map(function (s) { return { orient: s.orient, row: s.row, name: s.name, pid: null }; }) : [],
+    pids: []
+  };
+}
+
+function cpAutoCards() {
+  if (!CP.shoot || CP.readOnly || !CP.files) return false;
+  var type = cpShootType(CP.shoot.name);
+  if (!type || !type.autoCards) return false;
+  var root = CP.shoot.path.replace(/\/+$/, '') + '/';
+  var rel = function (p) { return p.indexOf(root) === 0 ? p.slice(root.length) : ''; };
+  /* папки артикулов: и с файлами, и пустые */
+  var arts = {};
+  (CP.files.dirs || []).forEach(function (d) {
+    var r = rel(d);
+    if (!r) return;
+    var f = cpFacets(type, r + '/x');
+    if (f.code && f.articlePath === r) arts[r] = f.code;
+  });
+  CP.files.forEach(function (f) {
+    var x = cpFacets(type, rel(f.path));
+    if (x.code && x.articlePath) arts[x.articlePath] = x.code;
+  });
+  var dirs = Object.keys(arts).sort(function (a, b) { return a.localeCompare(b, undefined, { numeric: true }); });
+  if (!dirs.length) return false;
+  var tpl = typeof cpAutoTemplate === 'function' ? cpAutoTemplate() : null;
+  var byDir = {};
+  App.cards.forEach(function (c) { if (c.cpArticleDir && !byDir[c.cpArticleDir]) byDir[c.cpArticleDir] = c; });
+  var changed = false, created = 0;
+  dirs.forEach(function (d) {
+    var card = byDir[d];
+    if (!card) {
+      if (!tpl) return;
+      card = cpMakeCard(tpl, arts[d]);
+      card.cpArticle = arts[d];
+      card.cpArticleDir = d;
+      card.cpArtTitled = true;
+      card.cpAuto = true;
+      card.cpAutoSeen = [];
+      App.cards.push(card);
+      byDir[d] = card;
+      created++;
+      changed = true;
+    }
+    if (!card.cpAuto) return;    /* карточку сделали руками — не трогаем её состав */
+    var seen = card.cpAutoSeen = card.cpAutoSeen || [];
+    var have = cpCardPids(card);
+    App.photos.forEach(function (p) {
+      if (!p.disk || p.missing || (p.kind || 'photo') === 'ref') return;
+      var pd = cpRelDir(p);
+      if (pd !== d && pd.indexOf(d + '/') !== 0) return;
+      if (seen.indexOf(p.id) !== -1) return;
+      seen.push(p.id);
+      if (have.indexOf(p.id) !== -1) return;
+      if (card.mode === 'auto') card.pids.push(p.id);
+      else {
+        var slot = (card.slots || []).filter(function (s) { return !s.pid; })[0];
+        if (slot) slot.pid = p.id; else return;
+      }
+      changed = true;
+    });
+  });
+  if (changed) {
+    cbMarkDirty();
+    cbRenderCards();
+    cbRenderTray();
+    if (created) cbToast('Карточки товара по папкам артикулов: ' + created);
+  }
+  return changed;
+}
+
+(function cpAutoCardsHooks() {
+  var orig = window.cpSyncPhotos;
+  window.cpSyncPhotos = function () {
+    return orig.apply(this, arguments).then(function (r) {
+      try { cpAutoCards(); } catch (e) { if (window.console) console.error('[CP] карточки по артикулам', e); }
+      return r;
+    });
+  };
+})();
+
+/* «удалять карточки товара: нет» — кнопки «Удалить» у карточек товара нет */
+function cpCardDeleteBlocked(card) {
+  if (!CP.shoot || !card || !(card.cpAuto || card.cpArticleDir)) return false;
+  var type = cpShootType(CP.shoot.name);
+  return !!(type && type.cardDelete === false);
+}
+
+document.getElementById('cbCards').addEventListener('click', function (e) {
+  var b = e.target.closest('button[data-act="del"]');
+  if (!b) return;
+  var el = b.closest('.cb-card');
+  var card = el && cbCardById(el.getAttribute('data-cid'));
+  if (cpCardDeleteBlocked(card)) {
+    e.preventDefault(); e.stopPropagation();
+    cbToast('Карточку товара удалить нельзя — так задано в настройках структуры');
+  }
+}, true);
 
 /* ---------- редактор служебных файлов ---------- */
 
@@ -288,6 +418,7 @@ var CP_SERVICE_FILES = [
     }).join('') + '</div>'
     + '<textarea id="cpFilesText" spellcheck="false"></textarea>'
     + '<div class="cp-files-foot"><div class="cp-sum" id="cpFilesNote"></div>'
+    + '<button data-cp-f="tpl" title="Заменить текст образцом из программы (сохранится только по «Сохранить»)">Подставить образец</button>'
     + '<button data-cp-f="close">Закрыть</button><button class="cb-primary" data-cp-f="save">Сохранить на Диск</button></div>'
     + '</div>';
   document.body.appendChild(box);
@@ -307,6 +438,10 @@ var CP_SERVICE_FILES = [
     if (a === 'close') box.classList.remove('cp-open');
     else if (a === 'tab') cpFilesOpen(parseInt(b.getAttribute('data-i'), 10));
     else if (a === 'save') cpFilesSave();
+    else if (a === 'tpl') {
+      document.getElementById('cpFilesText').value = CP_SERVICE_FILES[CP.filesIdx].template();
+      document.getElementById('cpFilesNote').textContent = 'Подставлен образец — проверьте и нажмите «Сохранить на Диск»';
+    }
   });
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && box.classList.contains('cp-open')) box.classList.remove('cp-open');

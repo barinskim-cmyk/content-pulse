@@ -32,7 +32,7 @@ var CP_CONFIG = {
 
 var CP_STATUS = {
   retouch: { label: 'Ретушь', short: 'РЕТУШЬ' },
-  reshoot: { label: 'Пересъём', short: 'ПЕРЕСЪЁМ' },
+  reshoot: { label: 'Брак (пересъём)', short: 'БРАК' },
   approval: { label: 'Согласование', short: 'СОГЛАС.' },
   /* скачали на ретушь, а потом убрали из отбора: ретушёру — не делать */
   removed: { label: 'Удалено из отбора', short: 'УДАЛЕНО' }
@@ -109,6 +109,7 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
     + '.cp-acts{position:absolute;right:4px;bottom:4px;display:none;gap:3px;z-index:3}'
     + '.cp-acts button{padding:2px 6px;font-size:10px;background:#1d1d1bdd;line-height:1.3}'
     + '.cp-acts .cp-act-rt{border-color:#C9956B;color:#e7c9a8}'
+    + '.cp-acts .cp-act-brak{border-color:#8a4a32;color:#f2b8a0}'
     + '.cb-slot.cb-filled:hover .cp-acts,.cb-cont-item:hover .cp-acts,.cb-thumb:hover .cp-acts{display:flex}'
     + '.cp-lb{position:fixed;inset:0;z-index:4000;background:#0b0b0af2;display:none;flex-direction:column;color:#f2f2f1}'
     + '.cp-lb.cp-open{display:flex}'
@@ -858,7 +859,7 @@ function cpEvent(action, items, extra, silent) {
 
 var CP_ACTION_LABEL = {
   open: 'открыл(а) съёмку', files_found: 'найдены файлы', new_batch: 'пришла новая часть',
-  to_retouch: 'отправил(а) на ретушь', to_reshoot: 'отправил(а) на пересъём',
+  to_retouch: 'отправил(а) на ретушь', to_reshoot: 'отправил(а) в брак (пересъём)',
   to_approval: 'отправил(а) на согласование', clear_status: 'снял(а) статус',
   download_shoot: 'скачал(а) всю съёмку', download_selection: 'скачал(а) отбор',
   changed_after_download: 'изменил(а) карточку после скачивания',
@@ -979,7 +980,7 @@ function cpUpdateStatusLine() {
   Object.keys(m.status).forEach(function (pid) { if (n[m.status[pid].s] !== undefined) n[m.status[pid].s]++; });
   var t = typeof cpShootType === 'function' ? cpShootType(CP.shoot.name) : null;
   el.textContent = (t ? t.name + (t.cardArticle ? ', артикул карточки по папке' : '') + ' · ' : '')
-    + 'ретушь ' + n.retouch + ' · пересъём ' + n.reshoot + ' · согласование ' + n.approval;
+    + 'ретушь ' + n.retouch + ' · брак ' + n.reshoot + ' · согласование ' + n.approval;
 }
 
 /* бейджи статусов и кнопка действий — поверх отрисовки Cardboard */
@@ -1012,6 +1013,7 @@ function cpDecorate(rootId) {
     el.insertAdjacentHTML('beforeend', cpBadgeHTML(pid)
       + '<span class="cp-acts">'
       + (inRetouch ? '' : '<button class="cp-act-rt" data-cp-retouch="' + pid + '" title="Отправить кадр на ретушь">на ретушь</button>')
+      + (cpMeta().status[pid] && cpMeta().status[pid].s === 'reshoot' ? '' : '<button class="cp-act-brak" data-cp-brak="' + pid + '" title="Кадр в брак — на пересъём">в брак</button>')
       + '<button class="cp-act-more" data-cp-pid="' + pid + '" title="Другие действия: пересъём, согласование, снять статус">ещё</button></span>');
     el.setAttribute('data-cp-zoom', pid);
   });
@@ -1032,14 +1034,26 @@ function cpDecorate(rootId) {
         rt.textContent = 'На ретушь';
         rt.title = 'Отправить все кадры карточки на ретушь (с копией в папку ретуши)';
       }
+      var bk = document.createElement('button');
+      bk.className = 'cb-mini cp-card-brak';
+      bk.setAttribute('data-cp-card-brak', cid);
+      if (st && st.s === 'reshoot') {
+        bk.textContent = 'В браке';
+        bk.title = 'В браке (пересъём) · ' + st.by + ' · ' + cpFmtDate(st.ts);
+        bk.style.borderColor = '#d9534f';
+      } else {
+        bk.textContent = 'В брак';
+        bk.title = 'Вся карточка в брак — на пересъём';
+      }
       var btn = document.createElement('button');
       btn.className = 'cb-mini';
       btn.setAttribute('data-cp-card', cid);
-      btn.textContent = st && CP_STATUS[st.s] && st.s !== 'retouch' ? CP_STATUS[st.s].label : 'ещё';
-      btn.title = 'Другие действия с карточкой: пересъём, согласование, снять статус';
-      if (st && st.s !== 'retouch') btn.style.borderColor = '#C9956B';
+      btn.textContent = st && CP_STATUS[st.s] && st.s !== 'retouch' && st.s !== 'reshoot' ? CP_STATUS[st.s].label : 'ещё';
+      btn.title = 'Другие действия с карточкой: согласование, снять статус';
+      if (st && st.s !== 'retouch' && st.s !== 'reshoot') btn.style.borderColor = '#C9956B';
       var before = head.querySelector('[data-act="tpl"]');
       head.insertBefore(rt, before);
+      head.insertBefore(bk, before);
       head.insertBefore(btn, before);
     });
   }
@@ -1170,7 +1184,7 @@ function cpOpenMenu(anchor, title, onPick, extra) {
   var menu = document.getElementById('cpMenu');
   menu.innerHTML = '<div class="cp-menu-title">' + cbEsc(title) + '</div>'
     + '<button data-s="retouch">На ретушь (копия в папку ретуши)</button>'
-    + '<button data-s="reshoot">На пересъём</button>'
+    + '<button data-s="reshoot">В брак (пересъём)</button>'
     + '<button data-s="approval">На согласование</button>'
     + '<button data-s="">Снять статус</button>'
     + (extra ? extra.html : '');
@@ -1191,6 +1205,22 @@ function cpOpenMenu(anchor, title, onPick, extra) {
 
 document.addEventListener('click', function (e) {
   var menu = document.getElementById('cpMenu');
+  var bkPhoto = e.target.closest('[data-cp-brak]');
+  var bkCard = e.target.closest('[data-cp-card-brak]');
+  if (bkPhoto) {
+    e.preventDefault(); e.stopPropagation();
+    cpDoAction('reshoot', [bkPhoto.getAttribute('data-cp-brak')], null);
+    return;
+  }
+  if (bkCard) {
+    e.preventDefault(); e.stopPropagation();
+    var kc = cbCardById(bkCard.getAttribute('data-cp-card-brak'));
+    if (!kc) return;
+    var kst = cpMeta().cardStatus[kc.id];
+    if (kst && kst.s === 'reshoot') { cbToast('Карточка уже в браке: ' + kst.by + ', ' + cpFmtDate(kst.ts) + '. Снять — через «ещё».'); return; }
+    cpDoAction('reshoot', cpCardPids(kc), kc.id);
+    return;
+  }
   var rtPhoto = e.target.closest('[data-cp-retouch]');
   var rtCard = e.target.closest('[data-cp-card-retouch]');
   if (rtPhoto) {
@@ -1732,6 +1762,7 @@ CP.lb = null;         /* {list:[pid], i} */
     + '<button data-lb="prev" title="Предыдущий кадр (стрелка влево)">Назад</button>'
     + '<button data-lb="next" title="Следующий кадр (стрелка вправо)">Вперёд</button>'
     + '<button data-lb="like" title="Лайк — чтобы потом быстрее собрать карточку (клавиша L)">Лайк</button>'
+    + '<button data-lb="brak" title="Кадр в брак — на пересъём">В брак</button>'
     + '<button data-lb="retouch" class="cp-act-rt" title="Отправить кадр на ретушь">На ретушь</button>'
     + '<button data-lb="close" title="Закрыть (Esc)">Закрыть</button></div>'
     + '<div class="cp-lb-body" id="cpLbBody"><img id="cpLbImg" alt=""><div class="cp-lb-note" id="cpLbNote"></div></div>';
@@ -1744,6 +1775,10 @@ CP.lb = null;         /* {list:[pid], i} */
       else if (a === 'prev') cpLbStep(-1);
       else if (a === 'next') cpLbStep(1);
       else if (a === 'like') cpLbLike();
+      else if (a === 'brak' && CP.lb) {
+        cpDoAction('reshoot', [CP.lb.list[CP.lb.i]], null);
+        setTimeout(cpLbShow, 300);
+      }
       else if (a === 'retouch' && CP.lb) {
         var pid = CP.lb.list[CP.lb.i];
         cpDoAction('retouch', [pid], null);
@@ -1850,6 +1885,9 @@ function cpLbShow() {
   lkb.textContent = liked ? 'Убрать лайк' : 'Лайк';
   lkb.style.borderColor = liked ? '#C9956B' : '';
   var st = cpMeta().status[pid];
+  var bkb = document.querySelector('#cpLb [data-lb="brak"]');
+  bkb.textContent = st && st.s === 'reshoot' ? 'В браке' : 'В брак';
+  bkb.disabled = !!(st && st.s === 'reshoot');
   var rt = document.querySelector('#cpLb [data-lb="retouch"]');
   rt.textContent = st && st.s === 'retouch' ? 'В ретуши' : 'На ретушь';
   rt.disabled = !!(st && st.s === 'retouch');

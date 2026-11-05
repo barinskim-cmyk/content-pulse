@@ -138,12 +138,14 @@ var CPDisk = (function () {
   /* allFiles — все файлы (видео и прочее), кроме системного мусора */
   function walkPhotos(root, previewSize, parallel, allFiles) {
     var out = [], queue = [root], active = 0, limit = parallel || 4, failed = null;
+    out.dirs = [];   /* все папки съёмки (и пустые) — для карточек по папкам артикулов */
     var ps = previewSize === false ? null : (previewSize || 'XL');
     return new Promise(function (resolve, reject) {
       function pump() {
         if (failed) return;
         if (!queue.length && !active) {
           out.sort(function (a, b) { return a.path < b.path ? -1 : 1; });
+          out.dirs.sort();
           resolve(out);
           return;
         }
@@ -155,6 +157,7 @@ var CPDisk = (function () {
               if (r.type === 'dir') {
                 if (r.name.charAt(0) === '_' || r.name === RETOUCH_DIR) return;
                 queue.push(r.path);
+                out.dirs.push(r.path);
               } else if (allFiles ? !JUNK_RE.test(r.name) : PHOTO_RE.test(r.name)) {
                 out.push(r);
               }

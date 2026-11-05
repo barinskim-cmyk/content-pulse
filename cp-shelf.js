@@ -468,7 +468,7 @@ function cpFolderState(idx, fp) {
 
 function cpStateChips(st) {
   var out = '';
-  [['retouch', 'на ретуши'], ['dl', 'скачано'], ['approval', 'на согласовании'], ['reshoot', 'пересъём'], ['removed', 'удалено']].forEach(function (c) {
+  [['retouch', 'на ретуши'], ['dl', 'скачано'], ['approval', 'на согласовании'], ['reshoot', 'брак'], ['removed', 'удалено']].forEach(function (c) {
     if (st[c[0]]) out += '<span class="cp-state cp-state-' + c[0] + '">' + c[1] + ' ' + st[c[0]] + '</span>';
   });
   return out;
@@ -561,7 +561,7 @@ function cpRenderPanel() {
   body += '<h4>Фильтры для скачивания</h4>';
   body += '<div class="cp-row"><span>Тег</span><select id="cpFTag">' + cpDictOptions(sel.tag, 'Все') + '</select></div>';
   body += '<div class="cp-row"><span>Статус</span><select id="cpFStatus">'
-    + [['', 'Все'], ['retouch', 'Ретушь'], ['approval', 'Согласование'], ['reshoot', 'Пересъём'], ['removed', 'Удалено из отбора'], ['none', 'Без статуса']]
+    + [['', 'Все'], ['retouch', 'Ретушь'], ['approval', 'Согласование'], ['reshoot', 'Брак (пересъём)'], ['removed', 'Удалено из отбора'], ['none', 'Без статуса']]
       .map(function (o) { return '<option value="' + o[0] + '"' + (sel.status === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('')
     + '</select></div>';
   body += '<div class="cp-row"><span>Скачано</span><select id="cpFDl">'
