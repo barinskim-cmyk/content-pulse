@@ -23,7 +23,8 @@ function call(method, key, query, headers, body) {
   let r = await call('PUT', '', {}, {});
   console.log('bucket', r.status, r.body.slice(0, 200));
   const xml = '<?xml version="1.0" encoding="UTF-8"?><LifecycleConfiguration><Rule><ID>exports</ID><Status>Enabled</Status>'
-    + '<Filter><Prefix>exports/</Prefix></Filter><Expiration><Days>' + (+process.env.EXPORT_DAYS || 3) + '</Days></Expiration></Rule></LifecycleConfiguration>';
+    + '<Filter><Prefix>exports/</Prefix></Filter><Expiration><Days>' + (+process.env.EXPORT_DAYS || 3) + '</Days></Expiration>'
+    + '<AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>';
   const md5 = crypto.createHash('md5').update(xml).digest('base64');
   r = await call('PUT', '', { lifecycle: '' }, { 'content-md5': md5, 'content-type': 'application/xml' }, xml);
   console.log('lifecycle', r.status, r.body.slice(0, 200));

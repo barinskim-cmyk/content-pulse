@@ -254,6 +254,9 @@ async function doMultipart(token, req) {
   if (!s3Ready()) return { status: 501, result: { error: 'Хранилище не настроено' } };
   const op = req.op;
   if (op === 'start') {
+    /* только для настоящего пользователя Диска */
+    const me = await disk(token, 'GET', '', { fields: 'user' });
+    if (me.status !== 200) return { status: me.status, result: { error: me.data.message || 'Нет доступа к Диску' } };
     const key = 'exports/' + crypto.randomBytes(16).toString('hex') + '/file';
     const r = await s3Call('POST', key, { uploads: '' }, '', { 'content-type': req.type || 'application/octet-stream' });
     const m = /<UploadId>([^<]+)<\/UploadId>/.exec(r.body);
