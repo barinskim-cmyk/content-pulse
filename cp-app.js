@@ -102,10 +102,12 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
     + '.cp-badge{position:absolute;left:4px;bottom:4px;background:#C9956B;color:#131313;font:600 9px/1 "IBM Plex Mono",monospace;letter-spacing:.06em;padding:3px 5px;border-radius:2px;pointer-events:none;z-index:2}'
     + '.cp-badge.cp-reshoot{background:#d9534f;color:#fff}.cp-badge.cp-approval{background:#e8d27a}'
     + '.cp-badge.cp-removed{background:#5a2a24;color:#f2b8a0}'
+    + '.cp-save{font-weight:600}.cp-save-ok{color:#9fc2a3}.cp-save-busy{color:#e7c9a8}.cp-save-err{color:#f2b8a0}'
     + '.cp-badge.cp-dl{left:auto;right:4px;top:4px;bottom:auto;background:#3d6b52;color:#fff}'
     + '.cp-badge.cp-like{top:4px;bottom:auto;left:4px;background:#e7c9a8}'
     + '.cp-badge.cp-badge-inline{position:static;display:inline-block;margin-left:6px;vertical-align:middle}'
-    + '.cp-liked-only{display:flex;gap:6px;align-items:center;font-size:11px;color:#a3a09a;margin-top:6px;cursor:pointer}'
+    + '.cp-liked-only{display:flex;gap:6px;align-items:center;font-size:11px;color:#a3a09a;margin-top:6px;cursor:pointer;white-space:nowrap;flex:none}'
+    + '.cp-filter-row{flex-wrap:wrap;column-gap:14px}.cp-filter-row select{flex:1 1 100%}'
     + '.cp-acts{position:absolute;right:4px;bottom:4px;display:none;gap:3px;z-index:3}'
     + '.cp-acts button{padding:2px 6px;font-size:10px;background:#1d1d1bdd;line-height:1.3}'
     + '.cp-acts .cp-act-rt{border-color:#C9956B;color:#e7c9a8}'
@@ -145,7 +147,9 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
     + '.cp-log-head b{flex:1}'
     + '.cp-log-list{overflow:auto;padding:8px 14px;font-size:12px;line-height:1.5}'
     + '.cp-log-item{padding:8px 0;border-bottom:1px solid #222220}'
-    + '.cp-log-item small{color:#a3a09a;font-family:"IBM Plex Mono",monospace}';
+    + '.cp-log-item small{color:#a3a09a;font-family:"IBM Plex Mono",monospace}'
+    + '.cp-vers-note{color:#a3a09a;padding:6px 0 10px;border-bottom:1px solid #222220}'
+    + '.cp-vers-item{display:flex;align-items:center;gap:10px}.cp-vers-item div{flex:1}';
   var st = document.createElement('style');
   st.textContent = css;
   document.head.appendChild(st);
@@ -186,6 +190,15 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
     + '<div class="cp-log-list" id="cpLogList"></div>';
   document.body.appendChild(log);
 
+  var vers = document.createElement('div');
+  vers.className = 'cp-log';
+  vers.id = 'cpVers';
+  vers.innerHTML = '<div class="cp-log-head"><b>Версии отбора</b><button id="cpVersNow">Сохранить версию сейчас</button><button id="cpVersClose">Закрыть</button></div>'
+    + '<div class="cp-log-list"><div class="cp-vers-note">Перед правками программа сама кладёт копию отбора в служебную папку — не чаще раза в 30 минут. '
+    + '«Вернуть» ставит выбранную версию вместо текущей; текущая перед этим тоже сохраняется версией, так что откат можно откатить.</div>'
+    + '<div id="cpVersList"></div></div>';
+  document.body.appendChild(vers);
+
   /* пункты в меню «Файл» */
   var file = document.getElementById('cbMenuFile');
   var first = file.firstElementChild;
@@ -197,6 +210,7 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
     + '<button id="cpMenuDlAll">Скачать всю съёмку: только фото</button>'
     + '<button id="cpMenuDlAllV">Скачать всю съёмку: все файлы (с видео)</button>'
     + '<button id="cpMenuLog">Журнал действий</button>'
+    + '<button id="cpMenuVersions">Версии отбора...</button>'
     + '<div class="cb-pop-sep"></div>';
   while (block.firstChild) file.insertBefore(block.firstChild, first);
 
@@ -453,13 +467,28 @@ function cpOpenShootNow(path, name) {
     CP.shoot = { path: path, name: name };
     CP.rev = st.rev;
     CP.readOnly = !!stateError;
+    CP.base = cpClone(st.data) || null;
+    CP.saveState = null;
     CP.files = [];
     CP.folder = '';
+    CP.folderByCard = false;
+    CP.activeCard = null;
+    /* в этом браузере остались несохранённые правки этой съёмки — возвращаем их */
+    var bak = !stateError ? cpBackupGet(path) : null;
+    if (bak && bak.data) {
+      var remoteRev = st.rev || '';
+      st = { data: bak.rev === remoteRev ? bak.data : cpMerge3(bak.base || null, bak.data, st.data || {}), rev: st.rev, restored: bak.ts };
+    }
     /* превью прошлой съёмки больше не нужны */
     CP.queue.forEach(function (q) { delete CP.thumbPending[q.disk]; });
     CP.queue = [];
     cpApplyRemote(st.data || cpBlankProject(name));
     cpSetTitle();
+    if (st.restored) {
+      cbMarkDirty();
+      cpEvent('restored', [], { note: 'восстановлены несохранённые правки от ' + cpFmtDate(st.restored) }, true);
+      setTimeout(function () { cbToast('Восстановлены правки, которые не успели сохраниться (' + cpFmtDate(st.restored) + ') — сохраняю.'); }, 400);
+    }
     function opened(added) {
       cbBusyHide();
       document.getElementById('cpShelf').classList.remove('cp-open');
@@ -769,8 +798,131 @@ cbProjectData = function () {
 };
 
 cbMarkDirty = (function (orig) {
-  return function () { CP.editSeq++; return orig.apply(this, arguments); };
+  return function () {
+    CP.editSeq++;
+    var r = orig.apply(this, arguments);
+    /* «есть несохранённые правки» — сразу в строке съёмки (одна перерисовка на пачку правок) */
+    if (CP.shoot && !CP.lineTimer) CP.lineTimer = setTimeout(function () { CP.lineTimer = 0; cpUpdateStatusLine(); }, 50);
+    return r;
+  };
 })(cbMarkDirty);
+
+/* ---------- надёжное сохранение отбора ----------
+   1) Конфликт (отбор успел сохранить кто-то другой) больше не затирает наши
+      правки: три версии — исходная (что мы читали), наша и чужая — склеиваются
+      по карточкам, блокам, шаблонам и статусам; где правили оба — побеждает наша.
+   2) Пока запись идёт, копия отбора лежит в этом браузере; не успела
+      сохраниться (закрыли вкладку, сбой сети) — при следующем открытии
+      съёмки правки восстанавливаются.
+   3) Состояние записи видно в строке съёмки. */
+
+function cpClone(x) { return x === undefined ? undefined : JSON.parse(JSON.stringify(x)); }
+function cpSame(a, b) { return JSON.stringify(a === undefined ? null : a) === JSON.stringify(b === undefined ? null : b); }
+
+function cpMergeById(base, local, remote) {
+  var idx = function (arr) { var m = {}; (arr || []).forEach(function (x) { if (x && x.id != null) m[x.id] = x; }); return m; };
+  var B = idx(base), L = idx(local), R = idx(remote);
+  var out = [], used = {};
+  function pick(id) {
+    var inB = id in B, inL = id in L, inR = id in R;
+    if (inL && inR) {
+      if (!inB) return L[id];
+      if (cpSame(L[id], B[id])) return R[id];
+      if (cpSame(R[id], B[id])) return L[id];
+      /* правили оба — склеиваем по полям: наше поле, если мы его меняли, иначе их */
+      return cpMergeMap(B[id], L[id], R[id]);
+    }
+    if (inL) return (!inB || !cpSame(L[id], B[id])) ? L[id] : null;   /* у них удалили, мы не трогали — удаляем */
+    if (inR) return (!inB || !cpSame(R[id], B[id])) ? R[id] : null;   /* мы удалили, они не трогали — удаляем */
+    return null;
+  }
+  (remote || []).forEach(function (x) { if (!x || used[x.id]) return; used[x.id] = true; var v = pick(x.id); if (v) out.push(v); });
+  (local || []).forEach(function (x) { if (!x || used[x.id]) return; used[x.id] = true; var v = pick(x.id); if (v) out.push(v); });
+  return out;
+}
+
+function cpMergeMap(base, local, remote) {
+  base = base || {}; local = local || {}; remote = remote || {};
+  var out = {}, keys = {};
+  [base, local, remote].forEach(function (m) { Object.keys(m).forEach(function (k) { keys[k] = true; }); });
+  Object.keys(keys).forEach(function (k) {
+    var v = !cpSame(local[k], base[k]) ? local[k] : remote[k];
+    if (v !== undefined) out[k] = v;
+  });
+  return out;
+}
+
+/* Номера карточек и кадров у Cardboard идут подряд (p12, p13...), и два
+   человека, правящие одновременно, выдали бы одинаковые номера разным
+   карточкам. Добавляем к номеру метку этой вкладки — номера не пересекаются. */
+CP.idTag = '_' + Math.random().toString(36).slice(2, 6);
+cbId = function () { return 'p' + (App.nextId++) + CP.idTag; };
+
+/* Один и тот же новый файл Диска могли завести под разными номерами у нас
+   и у них — наши ссылки переводим на их номер, чтобы кадр не задвоился. */
+function cpRemapLocal(local, remote) {
+  var byDisk = {}, haveId = {}, map = {}, n = 0;
+  (remote.photos || []).forEach(function (p) { haveId[p.id] = true; if (p.disk) byDisk[p.disk] = p.id; });
+  (local.photos || []).forEach(function (p) {
+    if (!haveId[p.id] && p.disk && byDisk[p.disk]) { map[p.id] = byDisk[p.disk]; n++; }
+  });
+  if (!n) return local;
+  local = cpClone(local);
+  local.photos = local.photos.filter(function (p) { return !map[p.id]; });
+  (local.cards || []).forEach(function (c) {
+    if (c.pids) c.pids = c.pids.map(function (x) { return map[x] || x; });
+    (c.slots || []).forEach(function (sl) { if (sl.pid && map[sl.pid]) sl.pid = map[sl.pid]; });
+    if (c.cpAutoSeen) c.cpAutoSeen = c.cpAutoSeen.map(function (x) { return map[x] || x; });
+  });
+  var cp = (local.meta || {}).cp || {};
+  ['status', 'downloads', 'likes'].forEach(function (k) {
+    var m = cp[k];
+    if (!m) return;
+    Object.keys(map).forEach(function (id) { if (id in m) { m[map[id]] = m[id]; delete m[id]; } });
+  });
+  return local;
+}
+
+/** Склеить три версии отбора. base может быть null — тогда просто объединяем. */
+function cpMerge3(base, local, remote) {
+  base = base || {}; local = local || {}; remote = remote || {};
+  local = cpRemapLocal(local, remote);
+  var out = cpClone(remote);
+  ['cards', 'containers', 'templates'].forEach(function (k) { out[k] = cpMergeById(base[k], local[k], remote[k]); });
+  var ph = {}, photos = [];
+  (remote.photos || []).concat(local.photos || []).forEach(function (p) { if (p && !ph[p.id]) { ph[p.id] = true; photos.push(p); } });
+  out.photos = photos;
+  out.nextId = Math.max(+local.nextId || 0, +remote.nextId || 0);
+  var bm = (base.meta || {}).cp || {}, lm = (local.meta || {}).cp || {}, rm = (remote.meta || {}).cp || {};
+  out.meta = out.meta || {};
+  var cp = out.meta.cp = cpClone(rm) || {};
+  ['status', 'cardStatus', 'downloads', 'likes', 'folderTags'].forEach(function (k) { cp[k] = cpMergeMap(bm[k], lm[k], rm[k]); });
+  var seen = {}, ev = [];
+  (rm.events || []).concat(lm.events || []).forEach(function (e) {
+    var key = e.ts + '|' + e.action + '|' + e.actor + '|' + JSON.stringify(e.items || []);
+    if (!seen[key]) { seen[key] = true; ev.push(e); }
+  });
+  ev.sort(function (a, b) { return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0; });
+  cp.events = ev;
+  return out;
+}
+
+function cpBackupKey(path) { return 'cp_bak:' + path; }
+function cpBackupSave(path, data, rev) {
+  /* base — версия с Диска, от которой шли правки: по ней при восстановлении
+     понятно, что поменяли мы, а что потом поменяли другие */
+  try { localStorage.setItem(cpBackupKey(path), JSON.stringify({ ts: new Date().toISOString(), rev: rev || '', data: data, base: CP.base || null })); }
+  catch (e) { if (window.console) console.warn('[CP] копия отбора в браузере не записалась', e && e.message); }
+}
+function cpBackupDrop(path) { try { localStorage.removeItem(cpBackupKey(path)); } catch (e) { } }
+function cpBackupGet(path) {
+  try { var v = localStorage.getItem(cpBackupKey(path)); return v ? JSON.parse(v) : null; } catch (e) { return null; }
+}
+
+function cpSaveState(text, kind) {
+  CP.saveState = { text: text, kind: kind || '' };
+  cpUpdateStatusLine();
+}
 
 var _cbAutosaveOrig = cbAutosaveNow;
 cbAutosaveNow = function () {
@@ -784,17 +936,24 @@ cbAutosaveNow = function () {
   CP.saving = true;
   var seq = CP.editSeq;
   var data = cbProjectData();
+  cpBackupSave(CP.shoot.path, data, CP.rev);
+  cpSaveState('сохраняю…', 'busy');
   /* Запись могла закончиться, когда уже открыта другая съёмка: тогда её
      ревизию и флаги не трогаем — иначе следующая запись новой съёмки уйдёт
      с чужой ревизией, словит «конфликт» и потеряет правки. */
   var path = CP.shoot.path;
   function sameShoot() { return CP.shoot && CP.shoot.path === path; }
-  CPDisk.writeState(path, data, CP.rev).then(function (rev) {
+  var baseRev = CP.rev;
+  /* перед записью — версия того, что лежит на Диске (раз в 30 минут) */
+  cpSnapshot(path, baseRev).then(function () {
+    return CPDisk.writeState(path, data, baseRev);
+  }).then(function (rev) {
     CP.saving = false;
     if (!sameShoot()) { if (App.dirty) cbScheduleAutosave(); return; }
     CP.rev = rev;
+    CP.base = cpClone(data);
     /* за время записи могли быть новые правки — тогда сохраняем ещё раз */
-    if (CP.editSeq === seq) cbClearDirty();
+    if (CP.editSeq === seq) { cbClearDirty(); cpBackupDrop(path); cpSaveState('сохранено ' + new Date().toLocaleTimeString('ru-RU').slice(0, 5), 'ok'); }
     else cbScheduleAutosave();
     var el = document.getElementById('cbMode');
     if (el) el.textContent = 'на Диске · ' + new Date().toLocaleTimeString('ru-RU').slice(0, 5);
@@ -807,15 +966,148 @@ cbAutosaveNow = function () {
       return;
     }
     if (e && e.conflict) {
+      /* чужая версия + наши правки: склеиваем и сохраняем ещё раз */
+      var merged = cpMerge3(CP.base, cbProjectData(), e.data || {});
       CP.rev = e.rev;
-      cpApplyRemote(e.data);
-      cbToast('Отбор изменил другой пользователь — загружена его версия. Повторите последнее действие.');
+      cpApplyRemote(merged);
+      CP.base = cpClone(e.data || {});
+      cbMarkDirty();
+      cpEvent('merged', [], { note: 'отбор одновременно правили — версии склеены' }, true);
+      cbToast('Отбор одновременно правил кто-то ещё — версии склеены, ничего не потеряно.');
       return;
     }
+    cpSaveState('не сохранено: ' + ((e && (e.message || e.status)) || 'ошибка') + ' — повторяю', 'err');
     cpHandleError(e, 'Не удалось сохранить отбор на Диск');
     cbScheduleAutosave();
   });
 };
+
+/* ---------- версии отбора ----------
+   Копия файла отбора съёмки в <служебная папка>/версии отборов/<съёмка>/
+   «2026-11-05 07-43-10 Маша.json». Копирует Диск у себя (через прослойку),
+   браузер ничего не загружает. Делается перед записью, если с прошлой
+   копии этой съёмки прошло 30 минут (и при первой записи после открытия
+   страницы). Старые версии программа не удаляет. */
+
+var CP_SNAP_EVERY = 30 * 60 * 1000;
+CP.snapAt = {};
+
+function cpSnapDir(shootPath) {
+  var name = String(shootPath || '').replace(/\/+$/, '').split('/').pop();
+  return CP_CONFIG.serviceDir + '/версии отборов/' + CPDisk.safeName(name);
+}
+
+function cpSnapStamp(d) {
+  var z = function (n) { return (n < 10 ? '0' : '') + n; };
+  return d.getFullYear() + '-' + z(d.getMonth() + 1) + '-' + z(d.getDate()) + ' ' + z(d.getHours()) + '-' + z(d.getMinutes()) + '-' + z(d.getSeconds());
+}
+
+/** Версия файла отбора на Диске. Ошибки не мешают записи: только в консоль. */
+function cpSnapshot(shootPath, rev, force) {
+  if (!rev || !CPDisk.hasProxy()) return Promise.resolve(null);
+  var now = Date.now();
+  if (!force && CP.snapAt[shootPath] && now - CP.snapAt[shootPath] < CP_SNAP_EVERY) return Promise.resolve(null);
+  CP.snapAt[shootPath] = now;
+  var dir = cpSnapDir(shootPath);
+  var who = cpActor();
+  var target = dir + '/' + cpSnapStamp(new Date()) + (who ? ' ' + CPDisk.safeName(who) : '') + '.json';
+  var from = shootPath.replace(/\/+$/, '') + '/' + CPDisk.STATE_FILE;
+  var job = CPDisk.proxyCopy([{ from: from, path: target }], [dir]).then(function (r) {
+    var st = r && r.results && r.results[0];
+    if (!st || (st.status !== 'done' && st.status !== 'exists')) throw new Error((st && st.error) || 'копия не создана');
+    return target;
+  }).catch(function (e) {
+    if (window.console) console.warn('[CP] версия отбора не сохранилась', e && (e.body || e.message || e));
+    return null;
+  });
+  /* запись отбора не ждёт копию дольше 8 секунд */
+  return Promise.race([job, new Promise(function (r) { setTimeout(function () { r(null); }, 8000); })]);
+}
+
+function cpVersLabel(name) {
+  var m = /^(\d{4})-(\d\d)-(\d\d) (\d\d)-(\d\d)(?:-\d\d)?\s*(.*)\.json$/.exec(name);
+  return m ? { when: m[3] + '.' + m[2] + '.' + m[1] + ' ' + m[4] + ':' + m[5], who: m[6] } : { when: name, who: '' };
+}
+
+function cpRenderVersions() {
+  var box = document.getElementById('cpVersList');
+  box.innerHTML = '<div class="cp-empty">Читаю версии...</div>';
+  var path = CP.shoot.path;
+  CPDisk.listDir(cpSnapDir(path)).then(function (items) {
+    if (!CP.shoot || CP.shoot.path !== path) return;
+    items = items.filter(function (it) { return it.type === 'file' && /\.json$/i.test(it.name); })
+      .sort(function (a, b) { return a.name < b.name ? 1 : a.name > b.name ? -1 : 0; });
+    box.innerHTML = items.map(function (it) {
+      var l = cpVersLabel(it.name);
+      return '<div class="cp-log-item cp-vers-item"><div><b>' + cbEsc(l.when) + '</b>' + (l.who ? ' · ' + cbEsc(l.who) : '')
+        + '<br><small>' + Math.max(1, Math.round((it.size || 0) / 1024)) + ' КБ</small></div>'
+        + '<button data-cp-vers="' + cbEsc(it.path) + '">Вернуть</button></div>';
+    }).join('') || '<div class="cp-empty">Версий пока нет — первая появится при следующей правке</div>';
+  }, function (e) {
+    if (e && e.status === 404) { box.innerHTML = '<div class="cp-empty">Версий пока нет — первая появится при следующей правке</div>'; return; }
+    box.innerHTML = '<div class="cp-empty">Не удалось прочитать версии: ' + cbEsc(String(e && (e.message || e.status) || e)) + '</div>';
+  });
+}
+
+/** Поставить версию вместо текущего отбора: текущий сначала тоже уходит в версии. */
+function cpRestoreVersion(file) {
+  if (!CP.shoot || CP.readOnly) { cbToast('Отбор не прочитан с Диска — возвращать версию нельзя'); return; }
+  var l = cpVersLabel(file.split('/').pop());
+  if (!confirm('Вернуть отбор к версии ' + l.when + (l.who ? ' (' + l.who + ')' : '') + '?\nТекущий отбор перед этим сохранится отдельной версией.')) return;
+  var path = CP.shoot.path;
+  cbBusyShow('Возвращаю версию...');
+  cpSnapshot(path, CP.rev, true).then(function () {
+    return CPDisk.proxyFile(file);
+  }).then(function (b) { return b.text(); }).then(function (t) {
+    cbBusyHide();
+    if (!CP.shoot || CP.shoot.path !== path) return;
+    var data = JSON.parse(t);
+    /* журнал не теряем: события версии + всё, что было после неё */
+    var cur = cpMeta().events || [];
+    data.meta = data.meta || {};
+    data.meta.cp = data.meta.cp || {};
+    var seen = {}, ev = [];
+    (data.meta.cp.events || []).concat(cur).forEach(function (e) {
+      var k = e.ts + '|' + e.action + '|' + e.actor;
+      if (!seen[k]) { seen[k] = true; ev.push(e); }
+    });
+    ev.sort(function (a, b) { return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0; });
+    data.meta.cp.events = ev;
+    cpApplyRemote(data);
+    cpEvent('restore_version', [], { note: 'версия от ' + l.when + (l.who ? ' (' + l.who + ')' : '') });
+    cbMarkDirty();
+    cbScheduleAutosave();
+    document.getElementById('cpVers').classList.remove('cp-open');
+    cbToast('Отбор возвращён к версии ' + l.when + ' — сохраняю на Диск');
+  }).catch(function (e) {
+    cbBusyHide();
+    cpHandleError(e, 'Не удалось вернуть версию');
+  });
+}
+
+document.getElementById('cpMenuVersions').onclick = function () {
+  cbCloseAllPops();
+  if (!CP.shoot) { cbToast('Сначала откройте съёмку'); return; }
+  if (!CPDisk.hasProxy()) { cbToast('Версии работают через облачную прослойку — она не настроена'); return; }
+  document.getElementById('cpVers').classList.add('cp-open');
+  cpRenderVersions();
+};
+document.getElementById('cpVersClose').onclick = function () { document.getElementById('cpVers').classList.remove('cp-open'); };
+document.getElementById('cpVersNow').onclick = function () {
+  if (!CP.shoot) return;
+  if (!CP.rev) { cbToast('Отбор этой съёмки ещё ни разу не сохранялся'); return; }
+  var b = this;
+  b.disabled = true;
+  cpSnapshot(CP.shoot.path, CP.rev, true).then(function (t) {
+    b.disabled = false;
+    cbToast(t ? 'Версия сохранена' : 'Версия не сохранилась — подробности в консоли');
+    if (t) setTimeout(cpRenderVersions, 1500);   /* новый файл виден в папке с задержкой */
+  });
+};
+document.getElementById('cpVersList').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-cp-vers]');
+  if (b) cpRestoreVersion(b.getAttribute('data-cp-vers'));
+});
 
 cbSaveProject = function () {
   if (!CP.shoot) { cbToast('Сначала откройте съёмку на витрине'); return; }
@@ -834,6 +1126,7 @@ function cpStartPoll() {
         if (App.dirty && !CP.readOnly) return;
         CP.readOnly = false;
         CP.rev = st.rev;
+        CP.base = cpClone(st.data);
         cpApplyRemote(st.data);
         cbToast('Отбор обновлён: изменения коллег');
       });
@@ -863,6 +1156,8 @@ var CP_ACTION_LABEL = {
   to_approval: 'отправил(а) на согласование', clear_status: 'снял(а) статус',
   download_shoot: 'скачал(а) всю съёмку', download_selection: 'скачал(а) отбор',
   changed_after_download: 'изменил(а) карточку после скачивания',
+  merged: 'склеены версии отбора', restored: 'восстановлены несохранённые правки',
+  collect_cards: 'собрал(а) карточки по папкам', restore_version: 'вернул(а) версию отбора',
   removed_after_download: 'убрал(а) из отбора уже скачанное',
   added_to_retouch_card: 'добавил(а) кадры в карточку на ретуши',
   card_tag: 'поставил(а) тег карточке', card_untag: 'снял(а) тег с карточки'
@@ -979,8 +1274,17 @@ function cpUpdateStatusLine() {
   var m = cpMeta(), n = { retouch: 0, reshoot: 0, approval: 0 };
   Object.keys(m.status).forEach(function (pid) { if (n[m.status[pid].s] !== undefined) n[m.status[pid].s]++; });
   var t = typeof cpShootType === 'function' ? cpShootType(CP.shoot.name) : null;
-  el.textContent = (t ? t.name + (t.cardArticle ? ', артикул карточки по папке' : '') + ' · ' : '')
-    + 'ретушь ' + n.retouch + ' · брак ' + n.reshoot + ' · согласование ' + n.approval;
+  el.innerHTML = '';
+  var sv = CP.readOnly ? { text: 'отбор не сохраняется: не прочитан с Диска', kind: 'err' } : (App.dirty && !CP.saving ? { text: 'есть несохранённые правки', kind: 'busy' } : CP.saveState);
+  if (sv && sv.text) {
+    var b = document.createElement('b');
+    b.className = 'cp-save cp-save-' + (sv.kind || '');
+    b.textContent = sv.text;
+    el.appendChild(b);
+    el.appendChild(document.createTextNode(' · '));
+  }
+  el.appendChild(document.createTextNode((t ? t.name + (t.cardArticle ? ', артикул карточки по папке' : '') + ' · ' : '')
+    + 'ретушь ' + n.retouch + ' · брак ' + n.reshoot + ' · согласование ' + n.approval));
 }
 
 /* бейджи статусов и кнопка действий — поверх отрисовки Cardboard */
@@ -1122,8 +1426,15 @@ function cpRenderFolderFilter() {
   var nl = CP.shoot ? Object.keys(cpMeta().likes).length : 0;
   var ll = document.getElementById('cpLikedLabel');
   if (ll) ll.textContent = 'только лайки · ' + nl;
-  if (CP.folder && CP.folder !== '/' && !counts[CP.folder]) CP.folder = '';
-  var html = '<option value="">Все папки · ' + total + '</option>';
+  var extra = '';
+  if (CP.folder && CP.folder !== '/' && !counts[CP.folder]) {
+    if (CP.folderByCard) {
+      /* папку выбрала карточка (лук глубже второго уровня или пустой) — показываем её отдельным пунктом */
+      var n = App.photos.filter(function (p) { return p.disk && (p.kind || 'photo') !== 'ref' && cpPhotoInFolder(p); }).length;
+      extra = '<option value="' + cbEsc(CP.folder) + '">' + cbEsc(CP.folder) + ' · ' + n + '</option>';
+    } else CP.folder = '';
+  }
+  var html = '<option value="">Все папки · ' + total + '</option>' + extra;
   if (root && keys.length) html += '<option value="/">Корень съёмки · ' + root + '</option>';
   keys.forEach(function (k) {
     var lvl2 = k.indexOf('/') !== -1;
@@ -1138,7 +1449,7 @@ function cpRenderFolderFilter() {
   var head = document.querySelector('.cb-tray-head');
   if (!head) return;
   var row = document.createElement('div');
-  row.className = 'cb-row';
+  row.className = 'cb-row cp-filter-row';
   row.style.display = 'none';
   row.style.marginTop = '6px';
   row.innerHTML = '<select id="cpFolderFilter" title="Показать только содержимое папки (со всеми вложенными)" style="width:100%"></select>'
@@ -1150,6 +1461,7 @@ function cpRenderFolderFilter() {
   };
   document.getElementById('cpFolderFilter').onchange = function () {
     CP.folder = this.value;
+    CP.folderByCard = false;
     cbRenderTray();
   };
 })();

@@ -284,7 +284,11 @@ async function route(r) {
   FILES.set('disk:/Архив/LM-1043/_contentpulse.json', Buffer.from(JSON.stringify(other)));
   await page.evaluate(() => { App.cards[0].category = 'моя правка'; cbMarkDirty(); cbAutosaveNow(); });
   await page.waitForFunction(() => App.cards[0] && App.cards[0].title === 'Лук 1 (правка коллеги)', null, { timeout: 8000 });
-  check('конфликт: чужая версия не затёрта, подтянута', true);
+  await page.waitForFunction(() => !App.dirty, null, { timeout: 8000 });
+  {
+    const st = JSON.parse(FILES.get('disk:/Архив/LM-1043/_contentpulse.json').toString());
+    check('конфликт: правки склеены по полям — заголовок коллеги и моя категория', st.cards[0].title === 'Лук 1 (правка коллеги)' && st.cards[0].category === 'моя правка', JSON.stringify([st.cards[0].title, st.cards[0].category]));
+  }
   await page.waitForTimeout(300);
   check('конфликт: новая часть съёмки не потерялась', await page.evaluate(() => App.photos.some(p => /d\.jpg$/.test(p.disk || ''))));
 
@@ -429,8 +433,15 @@ async function route(r) {
   check('тип съёмки по названию виден на панели', (await page.textContent('#cpPanel .cp-panel-head small')).includes('Модельная'));
   await page.dblclick('.cp-shoot');
   await page.waitForFunction(() => CP.shoot && /МОДЕЛЬ/.test(CP.shoot.name) && App.photos.length === 3 && !document.getElementById('cpShelf').classList.contains('cp-open'), null, { timeout: 10000 });
-  /* карточки товара по папкам артикулов — сами, пустая папка — пустая карточка */
+  /* карточки товара по папкам артикулов — по кнопке, пустая папка — пустая карточка */
+  await page.waitForTimeout(600);
+  check('карточки товара сами не появляются — есть кнопка «Собрать карточки по папкам»', await page.evaluate(() =>
+    App.cards.filter(c => c.cpAuto).length === 0 && !!document.querySelector('#cbCards .cp-collect')));
+  await page.click('#cbCards .cp-collect');
   await page.waitForFunction(() => App.cards.filter(c => c.cpAuto).length === 3, null, { timeout: 8000 });
+  await page.evaluate(() => { document.querySelector('#cbCards .cb-card[data-cid="' + App.cards.find(c => c.title === '74595').id + '"]').click(); });
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-collect.png') });
   check('на каждую папку артикула — своя карточка товара с её кадрами', await page.evaluate(() => {
     var by = {}; App.cards.filter(c => c.cpAuto).forEach(c => { by[c.title] = cpCardPids(c).map(pid => cbPhotoById(pid).name); });
     return by['74595'] && by['74595'].join() === 'manekin.jpg' && by['74596'] && by['74596'].join() === 'manekin2.jpg' && by['74598'] && by['74598'].length === 0;
@@ -448,7 +459,22 @@ async function route(r) {
     cbMarkDirty(); cbRenderCards();
   });
   await page.evaluate(() => cpSyncPhotos(false));
-  check('кадр, убранный из карточки товара руками, сам не возвращается', await page.evaluate(() => App.cards.find(x => x.title === '74596').pids.length === 0));
+  await page.click('#cbCards .cp-collect');
+  check('повторная сборка: дублей нет, убранный руками кадр не возвращается', await page.evaluate(() =>
+    App.cards.filter(c => c.cpAuto).length === 3 && App.cards.find(x => x.title === '74596').pids.length === 0));
+  /* галерея следует за карточкой: только её лук; галочка «по карточке» — выключить */
+  await page.evaluate(() => { document.querySelector('#cbCards .cb-card[data-cid="' + App.cards.find(c => c.title === '74598').id + '"]').click(); });
+  await page.waitForFunction(() => CP.folder === '1' && CP.folderByCard, null, { timeout: 3000 }).catch(() => {});
+  check('нажал на карточку — в галерее только её лук, карточка выделена', await page.evaluate(() =>
+    CP.folder === '1' && document.getElementById('cpFolderFilter').value === '1' && !!document.querySelector('#cbCards .cb-card.cp-card-active')),
+    await page.evaluate(() => JSON.stringify([CP.folder, CP.folderByCard, CP.activeCard])));
+  await page.uncheck('#cpFollowCard');
+  check('галочка «по карточке» снята — галерея показывает всё', await page.evaluate(() => CP.folder === '' && document.getElementById('cpFolderFilter').value === ''));
+  await page.evaluate(() => { document.querySelector('#cbCards .cb-card[data-cid="' + App.cards.find(c => c.title === '74595').id + '"]').click(); });
+  await page.waitForTimeout(100);
+  check('без галочки нажатие на карточку галерею не переключает', await page.evaluate(() => CP.folder === ''));
+  await page.check('#cpFollowCard');
+  await page.evaluate(() => { CP.folder = ''; CP.folderByCard = false; cbRenderTray(); });
   await page.click('#cbCards .cb-card[data-cid="' + (await page.evaluate(() => App.cards.find(c => c.title === '74595').id)) + '"] [data-cp-card-brak]');
   check('«В брак» на карточке — пересъём для карточки и её кадров', await page.evaluate(() => {
     var c = App.cards.find(x => x.title === '74595'), m = cpMeta();
@@ -584,11 +610,76 @@ async function route(r) {
   check('повторное нажатие снимает тег', await page.evaluate(() => !(App.cards[0].tags || []).includes('Срочно')));
   /* большой «+» */
   const nCards = await page.evaluate(() => App.cards.length);
-  await page.click('#cbCards .cp-addcard');
+  await page.click('#cbCards .cp-addcard:not(.cp-collect)');
   check('большой «+» в поле карточек создаёт карточку-автоленту', await page.evaluate(n => App.cards.length === n + 1 && App.cards[App.cards.length - 1].mode === 'auto', nCards));
   await page.evaluate(() => { var b = App.photos.find(p => /\/b\.jpg$/.test(p.disk)); cpAddAutoCard(b.id); });
   check('кадр, брошенный на «+», сразу в новой карточке', await page.evaluate(() => App.cards[App.cards.length - 1].pids.length === 1));
   await page.waitForFunction(() => !App.dirty, null, { timeout: 8000 });
+
+  /* ---------- надёжное сохранение ---------- */
+  check('в строке съёмки видно, что отбор сохранён', /сохранено \d\d:\d\d/.test(await page.textContent('#cpStatusLine')), await page.textContent('#cpStatusLine'));
+  const SP = 'disk:/Архив/LM-1043/_contentpulse.json';
+  const SNAPDIR = 'disk:/_ContentPulse/версии отборов/LM-1043/';
+  check('перед записью отбора сохранилась его версия в «версии отборов»', [...FILES.keys()].some(k => k.indexOf(SNAPDIR) === 0 && /\.json$/.test(k)),
+    [...FILES.keys()].filter(k => /версии/.test(k)).join(' | '));
+  /* кто-то другой успел сохранить отбор: добавил свою карточку */
+  {
+    const other = JSON.parse(FILES.get(SP).toString());
+    const c0 = JSON.parse(JSON.stringify(other.cards[0]));
+    c0.id = 'ext1'; c0.title = 'Чужая карточка'; c0.pids = []; (c0.slots || []).forEach(s => s.pid = null);
+    other.cards.push(c0);
+    FILES.set(SP, Buffer.from(JSON.stringify(other)));
+  }
+  await page.evaluate(() => { App.cards[0].title = 'Моя правка'; cbMarkDirty(); cbAutosaveNow(); });
+  await page.waitForFunction(() => !App.dirty && App.cards.some(c => c.title === 'Чужая карточка'), null, { timeout: 10000 }).catch(() => {});
+  {
+    const st = JSON.parse(FILES.get(SP).toString());
+    check('конфликт: версии склеены — и моя правка, и чужая карточка на Диске', st.cards.some(c => c.title === 'Моя правка') && st.cards.some(c => c.title === 'Чужая карточка'),
+      JSON.stringify(st.cards.map(c => c.title)));
+    check('конфликт записан в журнал', st.meta.cp.events.some(e => e.action === 'merged'));
+  }
+  /* правки не успели сохраниться (закрыли вкладку) — при открытии возвращаются */
+  await page.evaluate(() => {
+    var d = cbProjectData();
+    var c = JSON.parse(JSON.stringify(d.cards[0])); c.id = 'bak1'; c.title = 'Из копии в браузере';
+    d.cards.push(c);
+    cpBackupSave(CP.shoot.path, d, CP.rev);
+  });
+  await page.evaluate(() => cpShowShelf());
+  await page.fill('#cpShelfSearch', 'МОДЕЛЬ');
+  await page.dblclick('.cp-shoot');
+  await page.waitForFunction(() => CP.shoot && /МОДЕЛЬ/.test(CP.shoot.name) && !document.getElementById('cpShelf').classList.contains('cp-open'), null, { timeout: 10000 });
+  await page.evaluate(() => cpShowShelf());
+  await page.fill('#cpShelfSearch', '1043');
+  await page.dblclick('.cp-shoot');
+  await page.waitForFunction(() => CP.shoot && CP.shoot.name === 'LM-1043' && App.cards.some(c => c.title === 'Из копии в браузере') && !App.dirty, null, { timeout: 10000 }).catch(() => {});
+  check('несохранённые правки из браузера восстановлены и записаны на Диск', JSON.parse(FILES.get(SP).toString()).cards.some(c => c.title === 'Из копии в браузере')
+    && await page.evaluate(() => !localStorage.getItem('cp_bak:' + CP.shoot.path)));
+  /* версии: сохранить сейчас, поправить, вернуть */
+  await page.evaluate(() => document.getElementById('cpMenuVersions').click());
+  await page.waitForSelector('#cpVers.cp-open', { timeout: 3000 });
+  await page.waitForTimeout(1100);
+  await page.click('#cpVersNow');
+  await page.waitForFunction(() => document.querySelectorAll('#cpVersList [data-cp-vers]').length >= 2, null, { timeout: 8000 });
+  await page.click('#cpVersClose');
+  await page.waitForTimeout(1100);
+  await page.evaluate(() => { App.cards[0].title = 'После версии'; cbMarkDirty(); cbAutosaveNow(); });
+  await page.waitForFunction(() => !App.dirty, null, { timeout: 8000 });
+  check('правка после версии на Диске', JSON.parse(FILES.get(SP).toString()).cards[0].title === 'После версии');
+  await page.evaluate(() => document.getElementById('cpMenuVersions').click());
+  await page.waitForFunction(() => document.querySelectorAll('#cpVersList [data-cp-vers]').length >= 2, null, { timeout: 8000 });
+  page.once('dialog', d => d.accept());
+  await page.click('#cpVersList [data-cp-vers]');
+  await page.waitForFunction(() => App.cards[0].title !== 'После версии' && !App.dirty, null, { timeout: 10000 }).catch(() => {});
+  {
+    const st = JSON.parse(FILES.get(SP).toString());
+    const snaps = [...FILES.keys()].filter(k => k.indexOf(SNAPDIR) === 0).sort();
+    const lastSnap = JSON.parse(FILES.get(snaps[snaps.length - 1]).toString());
+    check('«Вернуть»: отбор на Диске — как в версии, правка после неё ушла', st.cards[0].title === 'Моя правка' && st.cards.some(c => c.title === 'Из копии в браузере'), JSON.stringify(st.cards.map(c => c.title)));
+    check('перед возвратом текущий отбор тоже сохранён версией', lastSnap.cards[0].title === 'После версии', snaps.join(' | '));
+    check('возврат версии — в журнале', st.meta.cp.events.some(e => e.action === 'restore_version'));
+  }
+  await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-versions.png') });
 
   /* служебная папка рядом с архивом: КАТАЛОГ/_ContentPulse, настройки переезжают из корня */
   await page.evaluate(() => cpShowShelf());

@@ -31,6 +31,8 @@
     + 'border:2px dashed #3a3a37;border-radius:8px;background:transparent;color:#a3a09a;font-size:15px;cursor:pointer}'
     + '.cp-addcard b{font-size:56px;line-height:1;font-weight:300;color:#C9956B}'
     + '.cp-addcard:hover,.cp-addcard.cp-over{border-color:#C9956B;color:#e7c9a8;background:#1d1a17}'
+    + '.cp-addcard.cp-collect{min-height:44px;margin:0 0 14px;border:1px solid #5a4632;color:#e7c9a8;font-size:14px}'
+    + '.cb-card.cp-card-active{outline:2px solid #C9956B;outline-offset:2px}'
     + '.cp-card-tags{flex-basis:100%;display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin-top:2px}'
     + '.cp-tg-name{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#a3a09a;margin:0 2px 0 6px}'
     + '.cp-tg-name:first-child{margin-left:0}'
@@ -176,7 +178,96 @@ function cpGuardDecorate() {
     plus.innerHTML = '<b>+</b><span>Новая карточка</span>';
     root.appendChild(plus);
   }
+  var can = typeof cpCollectAvailable === 'function' && cpCollectAvailable();
+  var col = root.querySelector('.cp-collect');
+  if (can && !col) {
+    col = document.createElement('button');
+    col.className = 'cp-addcard cp-collect';
+    col.title = 'На каждую папку артикула — карточка товара со всеми кадрами папки. Собранное руками не трогает, повторное нажатие только дополняет.';
+    col.innerHTML = '<span>Собрать карточки по папкам артикулов</span>';
+    root.insertBefore(col, root.firstChild);
+  } else if (!can && col) col.remove();
+  /* выбранная карточка — с рамкой */
+  Array.prototype.forEach.call(root.querySelectorAll('.cb-card'), function (el) {
+    el.classList.toggle('cp-card-active', !!CP.activeCard && el.getAttribute('data-cid') === CP.activeCard);
+  });
 }
+
+/* ---------- галерея следует за карточкой ----------
+   Нажали на карточку — в галерее остаётся только лук (папка), к которому
+   она относится: по папке артикула карточки, а у карточки без артикула —
+   по общей папке её кадров. Пустая карточка папку не меняет. Галочка
+   «по карточке» рядом с фильтром папок выключает это: тогда галерея
+   показывает то, что выбрано в списке папок (например, «Все папки»). */
+
+function cpCardFolder(card) {
+  if (!card || !CP.shoot) return null;
+  var type = typeof cpShootType === 'function' ? cpShootType(CP.shoot.name) : null;
+  var lookIdx = type ? type.roles.indexOf('лук') : -1;
+  if (card.cpArticleDir) {
+    var seg = card.cpArticleDir.split('/');
+    /* модельная (лук/артикул): весь лук; предметка (бренд/артикул): сама папка артикула */
+    return lookIdx !== -1 && seg.length > 1 ? seg.slice(0, -1).join('/') : card.cpArticleDir;
+  }
+  var dirs = [];
+  cpCardPids(card).forEach(function (pid) {
+    var p = cbPhotoById(pid);
+    if (p && p.disk) dirs.push(cpRelDir(p));
+  });
+  if (!dirs.length) return null;
+  if (dirs.every(function (d) { return d === ''; })) return '/';
+  var common = dirs[0].split('/');
+  dirs.slice(1).forEach(function (d) {
+    var s = d.split('/'), i = 0;
+    while (i < common.length && common[i] === s[i]) i++;
+    common = common.slice(0, i);
+  });
+  common = common.filter(Boolean);
+  if (!common.length) return '';
+  var depth = lookIdx !== -1 ? lookIdx + 1 : type ? type.roles.length : 1;
+  return common.slice(0, depth).join('/');
+}
+
+function cpFollowOn() { return cpGet('cp_follow_card', '1') !== '0'; }
+
+function cpSetActiveCard(id) {
+  CP.activeCard = id || null;
+  Array.prototype.forEach.call(document.querySelectorAll('#cbCards .cb-card'), function (el) {
+    el.classList.toggle('cp-card-active', !!CP.activeCard && el.getAttribute('data-cid') === CP.activeCard);
+  });
+  if (!CP.shoot || !cpFollowOn()) return;
+  var f = cpCardFolder(cbCardById(id));
+  if (f === null || f === CP.folder) return;
+  CP.folder = f;
+  CP.folderByCard = true;
+  cbRenderTray();
+}
+
+(function cpFollowCard() {
+  var sel = document.getElementById('cpFolderFilter');
+  if (sel) {
+    var lab = document.createElement('label');
+    lab.className = 'cp-liked-only';
+    lab.title = 'Нажали на карточку — в галерее только её лук. Снимите галочку, чтобы галерея не переключалась сама';
+    lab.innerHTML = '<input type="checkbox" id="cpFollowCard"> по карточке';
+    sel.parentNode.appendChild(lab);
+    var box = document.getElementById('cpFollowCard');
+    box.checked = cpFollowOn();
+    box.onchange = function () {
+      cpSet('cp_follow_card', this.checked ? '1' : '0');
+      if (this.checked && CP.activeCard) cpSetActiveCard(CP.activeCard);
+      else if (!this.checked && CP.folderByCard) { CP.folder = ''; CP.folderByCard = false; cbRenderTray(); }
+    };
+  }
+  document.getElementById('cbCards').addEventListener('click', function (e) {
+    if (!CP.shoot || e.target.closest('.cp-addcard')) return;
+    var el = e.target.closest('.cb-card');
+    if (!el) return;
+    var id = el.getAttribute('data-cid');
+    /* карточку могли только что удалить этим же нажатием */
+    setTimeout(function () { if (cbCardById(id)) cpSetActiveCard(id); }, 0);
+  });
+})();
 
 /* ---------- новая карточка-автолента ---------- */
 
@@ -192,6 +283,7 @@ function cpAddAutoCard(pid) {
   if (!t) { cbToast('Нет шаблона автоленты — создайте карточку из галереи шаблонов'); return; }
   cbAddCardFromTpl(t.id);
   var card = App.cards[App.cards.length - 1];
+  if (card) CP.activeCard = card.id;
   if (pid && card && card.mode === 'auto') {
     card.pids.push(pid);
     cbMarkDirty();
@@ -206,6 +298,7 @@ function cpAddAutoCard(pid) {
   var root = document.getElementById('cbCards');
   root.addEventListener('click', function (e) {
     var plus = e.target.closest('.cp-addcard');
+    if (plus && plus.classList.contains('cp-collect')) { e.preventDefault(); cpCollectCards(); return; }
     if (plus) { e.preventDefault(); cpAddAutoCard(); return; }
     var tg = e.target.closest('[data-cp-cardtag]');
     if (tg) {
@@ -217,7 +310,7 @@ function cpAddAutoCard(pid) {
   });
   root.addEventListener('dragover', function (e) {
     var plus = e.target.closest('.cp-addcard');
-    if (!plus) return;
+    if (!plus || plus.classList.contains('cp-collect')) return;
     e.preventDefault();
     plus.classList.add('cp-over');
   });
@@ -227,7 +320,7 @@ function cpAddAutoCard(pid) {
   });
   root.addEventListener('drop', function (e) {
     var plus = e.target.closest('.cp-addcard');
-    if (!plus) return;
+    if (!plus || plus.classList.contains('cp-collect')) return;
     e.preventDefault(); e.stopPropagation();
     plus.classList.remove('cp-over');
     var data = e.dataTransfer.getData('text/plain') || '';
