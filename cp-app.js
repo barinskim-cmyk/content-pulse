@@ -1319,7 +1319,7 @@ function cpFinishDownload(res, action, extra) {
 /* С октября 2026 Яндекс не отдаёт папки архивом (ссылка на папку — 500),
    отдельные файлы отдаёт, а запись на Диск идёт ~0,1 МБ/с. Поэтому ZIP
    собирает наша прослойка в Yandex Cloud: читает кадры по одному и кладёт
-   архив в закрытое хранилище (Object Storage, 3 дня), страница получает
+   архив в закрытое хранилище (Object Storage, сутки), страница получает
    подписанную ссылку на сутки. Без хранилища — запасной путь: архив на
    Диск в <_ContentPulse>/выгрузки/. Большая выборка делится на части так,
    чтобы каждая собиралась за полминуты; части распаковываются в одну папку. */
@@ -1472,7 +1472,7 @@ function cpDlCard(title, note, parts, progress, error) {
   if (parts.length) {
     h += '<div class="cp-dlcard-note">Загрузка начинается сама. Если не началась — нажмите кнопку; '
       + 'если и так нет — «ссылка» и вставьте её в адресную строку. '
-      + (parts[0].cloud ? 'Ссылка действует сутки, архив хранится в облаке 3 дня.'
+      + (parts[0].cloud ? 'Ссылка действует сутки, потом архив из облака удаляется.'
         : 'Файлы лежат на Диске: ' + cbEsc(cpExportsDir().replace(/^disk:/, ''))) + '</div>';
     parts.forEach(function (p) {
       h += '<div class="cp-dlcard-row"><a class="cp-dlcard-btn" href="' + cbEsc(p.href) + '" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">'
