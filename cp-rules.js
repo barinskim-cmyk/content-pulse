@@ -370,3 +370,91 @@ function cpFilesSave() {
 }
 
 if (CPDisk.hasToken()) cpLoadRules();
+
+/* ---------- настройки за шестерёнкой ----------
+   Архив, папка ретуши и файлы настроек убраны с витрины в одну кнопку
+   в правом верхнем углу, чтобы не мешали. Элементы переносятся как есть,
+   их обработчики остаются прежними. */
+
+(function cpSettingsMenu() {
+  var css = ''
+    + '.cp-gear{width:34px;height:34px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:1px solid #5a4632;border-radius:17px;background:transparent;color:#C9956B;cursor:pointer}'
+    + '.cp-gear:hover,.cp-gear.cp-on{background:#2b241d}'
+    + '.cp-gear svg{width:18px;height:18px}'
+    + '.cp-settings{position:fixed;z-index:3400;width:440px;max-width:calc(100vw - 24px);background:#1d1d1b;border:1px solid #3a3a37;border-radius:6px;padding:14px 16px;box-shadow:0 10px 32px #000a;display:none;color:#f2f2f1}'
+    + '.cp-settings.cp-open{display:block}'
+    + '.cp-settings h5{margin:12px 0 6px;font-size:10px;letter-spacing:.12em;color:#a3a09a;font-weight:600;text-transform:uppercase}'
+    + '.cp-settings h5:first-child{margin-top:0}'
+    + '.cp-set-line{display:flex;gap:8px;align-items:center;flex-wrap:wrap}'
+    + '.cp-settings input{flex:1;min-width:0;width:auto !important;background:#141413;border:1px solid #3a3a37;color:#f2f2f1;padding:8px 10px;border-radius:3px;font:inherit;font-size:13px}'
+    + '.cp-settings input:focus{outline:none;border-color:#C9956B}';
+  var st = document.createElement('style');
+  st.textContent = css;
+  document.head.appendChild(st);
+
+  var gear = document.createElement('button');
+  gear.className = 'cp-gear';
+  gear.id = 'cpGear';
+  gear.title = 'Настройки';
+  gear.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + '<circle cx="12" cy="12" r="3"></circle>'
+    + '<path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"></path></svg>';
+  document.querySelector('#cpShelf .cp-shelf-head').appendChild(gear);
+
+  var box = document.createElement('div');
+  box.className = 'cp-settings';
+  box.id = 'cpSettings';
+  box.innerHTML = '<h5>Архив съёмок</h5><div class="cp-set-line" id="cpSetArchive"></div>'
+    + '<h5>Папка ретуши</h5><div class="cp-set-line" id="cpSetRetouch"></div>'
+    + '<h5>Файлы настроек</h5><div class="cp-set-line">'
+    + CP_SERVICE_FILES.map(function (f, i) { return '<button data-cp-setfile="' + i + '">' + cbEsc(f.label) + '</button>'; }).join('')
+    + '</div>';
+  document.body.appendChild(box);
+
+  /* переносим поля с витрины (обработчики остаются) */
+  var arch = document.getElementById('cpSetArchive');
+  var ai = document.getElementById('cpArchiveInput'), ab = document.getElementById('cpArchiveApply');
+  if (ai && ai.previousElementSibling && /Архив/.test(ai.previousElementSibling.textContent)) ai.previousElementSibling.remove();
+  if (ai) arch.appendChild(ai);
+  if (ab) arch.appendChild(ab);
+  var ret = document.getElementById('cpSetRetouch');
+  var ri = document.getElementById('cpRetouchInput'), rb = document.getElementById('cpRetouchApply');
+  var wrap = ri && ri.closest('.cp-set');
+  if (ri) ret.appendChild(ri);
+  if (rb) ret.appendChild(rb);
+  if (wrap) wrap.remove();
+  var fo = document.getElementById('cpFilesOpen');
+  if (fo) fo.remove();
+
+  function place() {
+    var r = gear.getBoundingClientRect();
+    box.style.top = (r.bottom + 8) + 'px';
+    box.style.right = Math.max(12, innerWidth - r.right) + 'px';
+  }
+  function close() { box.classList.remove('cp-open'); gear.classList.remove('cp-on'); }
+  gear.onclick = function (e) {
+    e.stopPropagation();
+    if (box.classList.contains('cp-open')) { close(); return; }
+    place();
+    box.classList.add('cp-open');
+    gear.classList.add('cp-on');
+  };
+  box.addEventListener('click', function (e) {
+    var f = e.target.closest('[data-cp-setfile]');
+    if (f) { close(); cpFilesOpen(parseInt(f.getAttribute('data-cp-setfile'), 10)); }
+  });
+  document.addEventListener('click', function (e) {
+    if (box.classList.contains('cp-open') && !e.target.closest('#cpSettings') && !e.target.closest('#cpGear')) close();
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
+  addEventListener('resize', function () { if (box.classList.contains('cp-open')) place(); });
+
+  /* без входа шестерёнку не показываем */
+  var showOrig = window.cpShowShelf;
+  window.cpShowShelf = function () {
+    var r = showOrig.apply(this, arguments);
+    gear.style.display = CPDisk.hasToken() ? '' : 'none';
+    return r;
+  };
+  gear.style.display = CPDisk.hasToken() ? '' : 'none';
+})();

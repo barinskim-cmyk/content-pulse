@@ -365,6 +365,11 @@ async function route(r) {
   check('превью грузятся пачками через прослойку', PREVIEW_CALLS.batch > 0 && PREVIEW_CALLS.single === 0, JSON.stringify(PREVIEW_CALLS));
 
   /* ---------- папка ретуши из настроек на Диске ---------- */
+  await page.click('#cpGear');
+  check('настройки спрятаны за шестерёнкой: архив, ретушь, файлы', await page.evaluate(() =>
+    !!document.querySelector('#cpSettings.cp-open #cpArchiveInput') && !!document.querySelector('#cpSettings #cpRetouchInput')
+    && document.querySelectorAll('#cpSettings [data-cp-setfile]').length === 3 && !document.querySelector('#cpShelfBar #cpArchiveInput')));
+  await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-settings.png') });
   await page.fill('#cpRetouchInput', 'Архив/РЕТУШЬ');
   await page.click('#cpRetouchApply');
   await page.waitForFunction(() => CP.settings && CP.settings.retouch === 'disk:/Архив/РЕТУШЬ', null, { timeout: 8000 });
@@ -383,8 +388,8 @@ async function route(r) {
   await page.fill('#cpShelfSearch', '1043');
 
   /* ---------- структура съёмок из файла на Диске ---------- */
-  await page.click('#cpFilesOpen');
-  await page.click('[data-cp-f="tab"][data-i="1"]');
+  await page.click('#cpGear');
+  await page.click('#cpSettings [data-cp-setfile="1"]');
   await page.waitForFunction(() => /\[Модельная\]/.test(document.getElementById('cpFilesText').value), null, { timeout: 8000 });
   await page.click('[data-cp-f="save"]');
   await page.waitForFunction(() => CP.rules && CP.rules.length === 3, null, { timeout: 8000 });
