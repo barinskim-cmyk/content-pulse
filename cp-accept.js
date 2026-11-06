@@ -117,7 +117,10 @@ function cpPlanUpload(files, data) {
   var groups = {}, unmatched = [];
   files.forEach(function (x, i) {
     var s = segs[i];
-    var card = (s.length >= 2 ? cardOfFolder(s[0]) : null) || byStem[cpStem(x.file.name)] || null;
+    /* карточка — по самой глубокой папке, которая на неё похожа (лук/артикул/файл тоже подходит), иначе по имени кадра */
+    var card = null;
+    for (var k = s.length - 2; k >= 0 && !card; k--) card = cardOfFolder(s[k]);
+    card = card || byStem[cpStem(x.file.name)] || null;
     if (!card) { unmatched.push(s.join('/')); return; }
     (groups[card.id] = groups[card.id] || []).push({ file: x.file, name: x.file.name });
   });
@@ -348,7 +351,9 @@ cbRenderCards = (function (orig) {
     Array.prototype.forEach.call(root.querySelectorAll('.cb-card'), function (el) {
       var id = el.getAttribute('data-cid');
       var list = rv[id];
-      if (CP.rvOnly && !(list && list.length)) el.style.display = 'none';
+      /* «Ретушь готова» — то, что ждёт проверки или доработки; принятое на сайт уже не показываем */
+      var lastS = list && list.length ? list[list.length - 1].status : '';
+      if (CP.rvOnly && lastS !== 'review' && lastS !== 'rework') el.style.display = 'none';
       var last = cpLastRv(list);
       if (!last || el.querySelector('.cp-rv')) return;
       var head = el.querySelector('.cb-card-head');

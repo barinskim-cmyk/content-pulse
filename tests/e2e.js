@@ -737,6 +737,9 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
       }, list);
       await page.waitForFunction(() => document.querySelector('[data-cp-acc="go"]'), null, { timeout: 5000 });
       const txt = await page.textContent('#cpAccPlan');
+      /* что видно по ходу загрузки — прогресс в окне сдачи */
+      await page.evaluate(() => { window.__prog = []; new MutationObserver(() => { const e = document.getElementById('cpAccProg'); if (e && e.textContent) window.__prog.push(e.textContent); })
+        .observe(document.getElementById('cpAccPlan'), { childList: true, subtree: true, characterData: true }); });
       await page.click('[data-cp-acc="go"]');
       await page.waitForFunction(() => /Загружено в/.test((document.getElementById('cpAccPlan') || {}).textContent || ''), null, { timeout: 10000 }).catch(() => {});
       await page.click('[data-cp-acc="close"]');
@@ -748,15 +751,27 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
       /Загрузить в 04_ОТРЕТУШИРОВАНО/.test(t1) && inRv('manekin.tif').length === 1 && inRv('manekin2.tif').length === 1 && /\/74595[^/]*\/manekin\.tif$/.test(inRv('manekin.tif')[0]),
       JSON.stringify([t1, inRv('manekin.tif'), inRv('manekin2.tif')]));
     /* карточки, которым досталась эта сдача (у артикула бывает две карточки — смотрим по версиям) */
+    const prog = await page.evaluate(() => window.__prog);
+    check('по ходу загрузки видно прогресс в окне сдачи (файлы, МБ, %), заставка «Загружаю» — поверх окна', prog.some(t => /Загружаю в 04_ОТРЕТУШИРОВАНО: файлов \d+ из 2 .* МБ \(\d+%\)/.test(t)) && prog.some(t => /\(100%\)/.test(t))
+      && await page.evaluate(() => +getComputedStyle(document.getElementById('cbBusy')).zIndex > +getComputedStyle(document.getElementById('cpAccept')).zIndex), JSON.stringify(prog.slice(-3)));
+    check('после сдачи съёмка сразу в фильтре 04 (не ждём, пока Диск покажет новую папку)', await page.evaluate(n => !!(CP.stagePresence.review || {})[n.toLowerCase()], SN));
     const ids = await page.evaluate(() => { const rv = cpMeta().rv, f = n => Object.keys(rv).find(id => { const l = rv[id].slice(-1)[0]; return l && l.letter === 'U' && l.files.some(x => x.name === n); });
       return { a: f('manekin.tif'), b: f('manekin2.tif') }; });
     check('на карточке — «На сайт» и «На доработку»', await page.evaluate(i => /На сайт/.test(document.querySelector('[data-cp-rv="' + i + '"] [data-cp-rva="approve"]').textContent), ids.b));
+    /* открыли съёмку из фильтра 04 — видны только карточки этого этапа; отправленное на сайт сразу пропадает */
+    const vis = () => page.evaluate(() => [...document.querySelectorAll('#cbCards .cb-card')].filter(el => el.style.display !== 'none').map(el => el.getAttribute('data-cid')));
+    await page.evaluate(() => { CP.stageFilter = 'review'; CP.openedHooks.forEach(f => { try { f(CP.shoot.path); } catch (e) { } }); });
+    const v1 = await vis();
+    check('открыто из 04: видны только карточки на проверке, полоска «только карточки этого этапа»', v1.length === 2 && v1.includes(ids.a) && v1.includes(ids.b)
+      && /Открыто из 04_ОТРЕТУШИРОВАНО/.test(await page.textContent('#cpViewBar')), JSON.stringify(v1));
     await page.click('[data-cp-rv="' + ids.b + '"] [data-cp-rva="approve"]');
     const siteB = ST + '/' + today + '/' + SN + '/74596/manekin2.tif';
     for (let i = 0; i < 60 && !FILES.has(siteB); i++) await page.waitForTimeout(100);
     await page.waitForFunction(i => cpMeta().rv[i].slice(-1)[0].status === 'approved', ids.b, { timeout: 5000 }).catch(() => {});
     check('«На сайт»: папка артикула переехала в 05/<дата>/<съёмка>/<артикул>, в 04 её больше нет', FILES.has(siteB) && !inRv('manekin2.tif').length
       && await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].status === 'approved' && !!cpMeta().delivered[i], ids.b), JSON.stringify([...FILES.keys()].filter(k => /Этапы/.test(k))));
+    const v2 = await vis();
+    check('отправили на сайт — карточка сразу пропала из этого вида', v2.length === 1 && v2[0] === ids.a, JSON.stringify(v2));
     page.once('dialog', d => d.accept('тени'));
     await page.click('[data-cp-rv="' + ids.a + '"] [data-cp-rva="rework"]');
     for (let i = 0; i < 60 && !inRv('manekin.tif').some(k => /_доработка\//.test(k)); i++) await page.waitForTimeout(100);
@@ -774,7 +789,9 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     const out = (FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString();
     check('выработка: таблица в служебной папке — сдано ×3, доработка, принято ×2, с буквой и датой', /^\uFEFFдата;время;ретушёр/.test(out) && (out.match(/;сдано;/g) || []).length === 3
       && (out.match(/;принято;/g) || []).length === 2 && /;доработка: тени;/.test(out) && out.split('\n').some(l => l.indexOf(today + ';') === 0 && /;U;/.test(l)), out);
-    await page.evaluate(p => { CP.settings.site = p.site; if (p.retouched) CP.settings.retouched = p.retouched; else delete CP.settings.retouched; cbRenderCards(); }, prev);
+    await page.click('[data-cp-view-all]');
+    check('«Показать все карточки» — снова все, полоски нет', !(await page.$('#cpViewBar')) && (await vis()).length > 2);
+    await page.evaluate(p => { CP.stageFilter = ''; CP.viewStage = ''; CP.settings.site = p.site; if (p.retouched) CP.settings.retouched = p.retouched; else delete CP.settings.retouched; cbRenderCards(); }, prev);
   }
 
   /* статус = где лежит файл (шаг 1): сверка съёмки с папками этапов */
@@ -958,7 +975,8 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     var d = App.photos.find(p => /\/d\.jpg$/.test(p.disk));
     return cpMeta().status[d.id] && cpMeta().status[d.id].s === 'retouch';
   }, null, { timeout: 8000 });
-  check('добавили в карточку на ретуши — кадр сам ушёл на ретушь (и копия)', FILES.has('disk:/Архив/РЕТУШЬ/LM-1043/part2/d.jpg'));
+  for (let i = 0; i < 50 && !FILES.has('disk:/Архив/РЕТУШЬ/LM-1043/part2/d.jpg'); i++) await page.waitForTimeout(100);
+  check('добавили в карточку на ретуши — кадр сам ушёл на ретушь (и копия)', FILES.has('disk:/Архив/РЕТУШЬ/LM-1043/part2/d.jpg'), [...FILES.keys()].filter(k => /РЕТУШЬ\/LM-1043/.test(k)).join(' | '));
   check('журнал: изменение после скачивания и удалённое', await page.evaluate(() => {
     var ev = cpMeta().events.map(e => e.action);
     return ev.includes('changed_after_download') && ev.includes('removed_after_download') && ev.includes('added_to_retouch_card');

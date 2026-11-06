@@ -92,15 +92,32 @@ cpAcceptUpload = function () {
     });
   });
   var label = cpFolderBase(root);
-  var total = jobs.reduce(function (a, j) { return a + j.file.size; }, 0), done = 0, ok = [], failed = [];
-  cbBusyShow('Загружаю в ' + label + ': 0 из ' + jobs.length + '...', 0.02);
+  var total = jobs.reduce(function (a, j) { return a + j.file.size; }, 0), ok = [], failed = [];
+  /* прогресс по байтам: Маша, 06.11 — «важно, чтобы отображалась загрузка, иначе человек
+     будет думать, что ничего не происходит» */
+  var loaded = {}, now = '';
+  var mb = function (b) { return (b / 1048576).toFixed(b < 10485760 ? 1 : 0); };
+  var show = function () {
+    var sum = 0;
+    Object.keys(loaded).forEach(function (k) { sum += loaded[k]; });
+    var frac = total ? sum / total : 0;
+    var text = 'Загружаю в ' + label + ': файлов ' + ok.length + ' из ' + jobs.length + ' · ' + mb(sum) + ' из ' + mb(total) + ' МБ (' + Math.round(frac * 100) + '%)' + (now ? ' · ' + now : '');
+    cbBusyShow(text, 0.02 + 0.96 * frac);
+    var pe = document.getElementById('cpAccProg');
+    if (pe) pe.innerHTML = '<div class="cp-acc-bar"><i style="width:' + Math.round(frac * 100) + '%"></i></div><div>' + cbEsc(text) + '</div>';
+  };
+  var go = document.querySelector('[data-cp-acc="go"]');
+  if (go) { go.disabled = true; go.textContent = 'Загружаю...'; }
+  var planBox = document.getElementById('cpAccPlan');
+  if (planBox && !document.getElementById('cpAccProg')) planBox.insertAdjacentHTML('beforeend', '<div class="cp-acc-prog" id="cpAccProg"></div>');
+  cbBusyShow('Готовлю папки в ' + label + '...', 0.01);
   Object.keys(dirs).reduce(function (p, d) { return p.then(function () { return CPDisk.ensureDir(d); }); }, Promise.resolve()).then(function () {
-    return cpPool(jobs, 3, function (j) {
-      return CPDisk.uploadBlob(j.path, j.file, true).then(function () { ok.push(j); }, function (e) { failed.push(j.name + ': ' + (e && (e.message || e.status))); })
-        .then(function () {
-          done += j.file.size;
-          cbBusyShow('Загружаю в ' + label + ': ' + (ok.length + failed.length) + ' из ' + jobs.length + ' · ' + (done / 1048576).toFixed(0) + ' из ' + (total / 1048576).toFixed(0) + ' МБ', 0.02 + 0.95 * (total ? done / total : 1));
-        });
+    show();
+    return cpPool(jobs, 3, function (j, i) {
+      now = j.name;
+      return CPDisk.uploadBlob(j.path, j.file, true, function (b) { loaded[i] = b; show(); })
+        .then(function () { loaded[i] = j.file.size; ok.push(j); }, function (e) { loaded[i] = j.file.size; failed.push(j.name + ': ' + (e && (e.message || e.status))); })
+        .then(show);
     });
   }).then(function () {
     cbBusyHide();
@@ -146,13 +163,33 @@ cpAcceptUpload = function () {
     var planEl = document.getElementById('cpAccPlan');
     if (planEl) planEl.innerHTML = '<div class="cp-acc-done">' + cbEsc(msg) + '. Старший ретушёр увидит её в съёмке: фильтр ' + cbEsc(label) + ', галочка «Ретушь готова».</div>';
     if (CP.accept) CP.accept.files = [];
-    if (!CP.shoot && typeof cpScanStages === 'function') cpScanStages();
+    cpReviewPresent(st.name, base);
   }).catch(function (e) {
     cbBusyHide();
+    var go2 = document.querySelector('[data-cp-acc="go"]');
+    if (go2) { go2.disabled = false; go2.textContent = 'Загрузить в ' + label; }
     if (e && e.plain) { cbToast('Сдать ретушь: ' + e.message); return; }
     cpHandleError(e, 'Сдача ретуши');
   });
 };
+
+/**
+ * Съёмка только что появилась в 04 — показать её в фильтре сразу, не дожидаясь
+ * списка папок: Яндекс показывает новую папку в списке не мгновенно. Потом
+ * сверяемся с Диском ещё дважды.
+ */
+function cpReviewPresent(shootName, dir) {
+  var low = String(shootName).toLowerCase();
+  CP.stagePresence = CP.stagePresence || {};
+  CP.stagePaths = CP.stagePaths || {};
+  (CP.stagePresence.review = CP.stagePresence.review || {})[low] = true;
+  var w = CP.stagePaths.review = CP.stagePaths.review || {};
+  if (!(w[low] || []).some(function (p) { return p === dir; })) w[low] = (w[low] || []).concat([dir]);
+  if (CP.shoots) cpRenderShoots();
+  [4000, 15000].forEach(function (ms) {
+    setTimeout(function () { if (typeof cpScanStages === 'function' && CP.shoots) cpScanStages(); }, ms);
+  });
+}
 
 /* в окне сдачи: буква с прошлого раза, кнопка — «Загрузить в 04_…» */
 cpAcceptPlan = (function (orig) {
@@ -278,6 +315,64 @@ cbRenderCards = (function (orig) {
   };
 })(cbRenderCards);
 
+/* ---------- съёмка, открытая из фильтра этапа: только карточки этого этапа ----------
+   Маша, 06.11: «отправила на сайт — карточка должна сразу испариться из этой
+   презентации, её уже не нужно просматривать. В исходниках — не исчезает,
+   остаётся со статусом, чтобы в исходниках можно было всё просмотреть».
+   Открыли съёмку из фильтра 02 / 03 / 04 / 05 — видны карточки, которые
+   сейчас на этом этапе; ушло дальше — пропадает. Из исходников — все. */
+
+CP.viewStage = '';
+
+function cpCardOnStage(card, key) {
+  var m = cpMeta(), cs = m.cardStatus[card.id] && m.cardStatus[card.id].s, del = (m.delivered || {})[card.id];
+  var last = cpLastRv(cpRv()[card.id]), ls = last ? last.status : '';
+  if (key === 'approval') return cs === 'approval';
+  if (key === 'retouch') return cs === 'retouch' && !del && ls !== 'review' && ls !== 'rework';
+  if (key === 'review') return ls === 'review' || ls === 'rework';
+  if (key === 'site') return !!del;
+  return true;
+}
+
+CP.openedHooks = CP.openedHooks || [];
+CP.openedHooks.push(function () {
+  var f = CP.stageFilter || '';
+  CP.viewStage = f && f !== 'select' && typeof CP_STAGE_SETTING !== 'undefined' && CP_STAGE_SETTING[f] ? f : '';
+  CP.rvOnly = false;
+  cbRenderCards();
+});
+
+cbRenderCards = (function (orig) {
+  return function () {
+    var r = orig.apply(this, arguments);
+    if (!CP.shoot) return r;
+    var root = document.getElementById('cbCards');
+    var bar = document.getElementById('cpViewBar');
+    if (!CP.viewStage) { if (bar) bar.remove(); return r; }
+    var key = CP.viewStage, shown = 0;
+    Array.prototype.forEach.call(root.querySelectorAll('.cb-card'), function (el) {
+      var c = cbCardById(el.getAttribute('data-cid'));
+      if (c && !cpCardOnStage(c, key)) el.style.display = 'none';
+      else if (el.style.display !== 'none') shown++;
+    });
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'cpViewBar';
+      bar.className = 'cp-viewbar';
+      var anchor = document.getElementById('cpRvBar') || root;
+      anchor.parentNode.insertBefore(bar, anchor);
+      bar.addEventListener('click', function (e) {
+        if (!e.target.closest('[data-cp-view-all]')) return;
+        CP.viewStage = '';
+        cbRenderCards();
+      });
+    }
+    bar.innerHTML = 'Открыто из <b>' + cbEsc(cpStageLabel(key)) + '</b>: только карточки этого этапа — ' + shown
+      + (shown ? '' : ' (всё отсюда уже ушло дальше)') + ' <button data-cp-view-all="1">Показать все карточки</button>';
+    return r;
+  };
+})(cbRenderCards);
+
 /* ---------- витрина, фильтр «отретушировано»: перетащить папку как на Диск ---------- */
 
 /** Съёмка по имени перетащенной папки: «<съёмка>», «<съёмка>_Y_1», «<съёмка>_отбор_2». */
@@ -304,9 +399,15 @@ cpRenderShoots = (function (orig) {
     var r = orig.apply(this, arguments);
     var root = cpReviewRoot(), list = document.getElementById('cpShelfList');
     if (!list || CP.stageFilter !== 'review' || !root || document.getElementById('cpRvDrop')) return r;
-    list.insertAdjacentHTML('afterbegin', '<div class="cp-rv-drop" id="cpRvDrop">Перетащите сюда папку с готовой ретушью — как на Диск. '
+    list.insertAdjacentHTML('afterbegin', '<div class="cp-rv-drop" id="cpRvDrop">Перетащите сюда папку с готовой ретушью — как на Диск '
+      + '(или <label class="cp-acc-pick">выберите папку<input type="file" id="cpRvDropPick" webkitdirectory multiple hidden></label>). '
       + 'Съёмка найдётся по имени папки (как назывался скачанный архив), файлы лягут в ' + cbEsc(cpFolderBase(root)) + '.</div>');
     var z = document.getElementById('cpRvDrop');
+    var pick = document.getElementById('cpRvDropPick');
+    pick.onchange = function () {
+      cpReviewDrop(Array.prototype.slice.call(pick.files).map(function (f) { return { file: f, rel: f.webkitRelativePath || f.name }; }));
+      pick.value = '';
+    };
     z.addEventListener('dragover', function (e) { e.preventDefault(); z.classList.add('cp-over'); });
     z.addEventListener('dragleave', function () { z.classList.remove('cp-over'); });
     z.addEventListener('drop', function (e) {
@@ -320,7 +421,11 @@ cpRenderShoots = (function (orig) {
 
 (function cpReviewCss() {
   var st = document.createElement('style');
-  st.textContent = '.cp-rv-drop{grid-column:1/-1;border:2px dashed #3a3a37;border-radius:6px;padding:22px 16px;text-align:center;color:#a3a09a;font-size:13px;line-height:1.6}'
+  st.textContent = '.cp-viewbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px;color:#cfcac2;margin:0 0 10px;padding:8px 10px;border:1px solid #3a3a37;border-radius:4px;background:#1a1a18}'
+    + '.cp-viewbar b{color:#e7c9a8}'
+    + '.cp-acc-prog{font-size:12px;color:#cfcac2;display:flex;flex-direction:column;gap:6px;margin-top:10px}'
+    + '.cp-acc-bar{height:8px;background:#232321;border-radius:4px;overflow:hidden}.cp-acc-bar i{display:block;height:100%;background:#C9956B;transition:width .2s}'
+    + '.cp-rv-drop{grid-column:1/-1;border:2px dashed #3a3a37;border-radius:6px;padding:22px 16px;text-align:center;color:#a3a09a;font-size:13px;line-height:1.6}'
     + '.cp-rv-drop.cp-over{border-color:#C9956B;color:#e7c9a8;background:#1d1a17}';
   document.head.appendChild(st);
 })();

@@ -70,7 +70,11 @@ var CPDisk = (function () {
       var headers = {};
       if (opts.auth !== false && token) headers['Authorization'] = 'OAuth ' + token;
       if (opts.contentType) headers['Content-Type'] = opts.contentType;
-      return fetch(url, { method: opts.method || 'GET', headers: headers, body: opts.body })
+      /* списки папок — всегда свежие: браузер не должен отдавать старый ответ из кэша
+         (Маша, 06.11: загрузила в 04 — съёмка появилась только после Cmd+R) */
+      var init = { method: opts.method || 'GET', headers: headers, body: opts.body };
+      if (url.indexOf(API) === 0) init.cache = 'no-store';
+      return fetch(url, init)
         .then(function (resp) {
           if (resp.ok) {
             if (opts.as === 'raw') return resp;
@@ -249,10 +253,22 @@ var CPDisk = (function () {
     }, Promise.resolve());
   }
 
-  function uploadBlob(path, blob, overwrite) {
+  /** Залить файл. onProgress(загружено байт) — по ходу загрузки (XHR: у fetch нет прогресса отправки). */
+  function uploadBlob(path, blob, overwrite, onProgress) {
     return api(ep(path, '/upload'), { path: path, overwrite: overwrite === false ? 'false' : 'true' })
       .then(function (d) {
-        return req(d.href, { method: 'PUT', body: blob, auth: false, as: 'text' });
+        if (!onProgress || typeof XMLHttpRequest === 'undefined') return req(d.href, { method: 'PUT', body: blob, auth: false, as: 'text' });
+        return new Promise(function (resolve, reject) {
+          var x = new XMLHttpRequest();
+          x.open('PUT', d.href);
+          x.upload.onprogress = function (e) { if (e.lengthComputable || e.loaded) onProgress(e.loaded); };
+          x.onload = function () {
+            if (x.status >= 200 && x.status < 300) { onProgress(blob.size); resolve(x.responseText); }
+            else reject(new DiskError(x.status, x.responseText, d.href));
+          };
+          x.onerror = function () { reject(new DiskError(0, 'сеть оборвалась при загрузке', d.href)); };
+          x.send(blob);
+        });
       });
   }
 
