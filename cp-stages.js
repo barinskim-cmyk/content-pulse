@@ -214,7 +214,7 @@ function cpScanStages() {
   return Promise.all(Object.keys(CP_STAGE_SETTING).map(function (key) {
     var root = s[CP_STAGE_SETTING[key]];
     if (!root) return Promise.resolve([key, null]);
-    var names = {};
+    var names = {}, where = {};
     var level = function (paths, depth) {
       if (!paths.length || depth > 3) return Promise.resolve();
       return cpPool(paths, 4, function (p) { return cpListDirs(p); }).then(function (lists) {
@@ -222,19 +222,24 @@ function cpScanStages() {
         lists.forEach(function (ds) {
           (ds || []).forEach(function (x) {
             var bare = x.name.replace(/^(!|\d{1,2})_/, '');
-            if (known[bare.toLowerCase()] || shootLike.test(bare)) names[bare.toLowerCase()] = true;
+            if (known[bare.toLowerCase()] || shootLike.test(bare)) {
+              names[bare.toLowerCase()] = true;
+              (where[bare.toLowerCase()] = where[bare.toLowerCase()] || []).push(x.path);
+            }
             else if (x.name.charAt(0) !== '_') next.push(x.path);
           });
         });
         return level(next, depth + 1);
       });
     };
-    return level([root], 1).then(function () { return [key, names]; }, function () { return [key, null]; });
+    return level([root], 1).then(function () { return [key, names, where]; }, function () { return [key, null, null]; });
   })).then(function (pairs) {
     if (CP.archive !== archive) return;
     CP.stagePresence = {};
-    pairs.forEach(function (kv) { if (kv[1]) CP.stagePresence[kv[0]] = kv[1]; });
+    CP.stagePaths = {};
+    pairs.forEach(function (kv) { if (kv[1]) { CP.stagePresence[kv[0]] = kv[1]; CP.stagePaths[kv[0]] = kv[2]; } });
     cpRenderShoots();
+    if (typeof cpCountStageArts === 'function') cpCountStageArts();
   });
 }
 
@@ -342,16 +347,21 @@ cpRenderShoots = (function (orig) {
       var meta = b.querySelector('.cp-shoot-meta');
       if (!meta || meta.querySelector('.cp-todo')) return;
       var parts = [];
+      /* по папкам этапов (каталог) — где лежат артикулы, видно на полоске; здесь только отбор */
+      var phys = d && typeof cpArtPhys === 'function' && cpArtPhys(d);
       if (!sum) parts.push(d && d.cpSumDone ? '<span class="cp-todo-s">отбора нет</span>' : '<span class="cp-todo-w">считаю…</span>');
       else {
         if (sum.filled === 0) parts.push('<span class="cp-todo-s">отбора нет</span>');
         else if (sum.k[0]) parts.push('<span class="cp-todo-s">в отборе: ' + sum.k[0] + ' арт.</span>');
-        if (sum.k[2]) parts.push('<span class="cp-todo-r">ждут ретушёра: ' + sum.k[2] + ' арт.</span>');
-        if (sum.ap) parts.push('<span class="cp-todo-a">на согласовании: ' + sum.ap + '</span>');
-        if (sum.rv) parts.push('<span class="cp-todo-r">ретушь на проверке: ' + sum.rv + '</span>');
+        if (!phys) {
+          if (sum.k[2]) parts.push('<span class="cp-todo-r">ждут ретушёра: ' + sum.k[2] + ' арт.</span>');
+          if (sum.ap) parts.push('<span class="cp-todo-a">на согласовании: ' + sum.ap + '</span>');
+          if (sum.rv) parts.push('<span class="cp-todo-r">ретушь на проверке: ' + sum.rv + '</span>');
+        }
       }
       if (parts.length) meta.insertAdjacentHTML('beforeend', '<span class="cp-todo">' + parts.join(' · ') + '</span>');
-      if (sum) b.insertAdjacentHTML('beforeend', cpArtBar(sum));
+      if (phys) b.insertAdjacentHTML('beforeend', cpArtBarPhys(sum, phys));
+      else if (sum) b.insertAdjacentHTML('beforeend', cpArtBar(sum));
     });
   };
 })(cpRenderShoots);

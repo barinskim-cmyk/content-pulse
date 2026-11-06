@@ -1153,6 +1153,10 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     FILES.set(K + '/04_САЙТ/01.11/s.jpg', Buffer.from('S'.repeat(30)));
     FILES.set(K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ/k1.jpg', Buffer.from('K'.repeat(60)));
     FILES.set(K + '/02_ОТБОР/2026-11-06_SV_КАТ/k1.jpg', Buffer.from('K'.repeat(60)));
+    /* в ретуши — две папки артикулов, одну ретушёр Y уже забрал */
+    [K + '/03_РЕТУШЬ/2026-11-06_SV_КАТ', K + '/03_РЕТУШЬ/2026-11-06_SV_КАТ/Y_74001_модель', K + '/03_РЕТУШЬ/2026-11-06_SV_КАТ/74002_модель'].forEach(d => DIRS.add(d));
+    FILES.set(K + '/03_РЕТУШЬ/2026-11-06_SV_КАТ/Y_74001_модель/k1.jpg', Buffer.from('K'.repeat(60)));
+    FILES.set(K + '/03_РЕТУШЬ/2026-11-06_SV_КАТ/74002_модель/k2.jpg', Buffer.from('K'.repeat(60)));
     await page.fill('#cpShelfSearch', '');
     await page.click('#cpGear');
     await page.fill('#cpArchiveInput', 'КАТАЛОГ');
@@ -1165,6 +1169,10 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     check('каталог: фильтры = папки (01, 02_ОТБОР, 03, 04_САЙТ — по имени это сайт), нет «отретушировано» — нет фильтра, внутреннего «Отбора» нет',
       /^01_ИСХОДНИКИ\s*\d+02_ОТБОР/.test(st.stages.trim()) && !/Отбор в/.test(st.stages) && /02_ОТБОР\s*1/.test(st.stages) && /03_РЕТУШЬ/.test(st.stages) && /04_САЙТ/.test(st.stages) && !/ОТРЕТУШ|Согласование|ПРОЧЕЕ/.test(st.stages)
       && st.s.approve === K + '/02_ОТБОР' && st.s.retouch === K + '/03_РЕТУШЬ' && st.s.site === K + '/04_САЙТ' && !st.s.retouched, st.stages);
+    await page.evaluate(() => { CP.dict = cpParseDict('[Ретушёры: один]\nY\nU'); return cpCountStageArts(); });
+    await page.waitForFunction(() => { const b = [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(x => x.dataset.name === '2026-11-06_SV_КАТ'); return b && /03_РЕТУШЬ/.test(b.textContent); }, null, { timeout: 8000 }).catch(() => {});
+    const katCard = await page.evaluate(() => { const b = [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(x => x.dataset.name === '2026-11-06_SV_КАТ'); return b ? b.textContent : ''; });
+    check('под съёмкой — где сейчас её артикулы, по папкам: 02_ОТБОР есть, 03_РЕТУШЬ 2 (забрали 1)', /02_ОТБОР есть/.test(katCard) && /03_РЕТУШЬ 2 \(забрали 1\)/.test(katCard) && !/ждут ретушёра/.test(katCard), katCard);
     check('каталог: в шестерёнке — папки и что они значат, отдельные поля этапов скрыты', await page.evaluate(() =>
       document.querySelectorAll('#cpCatBox [data-cp-cat]').length === 6 && document.querySelector('[data-cp-cat="ПРОЧЕЕ"]').value === 'не показывать'
       && document.querySelector('[data-cp-cat="00_АРХИВ"]').value === 'не показывать' && getComputedStyle(document.getElementById('cpRetouchInput')).display === 'none' || !document.getElementById('cpRetouchInput').offsetParent));

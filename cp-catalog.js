@@ -154,6 +154,100 @@ cpStageList = (function (orig) {
   };
 })(cpStageList);
 
+/* ---------- под съёмкой: где сейчас её артикулы (по папкам этапов) ----------
+   Маша, 06.11: «когда мы открываем исходники, наши статусы съёмок — это то,
+   куда ещё скопированы какие-то артикулы отсюда, где они ещё находятся».
+   Считаем по самим папкам: в папке съёмки на этапе — папки артикулов (код в
+   начале имени; буква ретушёра «Y_74595_…» — значит забрали). Нет папок
+   артикулов, а файлы есть — «есть». Отбор и брак — из отбора программы. */
+
+CP.stageArts = {};   /* этап -> {имя съёмки: {код: буква|''} | null — папки артикулов не нашлись} */
+var _cpArtsRun = 0;
+
+function cpCountStageArts() {
+  var run = ++_cpArtsRun, archive = CP.archive;
+  if (!cpCatalog() || !CP.stagePaths) return Promise.resolve();
+  var known = {};
+  (CP.shoots || []).forEach(function (d) { known[d.name.toLowerCase()] = d.name; });
+  var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  var jobs = [];
+  Object.keys(CP.stagePaths).forEach(function (key) {
+    var w = CP.stagePaths[key] || {};
+    Object.keys(w).forEach(function (low) { if (known[low]) jobs.push({ key: key, low: low, name: known[low], paths: w[low] }); });
+  });
+  var fresh = {};
+  return cpPool(jobs, 4, function (j) {
+    var type = typeof cpShootType === 'function' ? cpShootType(j.name) : null;
+    var re = (type && type.codeRe) || /^(\d{4,7})(?!\d)/;
+    var codes = {}, found = false;
+    function walk(paths, depth) {
+      if (!paths.length || depth > 4) return Promise.resolve();
+      return cpPool(paths, 4, function (p) { return cpListDirs(p); }).then(function (lists) {
+        var next = [];
+        lists.forEach(function (ds) {
+          (ds || []).forEach(function (x) {
+            if (x.name.charAt(0) === '_') return;
+            var name = x.name.replace(/^(!|\d{1,2})_(?=\D)/, ''), letter = '';
+            var lm = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(name);
+            if (lm && letters.indexOf(lm[1]) !== -1) { letter = lm[1]; name = lm[2]; }
+            var m = re.exec(name);
+            if (m) { found = true; codes[m[1]] = codes[m[1]] || letter; }
+            else next.push(x.path);
+          });
+        });
+        return walk(next, depth + 1);
+      });
+    }
+    return walk(j.paths, 1).then(function () {
+      (fresh[j.key] = fresh[j.key] || {})[j.low] = found ? codes : null;
+    }, function () { });
+  }).then(function () {
+    if (run !== _cpArtsRun || CP.archive !== archive) return;
+    CP.stageArts = fresh;
+    CP.stageArtsFor = archive;
+    cpRenderShoots();
+  });
+}
+
+/** Где лежат артикулы съёмки: [{key, label, n (-1 — есть, но без папок артикулов), took}] или null. */
+function cpArtPhys(d) {
+  if (!cpCatalog() || CP.stageArtsFor !== CP.archive) return null;
+  var low = d.name.toLowerCase(), out = [];
+  ['approval', 'retouch', 'review', 'site'].forEach(function (key) {
+    if (!(CP.settings && CP.settings[CP_STAGE_SETTING[key]])) return;
+    var pres = CP.stagePresence[key] && CP.stagePresence[key][low];
+    if (!pres) return;
+    var c = (CP.stageArts[key] || {})[low];
+    var codes = c ? Object.keys(c) : [];
+    out.push({ key: key, label: cpStageLabel(key), n: c ? codes.length : -1, took: c ? codes.filter(function (k) { return c[k]; }).length : 0 });
+  });
+  return out;
+}
+
+var CP_PHYS_CLS = { approval: 'k2', retouch: 'k3', review: 'k7', site: 'k5' };
+
+function cpArtBarPhys(sum, phys) {
+  var n = sum ? sum.k.reduce(function (a, b) { return a + b; }, 0) : 0;
+  var placed = phys.reduce(function (a, x) { return a + Math.max(0, x.n); }, 0);
+  var brak = sum ? sum.k[6] : 0;
+  var line = '';
+  if (n || placed) {
+    var rest = Math.max(0, n - placed - brak);
+    line = '<div class="cp-artbar-line">' + (rest ? '<i class="cp-k1" style="flex:' + rest + '" title="только в исходниках: ' + rest + '"></i>' : '')
+      + phys.map(function (x) { return x.n > 0 ? '<i class="cp-' + CP_PHYS_CLS[x.key] + '" style="flex:' + x.n + '" title="' + cbEsc(x.label) + ': ' + x.n + '"></i>' : ''; }).join('')
+      + (brak ? '<i class="cp-k6" style="flex:' + brak + '" title="брак: ' + brak + '"></i>' : '') + '</div>';
+  }
+  var leg = [];
+  if (n) leg.push('артикулов ' + n);
+  if (sum && sum.filled) leg.push('<span><i class="cp-k1"></i>отобрано <b>' + sum.filled + '</b></span>');
+  phys.forEach(function (x) {
+    leg.push('<span><i class="cp-' + CP_PHYS_CLS[x.key] + '"></i>' + cbEsc(x.label) + ' <b>' + (x.n < 0 ? 'есть' : x.n) + '</b>' + (x.took ? ' (забрали ' + x.took + ')' : '') + '</span>');
+  });
+  if (brak) leg.push('<span><i class="cp-k6"></i>брак <b>' + brak + '</b></span>');
+  if (!leg.length) return '';
+  return '<div class="cp-artbar">' + line + '<div class="cp-artbar-leg">' + leg.join(' · ') + '</div></div>';
+}
+
 /* ---------- шестерёнка: папки каталога и что они значат ---------- */
 
 function cpCatRender() {
