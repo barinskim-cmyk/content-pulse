@@ -940,14 +940,15 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
 
   /* витрина: что нужно сделать — Отбор / Ретушь / Согласование (сводка в свойствах папки съёмки) */
   {
-    const mk = (name, status, cardStatus) => {
+    const mk = (name, status, cardStatus, delivered) => {
       const dir = 'disk:/Архив/' + name;
       DIRS.add(dir);
       FILES.set(dir + '/x.jpg', Buffer.from('X'.repeat(50)));
       FILES.set(dir + '/_contentpulse.json', Buffer.from(JSON.stringify({ app: 'cardboard', version: 3, name, nextId: 5,
         photos: [{ id: 'p1', name: 'x.jpg', disk: dir + '/x.jpg' }], cards: [{ id: 'c1', title: 'K', mode: 'auto', pids: ['p1'] }], containers: [], templates: [],
-        meta: { cp: { status: status ? { p1: { s: status, by: 't', ts: '2026-11-06T10:00:00Z', card: 'c1' } } : {}, cardStatus: cardStatus ? { c1: { s: cardStatus, by: 't', ts: '2026-11-06T10:00:00Z' } } : {}, downloads: {}, likes: {}, folderTags: {}, events: [] } } })));
+        meta: { cp: { status: status ? { p1: { s: status, by: 't', ts: '2026-11-06T10:00:00Z', card: 'c1' } } : {}, cardStatus: cardStatus ? { c1: { s: cardStatus, by: 't', ts: '2026-11-06T10:00:00Z' } } : {}, downloads: {}, likes: {}, folderTags: {}, events: [], delivered: delivered ? { c1: { files: 1, letter: 'Y', date: '06.11.2026' } } : {} } } })));
     };
+    mk('2026-11-04_СДАНА', 'retouch', 'retouch', true);
     mk('2026-11-05_ЖДЁТ_РЕТУШИ', 'retouch', 'retouch');
     mk('2026-11-05_ЖДЁТ_СОГЛАСОВАНИЯ', 'approval', 'approval');
     PROPS.delete('disk:/Архив/LM-1043');
@@ -970,6 +971,15 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
       return /ретушь: 1/.test(row('2026-11-05_ЖДЁТ_РЕТУШИ').textContent) && /отбора нет/.test(row('LM-2001').textContent);
     }));
     check('счётчики на кнопках фильтра', /Ретушь\s*\d+/.test(await page.textContent('#cpStages')), await page.textContent('#cpStages'));
+    const fr = await shownFor('fresh'), wk = await shownFor('work'), dn = await shownFor('done');
+    check('готовность: «Не начаты» — LM-2001, «В работе» — ждёт ретуши, «Сданы» — сданная', fr.includes('LM-2001') && !fr.includes('2026-11-04_СДАНА')
+      && wk.includes('2026-11-05_ЖДЁТ_РЕТУШИ') && !wk.includes('2026-11-04_СДАНА') && dn.includes('2026-11-04_СДАНА') && !dn.includes('LM-2001'), JSON.stringify([fr, wk, dn]));
+    await page.click('[data-cp-stage=""]');
+    check('полоски готовности под съёмкой: отбор, ретушь, сдано', await page.evaluate(() => {
+      var row = n => [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === n);
+      var t = row('2026-11-04_СДАНА').querySelector('.cp-rbars');
+      return t && /отбор 1\/1/.test(t.textContent) && /ретушь 1\/1/.test(t.textContent) && /сдано 1\/1/.test(t.textContent) && !row('LM-2001').querySelector('.cp-rbars');
+    }));
     await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-stages.png') });
     await page.fill('#cpShelfSearch', '1043');
     await page.evaluate(() => cpRenderShoots());

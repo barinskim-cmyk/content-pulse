@@ -17,6 +17,11 @@
                     или есть пустые карточки товара (артикулы без кадров);
      Ретушь       — есть кадры на ретуши, которые ещё не скачали;
      Согласование — есть карточки или кадры «на согласовании».
+   Готовность (второй ряд фильтров и полоски под съёмкой):
+     Не начаты — отбора нет; Сданы — все карточки с кадрами сданы в
+     «Сайт» и нет пустых карточек товара; В работе — всё остальное.
+     Полоски: отбор (карточки товара с кадрами из всех), ретушь (карточки
+     на ретуши из карточек с кадрами), сдано (сданные из них же).
    ============================================================ */
 
 var CP_SUM_KEY = 'cp_sum';
@@ -28,13 +33,14 @@ function cpShootSummary(data) {
   data = data || {};
   var cp = (data.meta || {}).cp || {};
   var status = cp.status || {}, cardStatus = cp.cardStatus || {}, dl = cp.downloads || {}, del = cp.delivered || {};
-  var s = { cards: 0, filled: 0, empty: 0, rt: 0, ra: 0, ap: 0, rs: 0, del: Object.keys(del).length };
+  var s = { cards: 0, filled: 0, empty: 0, rt: 0, ra: 0, ap: 0, rs: 0, del: Object.keys(del).length, rc: 0 };
   (data.cards || []).forEach(function (c) {
     s.cards++;
     var pids = c.mode === 'auto' ? (c.pids || []) : (c.slots || []).map(function (x) { return x.pid; }).filter(Boolean);
     if (pids.length) s.filled++;
     else if (c.cpArticle || c.cpAuto) s.empty++;
     if (cardStatus[c.id] && cardStatus[c.id].s === 'approval') s.ap++;
+    if (pids.length && cardStatus[c.id] && cardStatus[c.id].s === 'retouch') s.rc++;
   });
   Object.keys(status).forEach(function (pid) {
     var st = status[pid].s;
@@ -47,23 +53,27 @@ function cpShootSummary(data) {
 }
 
 function cpSumEncode(s) {
-  return 'v1;n=' + s.cards + ';f=' + s.filled + ';e=' + s.empty + ';rt=' + s.rt + ';ra=' + s.ra + ';ap=' + s.ap + ';rs=' + s.rs + ';d=' + s.del;
+  return 'v1;n=' + s.cards + ';f=' + s.filled + ';e=' + s.empty + ';rt=' + s.rt + ';ra=' + s.ra + ';ap=' + s.ap + ';rs=' + s.rs + ';d=' + s.del + ';rc=' + s.rc;
 }
 
 function cpSumDecode(str) {
   if (!str || !/^v1;/.test(str)) return null;
   var m = {};
   str.split(';').slice(1).forEach(function (kv) { var p = kv.split('='); m[p[0]] = +p[1] || 0; });
-  return { cards: m.n || 0, filled: m.f || 0, empty: m.e || 0, rt: m.rt || 0, ra: m.ra || 0, ap: m.ap || 0, rs: m.rs || 0, del: m.d || 0 };
+  return { cards: m.n || 0, filled: m.f || 0, empty: m.e || 0, rt: m.rt || 0, ra: m.ra || 0, ap: m.ap || 0, rs: m.rs || 0, del: m.d || 0, rc: m.rc || 0 };
 }
 
 /** Что нужно сделать: {select, retouch, approval}; none — отбора ещё нет */
 function cpStagesOf(sum) {
   if (!sum) return null;
+  var done = sum.filled > 0 && sum.del >= sum.filled && !sum.empty;
   return {
     select: sum.filled === 0 || sum.empty > 0,
     retouch: sum.rt > 0,
-    approval: sum.ap > 0
+    approval: sum.ap > 0,
+    fresh: sum.filled === 0,
+    work: sum.filled > 0 && !done,
+    done: done
   };
 }
 
@@ -103,14 +113,17 @@ function cpSumOf(d) {
 function cpStagesFor(d) {
   var sum = cpSumOf(d);
   if (sum) return cpStagesOf(sum);
-  return d.cpSumDone ? { select: true, retouch: false, approval: false } : null;
+  return d.cpSumDone ? { select: true, retouch: false, approval: false, fresh: true, work: false, done: false } : null;
 }
 
 var CP_STAGES = [
   { key: '', label: 'Все' },
   { key: 'select', label: 'Отбор' },
   { key: 'retouch', label: 'Ретушь' },
-  { key: 'approval', label: 'Согласование' }
+  { key: 'approval', label: 'Согласование' },
+  { key: 'fresh', label: 'Не начаты', sep: true },
+  { key: 'work', label: 'В работе' },
+  { key: 'done', label: 'Сданы' }
 ];
 
 (function cpStageBar() {
@@ -135,14 +148,16 @@ function cpRenderStageBar() {
   if (!box) return;
   var hide = CP.settings && CP.settings.retouch;
   var shoots = (CP.shoots || []).filter(function (d) { return d.path !== hide; });
-  var counts = { '': shoots.length, select: 0, retouch: 0, approval: 0 }, pending = 0;
+  var keys = ['select', 'retouch', 'approval', 'fresh', 'work', 'done'];
+  var counts = { '': shoots.length }, pending = 0;
+  keys.forEach(function (k) { counts[k] = 0; });
   shoots.forEach(function (d) {
     var st = cpStagesFor(d);
     if (!st) { pending++; return; }
-    ['select', 'retouch', 'approval'].forEach(function (k) { if (st[k]) counts[k]++; });
+    keys.forEach(function (k) { if (st[k]) counts[k]++; });
   });
   box.innerHTML = CP_STAGES.map(function (s) {
-    return '<button data-cp-stage="' + s.key + '"' + (CP.stageFilter === s.key ? ' class="cp-on"' : '') + '>' + s.label
+    return (s.sep ? '<span class="cp-stages-sep"></span>' : '') + '<button data-cp-stage="' + s.key + '"' + (CP.stageFilter === s.key ? ' class="cp-on"' : '') + '>' + s.label
       + ' <small>' + counts[s.key] + '</small></button>';
   }).join('') + (pending ? '<small class="cp-stages-wait" title="Съёмки без сводки: читаю их отборы">считаю ' + pending + '…</small>' : '');
 }
@@ -177,9 +192,25 @@ cpRenderShoots = (function (orig) {
         if (sum.del) parts.push('<span class="cp-todo-d">сдано: ' + sum.del + '</span>');
       }
       if (parts.length) meta.insertAdjacentHTML('beforeend', '<span class="cp-todo">' + parts.join(' · ') + '</span>');
+      if (sum && sum.filled) b.insertAdjacentHTML('beforeend', cpReadyBars(sum));
     });
   };
 })(cpRenderShoots);
+
+/** Полоски готовности: отбор, ретушь, сдано; брак — красным числом. */
+function cpReadyBars(sum) {
+  var bar = function (label, done, total, title) {
+    var pct = total ? Math.min(100, Math.round(done / total * 100)) : 0;
+    return '<span class="cp-rb" title="' + cbEsc(title) + '"><i style="width:' + pct + '%"></i><em>' + label + ' ' + done + '/' + total + '</em></span>';
+  };
+  var prod = sum.filled + sum.empty;
+  return '<div class="cp-rbars">'
+    + bar('отбор', sum.empty ? prod - sum.empty : sum.filled, sum.empty ? prod : sum.filled, sum.empty ? 'Карточки товара с кадрами из всех' : 'Карточки с кадрами')
+    + bar('ретушь', sum.rc, sum.filled, 'Карточки на ретуши из карточек с кадрами')
+    + bar('сдано', Math.min(sum.del, sum.filled), sum.filled, 'Карточки, сданные в «Сайт», из карточек с кадрами')
+    + (sum.rs ? '<span class="cp-rb-bad" title="Кадров в браке (пересъём)">брак ' + sum.rs + '</span>' : '')
+    + '</div>';
+}
 
 /* ---------- фон: сводка для съёмок, где её ещё нет ---------- */
 
@@ -220,6 +251,12 @@ document.getElementById('cpShelfRefresh').onclick = function () { cpLoadShoots()
     + '.cp-stages button small{color:#a3a09a;margin-left:2px}'
     + '.cp-stages button.cp-on{border-color:#C9956B;color:#e7c9a8}'
     + '.cp-stages-wait{color:#a3a09a;font-size:11px;align-self:center;margin-left:4px}'
+    + '.cp-stages-sep{width:1px;background:#2f2f2c;margin:0 4px}'
+    + '.cp-rbars{display:flex;gap:6px;margin-top:8px;align-items:center}'
+    + '.cp-rb{position:relative;flex:1;height:14px;background:#232321;border-radius:2px;overflow:hidden}'
+    + '.cp-rb i{position:absolute;left:0;top:0;bottom:0;background:#3d5a40}'
+    + '.cp-rb em{position:relative;font-style:normal;font-size:9px;line-height:14px;padding-left:5px;color:#cfcac2;font-family:"IBM Plex Mono",monospace;white-space:nowrap}'
+    + '.cp-rb-bad{font-size:10px;color:#f2b8a0;white-space:nowrap}'
     + '.cp-todo{display:block;margin-top:3px;white-space:normal}.cp-todo span{white-space:nowrap}.cp-todo-s{color:#cfcac2}.cp-todo-r{color:#e7c9a8}.cp-todo-a{color:#a9c3e0}.cp-todo-d{color:#9fc2a3}.cp-todo-w{color:#6d6d6c}';
   var st = document.createElement('style');
   st.textContent = css;
