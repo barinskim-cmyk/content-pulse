@@ -55,12 +55,14 @@ const VD_RE = /^(vd:[^:\/]+:)disk:/;
 function isVd(p) { return VD_RE.test(String(p || '')); }
 function rootOf(p) { const m = VD_RE.exec(String(p || '')); return m ? m[1] + 'disk:' : 'disk:'; }
 
-async function disk(token, method, endpoint, params) {
+async function disk(token, method, endpoint, params, body) {
   if (endpoint.indexOf('/resources') === 0 && params && (isVd(params.path) || isVd(params.from))) endpoint = '/virtual-disks' + endpoint;
   const qs = new URLSearchParams(params || {}).toString();
   const url = API + endpoint + (qs ? '?' + qs : '');
   for (let attempt = 0; ; attempt++) {
-    const r = await fetch(url, { method, headers: { Authorization: 'OAuth ' + token, Accept: 'application/json' } });
+    const headers = { Authorization: 'OAuth ' + token, Accept: 'application/json' };
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    const r = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
     const text = await r.text();
     if ([423, 429, 500, 502, 503, 504].includes(r.status) && attempt < 4) {
       await sleep(500 * Math.pow(2, attempt));
@@ -853,6 +855,21 @@ module.exports.handler = async function (event) {
       const items = Array.isArray(req.items) ? req.items.slice(0, 1000) : [];
       const r = await doCopy(token, items, Array.isArray(req.dirs) ? req.dirs.slice(0, 200) : []);
       return json(r.status, r.result, h);
+    }
+
+    /* сводка съёмки в свойствах её папки (custom_properties, до 1024 знаков):
+       витрина получает её тем же запросом, что и список съёмок */
+    if (a === 'props') {
+      if (event.httpMethod !== 'POST') return json(405, { error: 'Нужен POST' }, h);
+      let body = event.body || '';
+      if (event.isBase64Encoded) body = Buffer.from(body, 'base64').toString('utf8');
+      let req;
+      try { req = JSON.parse(body); } catch (e) { return json(400, { error: 'Тело не JSON' }, h); }
+      if (!req.path || !req.props || typeof req.props !== 'object') return json(400, { error: 'Нужны path и props' }, h);
+      const props = {};
+      Object.keys(req.props).slice(0, 20).forEach(k => { const v = req.props[k]; props[k] = v === null ? null : String(v).slice(0, 900); });
+      const r = await disk(token, 'PATCH', '/resources', { path: req.path }, { custom_properties: props });
+      return json(r.status === 200 ? 200 : r.status, r.status === 200 ? { ok: true } : { error: r.data.message || r.data.description || 'не записано' }, h);
     }
 
     return json(400, { error: 'Неизвестное действие: ' + a }, h);

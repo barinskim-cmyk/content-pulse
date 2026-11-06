@@ -58,9 +58,10 @@ const PREVIEW_CALLS = { single: 0, batch: 0, big: 0 };
 /* режим «превью заблокировано»: файлы — настоящие картинки, их будут уменьшать в браузере */
 if (process.env.BLOCK_PREVIEW) for (const k of [...FILES.keys()]) FILES.set(k, png(60, 40));
 const md5 = (b) => require('crypto').createHash('md5').update(b).digest('hex');
+const PROPS = new Map();   /* custom_properties папок (сводка съёмки) */
 const meta = (p) => {
   const name = p.split('/').pop();
-  if (DIRS.has(p)) return { path: p, name, type: 'dir', modified: '2026-11-0' + (p.length % 9) + 'T10:00:00+00:00' };
+  if (DIRS.has(p)) return { path: p, name, type: 'dir', modified: '2026-11-0' + (p.length % 9) + 'T10:00:00+00:00', ...(PROPS.has(p) ? { custom_properties: PROPS.get(p) } : {}) };
   const b = FILES.get(p);
   return { path: p, name, type: 'file', size: b.length, md5: md5(b), modified: '2026-11-04T10:00:00+00:00',
     preview: 'https://downloader.disk.yandex.ru/preview/x?p=' + encodeURIComponent(p) };
@@ -131,6 +132,12 @@ async function route(r) {
       if (q.size === '2400x2400') PREVIEW_CALLS.big++; else PREVIEW_CALLS.single++;
       if (process.env.BLOCK_PREVIEW) return json(502, { error: 'blocked' });
       return r.fulfill({ status: 200, headers: { ...CORS, 'content-type': 'image/png' }, body: png(30, 20) });
+    }
+    if (q.a === 'props' && m === 'POST') {
+      const b = JSON.parse(req.postData() || '{}');
+      if (!DIRS.has(b.path)) return json(404, { error: 'нет папки' });
+      PROPS.set(b.path, Object.assign({}, PROPS.get(b.path) || {}, b.props));
+      return json(200, { ok: true });
     }
     if (q.a === 'file') {
       if (process.env.FAIL_STATE_DL && /_contentpulse\.json$/.test(q.path)) return json(502, { error: 'fail' });
@@ -930,6 +937,43 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   await page.fill('#cpShelfSearch', '1043');
 
   check('служебная папка не видна на витрине', await page.evaluate(() => CP.shoots.every(s => s.name.charAt(0) !== '_')));
+
+  /* витрина: что нужно сделать — Отбор / Ретушь / Согласование (сводка в свойствах папки съёмки) */
+  {
+    const mk = (name, status, cardStatus) => {
+      const dir = 'disk:/Архив/' + name;
+      DIRS.add(dir);
+      FILES.set(dir + '/x.jpg', Buffer.from('X'.repeat(50)));
+      FILES.set(dir + '/_contentpulse.json', Buffer.from(JSON.stringify({ app: 'cardboard', version: 3, name, nextId: 5,
+        photos: [{ id: 'p1', name: 'x.jpg', disk: dir + '/x.jpg' }], cards: [{ id: 'c1', title: 'K', mode: 'auto', pids: ['p1'] }], containers: [], templates: [],
+        meta: { cp: { status: status ? { p1: { s: status, by: 't', ts: '2026-11-06T10:00:00Z', card: 'c1' } } : {}, cardStatus: cardStatus ? { c1: { s: cardStatus, by: 't', ts: '2026-11-06T10:00:00Z' } } : {}, downloads: {}, likes: {}, folderTags: {}, events: [] } } })));
+    };
+    mk('2026-11-05_ЖДЁТ_РЕТУШИ', 'retouch', 'retouch');
+    mk('2026-11-05_ЖДЁТ_СОГЛАСОВАНИЯ', 'approval', 'approval');
+    PROPS.delete('disk:/Архив/LM-1043');
+    await page.evaluate(() => cpShowShelf());
+    await page.fill('#cpShelfSearch', '');
+    await page.evaluate(() => cpRenderShoots());
+    await page.waitForFunction(() => document.getElementById('cpStages') && !document.querySelector('.cp-stages-wait') && CP.shoots.length > 3, null, { timeout: 20000 }).catch(() => {});
+    check('сводка съёмок без неё — посчитана в фоне и записана в свойства папок', PROPS.has('disk:/Архив/LM-1043') && /^v1;/.test(PROPS.get('disk:/Архив/LM-1043').cp_sum)
+      && /rt=1/.test((PROPS.get('disk:/Архив/2026-11-05_ЖДЁТ_РЕТУШИ') || {}).cp_sum || ''), JSON.stringify([...PROPS.entries()]));
+    const shownFor = async key => { await page.click('[data-cp-stage="' + key + '"]'); return page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-shoot')].map(b => b.dataset.name)); };
+    const rt = await shownFor('retouch');
+    check('фильтр «Ретушь»: есть съёмка с нескачанной ретушью, нет съёмки на согласовании', rt.includes('2026-11-05_ЖДЁТ_РЕТУШИ') && !rt.includes('2026-11-05_ЖДЁТ_СОГЛАСОВАНИЯ'), rt.join(' | '));
+    const ap = await shownFor('approval');
+    check('фильтр «Согласование»', ap.includes('2026-11-05_ЖДЁТ_СОГЛАСОВАНИЯ') && !ap.includes('2026-11-05_ЖДЁТ_РЕТУШИ'), ap.join(' | '));
+    const sl = await shownFor('select');
+    check('фильтр «Отбор»: съёмки без отбора (LM-2001) — тут, готовые — нет', sl.includes('LM-2001') && !sl.includes('2026-11-05_ЖДЁТ_РЕТУШИ'), sl.join(' | '));
+    await page.click('[data-cp-stage=""]');
+    check('под съёмкой — что ждёт: «ретушь: 1», «отбора нет»', await page.evaluate(() => {
+      var row = n => [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === n);
+      return /ретушь: 1/.test(row('2026-11-05_ЖДЁТ_РЕТУШИ').textContent) && /отбора нет/.test(row('LM-2001').textContent);
+    }));
+    check('счётчики на кнопках фильтра', /Ретушь\s*\d+/.test(await page.textContent('#cpStages')), await page.textContent('#cpStages'));
+    await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-stages.png') });
+    await page.fill('#cpShelfSearch', '1043');
+    await page.evaluate(() => cpRenderShoots());
+  }
 
   check('загрузки архивов уходят без Referer', DOWNLOADS_REFERER.length === 0, DOWNLOADS_REFERER.join(' | '));
   check('без ошибок JS на странице', errors.length === 0, errors.join(' | '));

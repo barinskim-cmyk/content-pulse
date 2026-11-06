@@ -353,6 +353,11 @@ var CPDisk = (function () {
     return proxyReq({ a: 'previews' }, { method: 'POST', body: { paths: paths, size: size || 'XL' }, as: 'json' });
   }
   /** items: [{from, path}], dirs: [папки создать заранее] -> {results:[{from, status}]} */
+  /** Свойства папки (сводка съёмки): {cp_sum: '...'}; null — удалить ключ. */
+  function proxyProps(path, props) {
+    return proxyReq({ a: 'props' }, { method: 'POST', body: { path: path, props: props }, as: 'json' });
+  }
+
   function proxyCopy(items, dirs) {
     return proxyReq({ a: 'copy' }, { method: 'POST', body: { items: items, dirs: dirs || [] }, as: 'json' });
   }
@@ -391,7 +396,7 @@ var CPDisk = (function () {
     setToken: function (t) { token = t || ''; },
     setProxy: function (u) { proxy = (u || '').replace(/\/+$/, ''); },
     hasProxy: function () { return !!proxy; },
-    proxyPreview: proxyPreview, proxyPreviews: proxyPreviews, proxyDlTest: proxyDlTest, proxyZip: proxyZip, proxyBench: proxyBench, proxyMpu: proxyMpu, proxyFile: proxyFile, proxyCopy: proxyCopy,
+    proxyPreview: proxyPreview, proxyPreviews: proxyPreviews, proxyDlTest: proxyDlTest, proxyZip: proxyZip, proxyBench: proxyBench, proxyMpu: proxyMpu, proxyFile: proxyFile, proxyCopy: proxyCopy, proxyProps: proxyProps,
     hasToken: function () { return !!token; },
     isPhoto: function (name) { return PHOTO_RE.test(name || ''); },
     DiskError: DiskError,
