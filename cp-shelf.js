@@ -127,25 +127,51 @@ var _cpSvcList = null;
 /* Служебная папка переехала из корня Диска к архиву: один раз копируем
    туда файлы настроек из старой (копия на стороне Яндекса, старая остаётся). */
 var _cpMigrateP = null;
+/* Файлы настроек переезжают сами, когда служебная папка меняется (архив
+   выбрали в другом месте, например на общем диске компании): из прежней
+   служебной папки и из старой disk:/_ContentPulse берём .txt, которых в
+   новой ещё нет. Копируем чтением и записью — так файлы переезжают и между
+   личным Диском и общим диском. настройки.txt между разными дисками не
+   переносим: в нём папка ретуши, а она должна быть на том же диске, что
+   и архив — её задают заново в шестерёнке. */
 function cpMigrateService() {
   var dir = CP_CONFIG.serviceDir.replace(/\/+$/, '');
-  if (dir === CP_LEGACY_SERVICE) return Promise.resolve();
   if (_cpMigrateP && _cpMigrateP.dir === dir) return _cpMigrateP;
   var none = function (e) { if (e && e.status === 404) return []; throw e; };
-  var p = Promise.all([CPDisk.listDir(dir).catch(none), CPDisk.listDir(CP_LEGACY_SERVICE).catch(none)]).then(function (r) {
+  var sources = [cpGet('cp_prev_service', ''), CP_LEGACY_SERVICE].map(function (x) { return String(x || '').replace(/\/+$/, ''); })
+    .filter(function (x, i, a) { return x && x !== dir && a.indexOf(x) === i; });
+  if (!sources.length) return Promise.resolve();
+  var p = Promise.all([CPDisk.listDir(dir).catch(none)].concat(sources.map(function (src) { return CPDisk.listDir(src).catch(none); }))).then(function (r) {
     var have = {};
     r[0].forEach(function (x) { have[x.name] = true; });
-    var items = r[1].filter(function (x) { return x.type === 'file' && /\.txt$/i.test(x.name) && !have[x.name]; })
-      .map(function (x) { return { from: x.path, path: dir + '/' + x.name }; });
+    var items = [];
+    sources.forEach(function (src, si) {
+      var crossDisk = CPDisk.rootOf(src) !== CPDisk.rootOf(dir);
+      r[si + 1].forEach(function (x) {
+        if (x.type !== 'file' || !/\.txt$/i.test(x.name) || have[x.name]) return;
+        if (crossDisk && x.name === CP_SETTINGS_FILE) return;
+        have[x.name] = true;
+        items.push({ from: x.path, path: dir + '/' + x.name, name: x.name });
+      });
+    });
     if (!items.length) return;
-    return CPDisk.proxyCopy(items, [dir]).then(function (out) {
-      var ok = (out.results || []).filter(function (x) { return x.status === 'done' || x.status === 'exists'; }).length;
+    return CPDisk.ensureDir(dir).then(function () {
+      return Promise.all(items.map(function (it) {
+        return CPDisk.proxyFile(it.from).then(function (b) { return CPDisk.uploadBlob(it.path, b, false); })
+          .then(function () { return it.name; }, function (e) {
+            if (e && e.status === 409) return it.name;
+            if (window.console) console.warn('[CP] не перенёсся файл настроек', it.from, e && (e.body || e.message));
+            return null;
+          });
+      }));
+    }).then(function (done) {
+      var moved = done.filter(Boolean);
       /* Диск показывает новые файлы в списке не сразу — список задаём сами */
       var names = {};
       r[0].forEach(function (x) { names[x.name] = true; });
-      items.forEach(function (x) { names[x.path.split('/').pop()] = true; });
+      moved.forEach(function (n) { names[n] = true; });
       _cpSvcList = { ts: Date.now(), p: Promise.resolve(names) };
-      if (ok) cbToast('Файлы настроек перенесены в ' + dir.replace(/^disk:/, ''));
+      if (moved.length) cbToast('Файлы настроек перенесены в ' + CPDisk.showPath(dir) + ': ' + moved.join(', '));
     });
   }).catch(function (e) { if (window.console) console.warn('[CP] перенос служебной папки', e && (e.body || e.message)); });
   p.dir = dir;
@@ -250,7 +276,7 @@ function cpCreateDict() {
     return CPDisk.uploadBlob(cpServicePath(CP_TAGS_FILE), new Blob([CP_DICT_TEMPLATE], { type: 'text/plain' }), false);
   }).then(function () {
     cbBusyHide();
-    cbToast('Словарь создан: ' + cpServicePath(CP_TAGS_FILE).replace(/^disk:/, '') + ' — свои теги впишите в «Файлы настроек»');
+    cbToast('Словарь создан: ' + CPDisk.showPath(cpServicePath(CP_TAGS_FILE)) + ' — свои теги впишите в «Файлы настроек»');
     _cpSvcList = null;
     CP.dict = cpParseDict(CP_DICT_TEMPLATE);   /* сразу, не ждём, пока Диск покажет файл в списке */
   }).then(cpRenderPanel).catch(function (e) { cpHandleError(e, 'Не удалось создать словарь'); });
@@ -366,7 +392,7 @@ function cpSettingsToUi() {
     var btn = this;
     btn.disabled = true;
     cpSaveSetting('ретушь', v).then(function () {
-      cbToast(v ? 'Папка ретуши: ' + v.replace(/^disk:/, '') + ' (внутри — папки съёмок)' : 'Ретушь копируется в папку «Ретушь» внутри съёмки');
+      cbToast(v ? 'Папка ретуши: ' + CPDisk.showPath(v) + ' (внутри — папки съёмок)' : 'Ретушь копируется в папку «Ретушь» внутри съёмки');
     }).catch(function (e) { cpHandleError(e, 'Не удалось сохранить настройку'); })
       .then(function () { btn.disabled = false; });
   };

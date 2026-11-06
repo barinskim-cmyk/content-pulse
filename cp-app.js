@@ -16,7 +16,7 @@
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.39';
+var CP_VERSION = '2.0.40';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -73,8 +73,9 @@ function cpSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { } }
 var CP_LEGACY_SERVICE = 'disk:/_ContentPulse';
 function cpServiceDirFor(archive) {
   var a = String(archive || '').replace(/\/+$/, '');
+  var root = CPDisk.rootOf(a);   /* 'disk:' или 'vd:<метка>:disk:' — общий диск */
   var i = a.lastIndexOf('/');
-  var parent = i > 'disk:'.length ? a.slice(0, i) : 'disk:';
+  var parent = i > root.length ? a.slice(0, i) : root;
   return parent + '/_ContentPulse';
 }
 CP_CONFIG.serviceDir = cpServiceDirFor(cpGet('cp_archive', CP_CONFIG.defaultArchive));
@@ -331,14 +332,19 @@ function cpShowShelf() {
 
 function cpLoadShoots() {
   var list = document.getElementById('cpShelfList');
-  list.innerHTML = '<div class="cp-empty">Загружаю съёмки из ' + cbEsc(CP.archive) + '...</div>';
+  list.innerHTML = '<div class="cp-empty">Загружаю съёмки из ' + cbEsc(CPDisk.showPath(CP.archive)) + '...</div>';
   return CPDisk.listShoots(CP.archive).then(function (dirs) {
     CP.shoots = dirs;
     cpRenderShoots();
   }, function (e) {
     if (e.status === 404) {
-      list.innerHTML = '<div class="cp-empty">Папка ' + cbEsc(CP.archive)
-        + ' не найдена на Диске. Укажите путь к архиву выше, например disk:/Архив</div>';
+      list.innerHTML = '<div class="cp-empty">Папка ' + cbEsc(CPDisk.showPath(CP.archive))
+        + ' не найдена на Диске. Откройте папку архива на Яндекс Диске в браузере и вставьте адрес из адресной строки в «Архив съёмок» (шестерёнка) — подходит и личный Диск, и общий диск компании</div>';
+      return;
+    }
+    if (e.status === 403 && CPDisk.isVd(CP.archive)) {
+      list.innerHTML = '<div class="cp-empty">Нет доступа к общему диску: у вашего аккаунта нет прав на чтение этого общего диска, '
+        + 'или вход в Content Pulse был до того, как их выдали. Попросите администратора Яндекс 360 дать доступ, затем «Выйти» и войти снова.</div>';
       return;
     }
     cpHandleError(e, 'Не удалось прочитать архив');
@@ -353,6 +359,14 @@ function cpLoadShoots() {
 function cpNormArchive(raw) {
   var v = String(raw || '').trim();
   if (!v) return '';
+  /* общий диск Яндекс 360: адрес из браузера …/client/aa/d_<метка>/<папки>
+     (в документации — …/vd/<метка>/…) или уже готовый путь vd:<метка>:disk:/… */
+  var vd = /\/client\/(?:aa|vd)\/(?:d_)?([A-Za-z0-9_-]+)\/?([^?#]*)/.exec(v) || /^vd:([^:\/]+):disk:\/?(.*)$/.exec(v);
+  if (vd) {
+    var rest = vd[2];
+    try { rest = decodeURIComponent(rest); } catch (e) { }
+    return 'vd:' + vd[1] + ':disk:/' + rest.replace(/^\/+|\/+$/g, '');
+  }
   var m = /\/client\/disk\/?(.*)$/.exec(v);
   if (m) v = m[1].split(/[?#]/)[0];
   try { v = decodeURIComponent(v); } catch (e) { }
@@ -404,6 +418,8 @@ document.getElementById('cpArchiveApply').onclick = function () {
   cpSet('cp_archive', v);
   var sd = cpServiceDirFor(v);
   if (sd !== CP_CONFIG.serviceDir) {
+    /* настройки (теги, структура) переезжают из прежней служебной папки — см. cpMigrateService */
+    cpSet('cp_prev_service', CP_CONFIG.serviceDir);
     CP_CONFIG.serviceDir = sd;
     if (typeof cpServiceReset === 'function') cpServiceReset();
   }
@@ -1214,7 +1230,7 @@ function cpDoAction(status, pids, cardId) {
   }
   /* ретушь: копии в папку ретуши — см. cpRetouchCopy */
   cpRetouchCopy(pids, card, 'Копирую на ретушь').then(function (r) {
-    extra.folder = r.folder.replace(/^disk:/, '');
+    extra.folder = CPDisk.showPath(r.folder);
     extra.copied = r.done;
     if (r.exists) extra.existed = r.exists;
     if (r.failed.length) extra.failed = r.failed;
@@ -1303,7 +1319,7 @@ function cpRetouchResync(all) {
     : Object.keys(CP.retouchMissing || {});
   if (!pids.length) { cbToast(all ? 'В этой съёмке нет кадров на ретуши' : 'Всё скопировано'); return; }
   cpRetouchCopy(pids, null, all ? 'Сверяю папку ретуши' : 'Докопирую на ретушь').then(function (r) {
-    cpEvent('retouch_sync', [], { note: 'скопировано ' + r.done + ', уже было ' + r.exists + (r.failed.length ? ', не скопировано ' + r.failed.length : '') + ' → ' + r.folder.replace(/^disk:/, '') }, true);
+    cpEvent('retouch_sync', [], { note: 'скопировано ' + r.done + ', уже было ' + r.exists + (r.failed.length ? ', не скопировано ' + r.failed.length : '') + ' → ' + CPDisk.showPath(r.folder) }, true);
     cbToast((all ? 'Папка ретуши сверена: ' : 'Докопировано: ') + r.done + ' скопировано, уже было ' + r.exists
       + (r.failed.length ? ', не скопировано ' + r.failed.length : ''));
   }).catch(function (e) { cpHandleError(e, 'Не удалось скопировать на ретушь'); });
@@ -1992,7 +2008,7 @@ function cpDlCard(title, note, parts, progress, error) {
     h += '<div class="cp-dlcard-note">Загрузка начинается сама. Если не началась — нажмите кнопку; '
       + 'если и так нет — «ссылка» и вставьте её в адресную строку. '
       + (parts[0].cloud ? 'Ссылка и архив в облаке действуют 3 дня.'
-        : 'Файлы лежат на Диске: ' + cbEsc(cpExportsDir().replace(/^disk:/, ''))) + '</div>';
+        : 'Файлы лежат на Диске: ' + cbEsc(CPDisk.showPath(cpExportsDir()))) + '</div>';
     parts.forEach(function (p) {
       h += '<div class="cp-dlcard-row"><a class="cp-dlcard-btn" href="' + cbEsc(p.href) + '" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">'
         + cbEsc(p.label || 'Скачать ZIP') + '</a>'

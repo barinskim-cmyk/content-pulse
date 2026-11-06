@@ -475,12 +475,12 @@ function cpFilesOpen(i) {
   cpReadServiceFile(f.name, true).then(function (t) {
     if (CP.filesIdx !== i) return;
     ta.value = t;
-    note.textContent = CP_CONFIG.serviceDir.replace(/^disk:/, '') + '/' + f.name;
+    note.textContent = CPDisk.showPath(CP_CONFIG.serviceDir) + '/' + f.name;
   }, function (e) {
     if (CP.filesIdx !== i) return;
     if (e && e.status === 404) {
       ta.value = f.template();
-      note.textContent = 'Файла ещё нет — ниже образец. «Сохранить» создаст ' + f.name + ' в ' + CP_CONFIG.serviceDir.replace(/^disk:/, '');
+      note.textContent = 'Файла ещё нет — ниже образец. «Сохранить» создаст ' + f.name + ' в ' + CPDisk.showPath(CP_CONFIG.serviceDir);
     } else {
       note.textContent = 'Не прочитался: ' + ((e && (e.body || e.message)) || e);
     }
@@ -532,7 +532,7 @@ function cpServiceReset() {
   CP.rules = null;
   CP.settings = null;
   var sd = document.getElementById('cpSetServiceDir');
-  if (sd) sd.textContent = CP_CONFIG.serviceDir.replace(/^disk:/, '');
+  if (sd) sd.textContent = CPDisk.showPath(CP_CONFIG.serviceDir);
   cpEnsureSettings();
   cpLoadRules();
   cpLoadDict().then(function () { if (CP.shoot) cbRenderCards(); if (CP.sel) cpRenderPanel(); }, function () { });
@@ -574,7 +574,7 @@ function cpServiceReset() {
   box.id = 'cpSettings';
   box.innerHTML = '<h5>Архив съёмок</h5><div class="cp-set-line" id="cpSetArchive"></div>'
     + '<h5>Папка ретуши</h5><div class="cp-set-line" id="cpSetRetouch"></div>'
-    + '<h5>Файлы настроек</h5><div class="cp-set-dir">лежат в <span id="cpSetServiceDir">' + cbEsc(CP_CONFIG.serviceDir.replace(/^disk:/, '')) + '</span> — рядом с архивом</div><div class="cp-set-line">'
+    + '<h5>Файлы настроек</h5><div class="cp-set-dir">лежат в <span id="cpSetServiceDir">' + cbEsc(CPDisk.showPath(CP_CONFIG.serviceDir)) + '</span> — рядом с архивом</div><div class="cp-set-line">'
     + CP_SERVICE_FILES.map(function (f, i) { return '<button data-cp-setfile="' + i + '">' + cbEsc(f.label) + '</button>'; }).join('')
     + '</div>';
   document.body.appendChild(box);

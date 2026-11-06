@@ -12,6 +12,12 @@
      202  асинхронная операция           -> waitOperation
      507  нет места                      -> ошибка пользователю
      ссылки download/upload живут недолго -> берём перед каждым файлом
+
+   Общие диски Яндекс 360 (06.11.2026): путь вида
+   vd:<метка>:disk:/<папка> — у них свои адреса API
+   (/virtual-disks/resources...), всё остальное так же. Какой адрес
+   нужен, решает путь (ep); пути в ответах приводим к полному виду
+   с меткой (vdFix), чтобы дальше работать с ними как обычно.
    ============================================================ */
 
 var CPDisk = (function () {
@@ -96,6 +102,29 @@ var CPDisk = (function () {
     return req(API + endpoint + qs(params), { method: method || 'GET' });
   }
 
+  /* ---------- общие диски ---------- */
+
+  var VD_RE = /^(vd:[^:\/]+:)disk:/;
+  function isVd(path) { return VD_RE.test(String(path || '')); }
+  /** Корень диска пути: 'disk:' или 'vd:<метка>:disk:' */
+  function rootOf(path) { var m = VD_RE.exec(String(path || '')); return m ? m[1] + 'disk:' : 'disk:'; }
+  /** Адрес API для пути: '/resources' + sub или '/virtual-disks/resources' + sub */
+  function ep(path, sub) { return (isVd(path) ? '/virtual-disks/resources' : '/resources') + (sub || ''); }
+  /** Путь из ответа API — к полному виду с меткой общего диска. */
+  function vdFix(base, p) {
+    if (!isVd(base) || !p || isVd(p)) return p;
+    var root = rootOf(base);
+    if (p.indexOf('disk:') === 0) return root + p.slice(5);
+    if (p.charAt(0) === '/') return root + p;
+    return p;
+  }
+  /** Путь для показа человеку: без «disk:», общий диск — «Общий диск/...» */
+  function showPath(p) {
+    p = String(p || '');
+    if (isVd(p)) return 'Общий диск' + p.replace(VD_RE, '');
+    return p.replace(/^disk:/, '');
+  }
+
   /* ---------- чтение ---------- */
 
   function info() { return api('', {}); }
@@ -104,12 +133,13 @@ var CPDisk = (function () {
   function listDir(path, previewSize) {
     var out = [], page = 500;
     function next(offset) {
-      return api('/resources', {
+      return api(ep(path), {
         path: path, limit: page, offset: offset, sort: 'name',
         preview_size: previewSize || null, preview_crop: previewSize ? 'false' : null
       }).then(function (d) {
         var emb = d._embedded || {};
         var items = emb.items || [];
+        if (isVd(path)) items.forEach(function (it) { it.path = vdFix(path, it.path); });
         out = out.concat(items);
         var total = emb.total || 0;
         if (items.length && offset + items.length < total) return next(offset + items.length);
@@ -176,7 +206,7 @@ var CPDisk = (function () {
   function previewBlob(previewUrl) { return req(previewUrl, { as: 'blob', retries: 1 }); }
 
   function downloadHref(path) {
-    return api('/resources/download', { path: path }).then(function (d) { return d.href; });
+    return api(ep(path, '/download'), { path: path }).then(function (d) { return d.href; });
   }
 
   /** Скачать файл целиком. Ссылку берём свежую перед каждым файлом. */
@@ -199,12 +229,13 @@ var CPDisk = (function () {
   /* ---------- запись ---------- */
 
   function ensureDir(path) {
-    var parts = path.replace(/^disk:/, '').split('/').filter(Boolean);
-    var cur = 'disk:';
+    var root = rootOf(path);
+    var parts = path.slice(root.length).split('/').filter(Boolean);
+    var cur = root;
     return parts.reduce(function (p, part) {
       return p.then(function () {
         cur += '/' + part;
-        return api('/resources', { path: cur }, 'PUT').catch(function (e) {
+        return api(ep(cur), { path: cur }, 'PUT').catch(function (e) {
           if (e.status !== 409) throw e;
         });
       });
@@ -212,7 +243,7 @@ var CPDisk = (function () {
   }
 
   function uploadBlob(path, blob, overwrite) {
-    return api('/resources/upload', { path: path, overwrite: overwrite === false ? 'false' : 'true' })
+    return api(ep(path, '/upload'), { path: path, overwrite: overwrite === false ? 'false' : 'true' })
       .then(function (d) {
         return req(d.href, { method: 'PUT', body: blob, auth: false, as: 'text' });
       });
@@ -237,7 +268,7 @@ var CPDisk = (function () {
    * (CORS), запасной путь: скачать и залить копию.
    */
   function copy(src, dst) {
-    return api('/resources/copy', { from: src, path: dst, overwrite: 'false' }, 'POST')
+    return api(ep(isVd(src) ? src : dst, '/copy'), { from: src, path: dst, overwrite: 'false' }, 'POST')
       .then(function (d) {
         if (d._status === 202 && d.href) return waitOperation(d.href).then(function () { return 'done'; });
         return 'done';
@@ -260,7 +291,7 @@ var CPDisk = (function () {
 
   /** Ревизия файла отбора (md5 на Диске) или '' если файла нет. */
   function stateRev(shoot) {
-    return api('/resources', { path: statePath(shoot) }).then(function (m) { return m.md5 || m.modified || ''; },
+    return api(ep(shoot), { path: statePath(shoot) }).then(function (m) { return m.md5 || m.modified || ''; },
       function (e) { if (e.status === 404) return ''; throw e; });
   }
 
@@ -361,6 +392,7 @@ var CPDisk = (function () {
     info: info, listDir: listDir, listShoots: listShoots, walkPhotos: walkPhotos,
     previewBlob: previewBlob, downloadHref: downloadHref, downloadBlob: downloadBlob,
     ensureDir: ensureDir, uploadBlob: uploadBlob, copy: copy, waitOperation: waitOperation,
-    readState: readState, writeState: writeState, stateRev: stateRev, safeName: safeName
+    readState: readState, writeState: writeState, stateRev: stateRev, safeName: safeName,
+    isVd: isVd, rootOf: rootOf, showPath: showPath
   };
 })();

@@ -49,7 +49,14 @@ function json(status, obj, h) {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 /** Запрос к API Диска с повторами на 423/429/5xx. */
+/* Общие диски Яндекс 360: путь vd:<метка>:disk:/... — у них свои адреса
+   (/virtual-disks/resources...). Адрес выбираем по пути здесь, в одном месте. */
+const VD_RE = /^(vd:[^:\/]+:)disk:/;
+function isVd(p) { return VD_RE.test(String(p || '')); }
+function rootOf(p) { const m = VD_RE.exec(String(p || '')); return m ? m[1] + 'disk:' : 'disk:'; }
+
 async function disk(token, method, endpoint, params) {
+  if (endpoint.indexOf('/resources') === 0 && params && (isVd(params.path) || isVd(params.from))) endpoint = '/virtual-disks' + endpoint;
   const qs = new URLSearchParams(params || {}).toString();
   const url = API + endpoint + (qs ? '?' + qs : '');
   for (let attempt = 0; ; attempt++) {
@@ -109,8 +116,9 @@ async function isThere(token, path, type) {
 }
 
 async function ensureDir(token, path) {
-  const parts = path.replace(/^disk:/, '').split('/').filter(Boolean);
-  let cur = 'disk:';
+  const root = rootOf(path);
+  const parts = path.slice(root.length).split('/').filter(Boolean);
+  let cur = root;
   for (const p of parts) {
     cur += '/' + p;
     let ok = false, last = null;
@@ -801,7 +809,7 @@ module.exports.handler = async function (event) {
         out.parallel = { files: rows.length, ms: Date.now() - t0, mb: +mb.toFixed(2), mb_s: +(mb / ((Date.now() - t0) / 1000)).toFixed(2), errors: rows.filter(r => r.error || r.status !== 200).map(r => r.file + ': ' + (r.error || r.status)) };
       }
       try {
-        const sdir = /^disk:\/.+_ContentPulse$/.test(req.dir || '') ? req.dir : 'disk:/_ContentPulse';
+        const sdir = /^(vd:[^:\/]+:)?disk:\/(.+\/)?_ContentPulse$/.test(req.dir || '') ? req.dir : 'disk:/_ContentPulse';
         const target = sdir + '/проверка_скорости.bin';
         await ensureDir(token, sdir);
         const t0 = Date.now();

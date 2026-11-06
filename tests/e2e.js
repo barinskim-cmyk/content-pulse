@@ -27,7 +27,10 @@ const DIRS = new Set(['disk:/Архив', 'disk:/Архив/LM-1043', 'disk:/А�
   'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74596_модель', 'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/видео',
   'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74598_модель',
   'disk:/КАТАЛОГ', 'disk:/КАТАЛОГ/00_АРХИВ', 'disk:/КАТАЛОГ/00_АРХИВ/2026-11-01_SV_ПРЕДМЕТКА',
-  'disk:/Архив/2026-09-21_SV_ОПТИКА_N', 'disk:/Архив/2026-09-21_SV_ОПТИКА_N/maxmara_оптика', 'disk:/Архив/2026-09-21_SV_ОПТИКА_N/maxmara_оптика/75327_оптика_N']);
+  'disk:/Архив/2026-09-21_SV_ОПТИКА_N', 'disk:/Архив/2026-09-21_SV_ОПТИКА_N/maxmara_оптика', 'disk:/Архив/2026-09-21_SV_ОПТИКА_N/maxmara_оптика/75327_оптика_N',
+  /* общий диск Яндекс 360 (метка TESTVD): свои адреса API, пути vd:<метка>:disk:/… */
+  'vd:TESTVD:disk:', 'vd:TESTVD:disk:/01_ИСХОДНИКИ', 'vd:TESTVD:disk:/01_ИСХОДНИКИ/2026-11-06_SV_ПРЕДМЕТКА_VD',
+  'vd:TESTVD:disk:/01_ИСХОДНИКИ/2026-11-06_SV_ПРЕДМЕТКА_VD/zarina', 'vd:TESTVD:disk:/01_ИСХОДНИКИ/2026-11-06_SV_ПРЕДМЕТКА_VD/zarina/76001_предм']);
 const FILES = new Map([
   ['disk:/Архив/LM-1043/a.jpg', Buffer.from('A'.repeat(100))],
   ['disk:/Архив/LM-1043/b.jpg', Buffer.from('B'.repeat(200))],
@@ -38,7 +41,10 @@ const FILES = new Map([
   ['disk:/Архив/2026-09-21_SV_ОПТИКА_N/maxmara_оптика/75327_оптика_N/s1.jpg', Buffer.from('S'.repeat(150))],
   ['disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/видео/clip.mp4', Buffer.from('V'.repeat(500))],
   ['disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/видео/.DS_Store', Buffer.from('x')],
+  ['vd:TESTVD:disk:/01_ИСХОДНИКИ/2026-11-06_SV_ПРЕДМЕТКА_VD/zarina/76001_предм/p1.jpg', Buffer.from('P'.repeat(110))],
+  ['vd:TESTVD:disk:/01_ИСХОДНИКИ/2026-11-06_SV_ПРЕДМЕТКА_VD/zarina/76001_предм/p2.jpg', Buffer.from('R'.repeat(115))],
 ]);
+const VD_CALLS = [];
 const log = [];
 const DOWNLOADS = [];
 const DOWNLOADS_REFERER = [];
@@ -73,21 +79,31 @@ async function route(r) {
     if (req.headers()['authorization'] !== 'OAuth TESTTOKEN') return json(401, { message: 'no auth' });
     const p = q.path;
     if (u.pathname === '/v1/disk' || u.pathname === '/v1/disk/') return json(200, { user: { login: 'masha', display_name: 'Маша' } });
-    if (u.pathname === '/v1/disk/resources' && m === 'GET') {
+    /* общий диск: только свои адреса и только пути vd:…; в списках пути — без метки (худший случай) */
+    let pn = u.pathname, vdMode = false;
+    const vdPath = /^vd:/.test(q.path || '') || /^vd:/.test(q.from || '');
+    if (pn.indexOf('/v1/disk/virtual-disks/resources') === 0) {
+      if (!vdPath) return json(400, { error: 'DiskPathFormatError', message: 'нужен путь общего диска' });
+      VD_CALLS.push(m + ' ' + pn);
+      pn = pn.replace('/virtual-disks', '');
+      vdMode = true;
+    } else if (pn.indexOf('/v1/disk/resources') === 0 && vdPath) return json(400, { error: 'DiskPathFormatError', message: 'путь общего диска — в /virtual-disks' });
+    const vmeta = x => { const o = meta(x); if (vdMode) o.path = o.path.replace(/^vd:[^:]+:/, ''); return o; };
+    if (pn === '/v1/disk/resources' && m === 'GET') {
       if (DIRS.has(p)) {
         const kids = [...DIRS, ...FILES.keys()].filter(x => x !== p && x.slice(0, x.lastIndexOf('/')) === p && !(FRESH.has(x) && Date.now() - FRESH.get(x) < 3000)).sort();
         const off = +q.offset || 0, lim = +q.limit || 20;
-        return json(200, { ...meta(p), _embedded: { items: kids.slice(off, off + lim).map(meta), total: kids.length } });
+        return json(200, { ...vmeta(p), _embedded: { items: kids.slice(off, off + lim).map(vmeta), total: kids.length } });
       }
-      if (FILES.has(p)) return json(200, meta(p));
+      if (FILES.has(p)) return json(200, vmeta(p));
       return json(404, { message: 'not found' });
     }
-    if (u.pathname === '/v1/disk/resources' && m === 'PUT') { if (DIRS.has(p)) return json(409, { message: 'exists' }); DIRS.add(p); return json(201, {}); }
+    if (pn === '/v1/disk/resources' && m === 'PUT') { if (DIRS.has(p)) return json(409, { message: 'exists' }); DIRS.add(p); return json(201, {}); }
     /* с октября 2026 Яндекс не отдаёт папки архивом */
-    if (u.pathname === '/v1/disk/resources/download' && DIRS.has(p)) return json(500, { error: 'InternalServerError', message: 'Ошибка сервера.' });
-    if (u.pathname === '/v1/disk/resources/download') return json(200, { href: 'https://downloader.disk.yandex.ru/dl?p=' + encodeURIComponent(p) });
-    if (u.pathname === '/v1/disk/resources/upload') return json(200, { href: 'https://uploader1.disk.yandex.net/up?p=' + encodeURIComponent(p) });
-    if (u.pathname === '/v1/disk/resources/copy' && m === 'POST') {
+    if (pn === '/v1/disk/resources/download' && DIRS.has(p)) return json(500, { error: 'InternalServerError', message: 'Ошибка сервера.' });
+    if (pn === '/v1/disk/resources/download') return json(200, { href: 'https://downloader.disk.yandex.ru/dl?p=' + encodeURIComponent(p) });
+    if (pn === '/v1/disk/resources/upload') return json(200, { href: 'https://uploader1.disk.yandex.net/up?p=' + encodeURIComponent(p) });
+    if (pn === '/v1/disk/resources/copy' && m === 'POST') {
       if (FILES.has(q.path)) return json(409, { message: 'exists' });
       FILES.set(q.path, FILES.get(q.from)); return json(201, {});
     }
@@ -773,6 +789,41 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('служебная папка — рядом с архивом, в КАТАЛОГ', await page.evaluate(() => /КАТАЛОГ\/_ContentPulse/.test(document.getElementById('cpSetServiceDir').textContent)));
   check('файлы настроек скопированы из корня в КАТАЛОГ/_ContentPulse', ['теги.txt', 'структура.txt', 'настройки.txt'].every(n => FILES.has('disk:/КАТАЛОГ/_ContentPulse/' + n)) && FILES.has('disk:/_ContentPulse/теги.txt'),
     [...FILES.keys()].filter(k => /КАТАЛОГ/.test(k)).join(' | '));
+  /* общий диск Яндекс 360: вставили адрес из браузера — витрина, съёмка, отбор, ретушь идут через /virtual-disks */
+  await page.fill('#cpShelfSearch', '');
+  await page.fill('#cpArchiveInput', 'https://disk.yandex.ru/client/aa/d_TESTVD/01_%D0%98%D0%A1%D0%A5%D0%9E%D0%94%D0%9D%D0%98%D0%9A%D0%98');
+  await page.click('#cpArchiveApply');
+  await page.waitForFunction(() => CP.archive === 'vd:TESTVD:disk:/01_ИСХОДНИКИ' && [...document.querySelectorAll('.cp-shoot')].some(b => b.dataset.name === '2026-11-06_SV_ПРЕДМЕТКА_VD'), null, { timeout: 10000 }).catch(() => {});
+  check('общий диск: адрес …/client/aa/d_<метка>/… понят, съёмки на витрине', await page.evaluate(() =>
+    CP.archive === 'vd:TESTVD:disk:/01_ИСХОДНИКИ' && [...document.querySelectorAll('.cp-shoot')].some(b => b.dataset.name === '2026-11-06_SV_ПРЕДМЕТКА_VD')),
+    await page.evaluate(() => CP.archive + ' :: ' + document.getElementById('cpShelfList').textContent.slice(0, 200)));
+  await page.waitForFunction(() => CP_CONFIG.serviceDir === 'vd:TESTVD:disk:/_ContentPulse' && CP.dict && CP.dict.length, null, { timeout: 10000 }).catch(() => {});
+  check('общий диск: служебная папка рядом с архивом, теги и структура переехали, папка ретуши — нет',
+    FILES.has('vd:TESTVD:disk:/_ContentPulse/теги.txt') && FILES.has('vd:TESTVD:disk:/_ContentPulse/структура.txt') && !FILES.has('vd:TESTVD:disk:/_ContentPulse/настройки.txt')
+    && /Общий диск\/_ContentPulse/.test(await page.textContent('#cpSetServiceDir')),
+    [...FILES.keys()].filter(k => /^vd:/.test(k)).join(' | ') + ' :: ' + await page.textContent('#cpSetServiceDir'));
+  await page.keyboard.press('Escape');
+  await page.fill('#cpShelfSearch', 'VD');
+  await page.dblclick('.cp-shoot');
+  await page.waitForFunction(() => CP.shoot && /ПРЕДМЕТКА_VD/.test(CP.shoot.name) && App.photos.filter(p => p.dataUrl).length === 2, null, { timeout: 10000 }).catch(() => {});
+  check('общий диск: съёмка открылась, кадры и превью есть', await page.evaluate(() => App.photos.filter(p => p.dataUrl).length === 2 && App.photos.every(p => /^vd:TESTVD:disk:\//.test(p.disk))),
+    await page.evaluate(() => JSON.stringify(App.photos.map(p => p.disk))));
+  await page.evaluate(() => {
+    var tpl = App.templates[0]; cbAddCardFromTpl(tpl.id); var c = App.cards[App.cards.length - 1];
+    var p1 = App.photos.find(p => /p1\.jpg$/.test(p.disk));
+    if (c.mode === 'auto') c.pids = [p1.id]; else c.slots[0].pid = p1.id;
+    cbMarkDirty(); cbRenderCards();
+    cpDoAction('retouch', [p1.id], c.id);
+  });
+  await page.waitForFunction(() => !App.dirty && App.projectMeta.cp.events.some(e => e.action === 'to_retouch'), null, { timeout: 10000 }).catch(() => {});
+  const VDS = 'vd:TESTVD:disk:/01_ИСХОДНИКИ/2026-11-06_SV_ПРЕДМЕТКА_VD';
+  check('общий диск: отбор сохранён в папке съёмки, копия на ретушь — со структурой', FILES.has(VDS + '/_contentpulse.json') && FILES.has(VDS + '/Ретушь/zarina/76001_предм/p1.jpg'),
+    [...FILES.keys()].filter(k => /^vd:/.test(k)).join(' | '));
+  check('общий диск: запросы — только через /virtual-disks, ни одного пути общего диска в обычный API',
+    VD_CALLS.some(c => /^GET /.test(c)) && VD_CALLS.some(c => /upload/.test(c)) && !log.some(l => / \/v1\/disk\/resources(\/\w+)? vd:/.test(l)),
+    log.filter(l => / \/v1\/disk\/resources(\/\w+)? vd:/.test(l)).slice(0, 3).join(' | '));
+  await page.evaluate(() => cpShowShelf());
+  await page.click('#cpGear');
   await page.fill('#cpArchiveInput', 'Архив');
   await page.click('#cpArchiveApply');
   await page.waitForFunction(() => CP_CONFIG.serviceDir === 'disk:/_ContentPulse', null, { timeout: 5000 });
