@@ -145,13 +145,12 @@ cpStageList = (function (orig) {
     var list = orig.apply(this, arguments);
     if (!cpCatalog() || !CP.catalogList) return list;
     var src = cpCatDirs('source');
-    var ap = (CP.settings && CP.settings.approve) ? cpFolderBase(CP.settings.approve) : '';
+    /* Маша, 06.11: «отбор в исходниках — фильтр пока не нужен; это скорее атрибут
+       того, что лежит в исходниках» — он виден под съёмкой и внутри неё (карточки) */
     return list.filter(function (x) {
-      return !x.key || x.key === 'select' || (CP.settings && CP.settings[CP_STAGE_SETTING[x.key]]);
+      return !x.key || (x.key !== 'select' && CP.settings && CP.settings[CP_STAGE_SETTING[x.key]]);
     }).map(function (x) {
       if (x.key === '' && src.length) return { key: '', label: src[0].name };
-      /* у SK папка согласования называется «02_ОТБОР» — внутренний отбор подписываем иначе */
-      if (x.key === 'select' && /отбор/i.test(ap)) return { key: 'select', label: 'Отбор в исходниках' };
       return x;
     });
   };

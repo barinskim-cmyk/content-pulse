@@ -1154,8 +1154,8 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     check('каталог: служебная папка внутри, съёмки только из исходников (00_АРХИВ не читаем)', st.sd === K + '/_ContentPulse' && st.shoots.includes('2026-11-06_SV_КАТ') && !st.shoots.includes('2026-11-01_SV_ПРЕДМЕТКА') && !st.shoots.includes('02_ОТБОР'), JSON.stringify(st));
     check('что значит папка — по смыслу имени, потом по номеру: 04_САЙТ — сайт', await page.evaluate(() => cpCatRoleOf('04_САЙТ', {}) === 'site' && cpCatRoleOf('04_ОТРЕТУШИРОВАНО', {}) === 'review'
       && cpCatRoleOf('03_РЕТУШЬ', {}) === 'retouch' && cpCatRoleOf('00_АРХИВ', {}) === 'skip' && cpCatRoleOf('02_ОТБОР', {}) === 'approval' && cpCatRoleOf('05_X', {}) === 'site' && cpCatRoleOf('ПРОЧЕЕ', {}) === 'skip'));
-    check('каталог: фильтры = папки (01, 02_ОТБОР, 03, 05), без папки 04 — нет фильтра, «Отбор в исходниках»',
-      /^01_ИСХОДНИКИ\s*\d+Отбор в исходниках/.test(st.stages.trim()) && /02_ОТБОР\s*1/.test(st.stages) && /03_РЕТУШЬ/.test(st.stages) && /05_САЙТ/.test(st.stages) && !/04|Согласование|ПРОЧЕЕ/.test(st.stages)
+    check('каталог: фильтры = папки (01, 02_ОТБОР, 03, 05), без папки 04 — нет фильтра, внутреннего «Отбора» нет',
+      /^01_ИСХОДНИКИ\s*\d+02_ОТБОР/.test(st.stages.trim()) && !/Отбор в/.test(st.stages) && /02_ОТБОР\s*1/.test(st.stages) && /03_РЕТУШЬ/.test(st.stages) && /05_САЙТ/.test(st.stages) && !/04|Согласование|ПРОЧЕЕ/.test(st.stages)
       && st.s.approve === K + '/02_ОТБОР' && st.s.retouch === K + '/03_РЕТУШЬ' && st.s.site === K + '/05_САЙТ', st.stages);
     check('каталог: в шестерёнке — папки и что они значат, отдельные поля этапов скрыты', await page.evaluate(() =>
       document.querySelectorAll('#cpCatBox [data-cp-cat]').length === 6 && document.querySelector('[data-cp-cat="ПРОЧЕЕ"]').value === 'не показывать'
