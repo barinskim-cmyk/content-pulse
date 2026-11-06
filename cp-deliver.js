@@ -369,6 +369,7 @@ function cpCheckSite() {
     cbRenderCards();
     cbRenderOutline();
     cpShowSiteReport(found, del, missing, unmatched, withPhotos.length, root);
+    if (nDel && typeof cpRetouchCleanupSoon === 'function') cpRetouchCleanupSoon();
   }).catch(function (e) {
     cbBusyHide();
     if (e && e.plain) { cbToast('Проверить сдачу: ' + e.message); return; }

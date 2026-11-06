@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.52';
+var CP_VERSION = '2.0.53';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1336,6 +1336,8 @@ function cpRetouchResync(all) {
   var pids = all
     ? Object.keys(m).filter(function (pid) { return m[pid].s === 'retouch'; })
     : Object.keys(CP.retouchMissing || {});
+  /* сданное на сайт в ретушь не возвращаем — его копии оттуда ушли в Корзину */
+  if (typeof cpDonePids === 'function') { var done = cpDonePids(); pids = pids.filter(function (pid) { return !done[pid]; }); }
   if (!pids.length) { cbToast(all ? 'В этой съёмке нет кадров на ретуши' : 'Всё скопировано'); return; }
   cpRetouchCopy(pids, null, all ? 'Сверяю папку ретуши' : 'Докопирую на ретушь').then(function (r) {
     cpEvent('retouch_sync', [], { note: 'скопировано ' + r.done + ', уже было ' + r.exists + (r.failed.length ? ', не скопировано ' + r.failed.length : '') + ' → ' + CPDisk.showPath(r.folder) }, true);

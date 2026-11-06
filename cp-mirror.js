@@ -24,6 +24,13 @@
        которых нет в отборе, — расхождения: список и кнопки «Снять статусы
        без файлов» / «Докопировать на Диск». Сама программа статусы не
        снимает.
+
+   Ретушь — конечная точка копий (Маша, 06.11): папка из 03 никуда не
+   едет, ретушёры отдают результат в 04. Как только артикул сдан на сайт,
+   его папка в 03 уходит в Корзину Диска (выбор Маши: «артикул сдан — в
+   Корзину»; 30 дней можно восстановить). Оригиналы остаются в 01, готовое —
+   в 05. Если в папке есть и несданные кадры, в Корзину уходят только
+   сданные файлы; опустела папка съёмки — уходит и она.
    ============================================================ */
 
 var CP_DISK_STAGES = [
@@ -94,11 +101,16 @@ function cpMirrorSync(quiet) {
   }).then(function (rs) {
     if (!quiet) cbBusyHide();
     if (!CP.shoot || CP.shoot.path !== shoot.path) return null;
-    var res = cpMirrorApply(rs, letters);
+    var idx = cpMirrorIndex();
+    var res = cpMirrorApply(rs, letters, idx);
     CP.mirror = res;
     cpUpdateStatusLine();
     if (!quiet || res.changed.length) cbToast(res.changed.length ? 'Сверено с Диском: ' + res.changed.join(', ') : 'Сверено с Диском' + (res.issues ? ', расхождений: ' + res.issues : ' — всё совпадает'));
-    return res;
+    /* сданное на сайт — из ретуши в Корзину */
+    var rt = rs.filter(function (r) { return r.stage.key === 'retouch'; })[0];
+    var plan = rt ? cpRetouchCleanupPlan(rt.found, idx, letters, cpDonePids()) : [];
+    if (!plan.length) return res;
+    return cpRetouchTrash(plan, quiet).then(function (n) { res.trashed = n; return res; });
   }).catch(function (e) {
     if (!quiet) cbBusyHide();
     if (window.console) console.warn('[CP] сверка с Диском', e && (e.body || e.message || e));
@@ -107,11 +119,9 @@ function cpMirrorSync(quiet) {
   });
 }
 
-/** Разложить найденные файлы по кадрам отбора и выставить статусы. */
-function cpMirrorApply(rs, letters) {
+/** Кадры отбора открытой съёмки: по пути внутри съёмки и по «стеблю» имени. */
+function cpMirrorIndex() {
   var shootPath = CP.shoot.path.replace(/\/+$/, '');
-  var m = cpMeta(), who = 'Диск', now = new Date().toISOString();
-  /* кадры отбора: по пути внутри съёмки и по «стеблю» имени */
   var byRel = {}, byStem = {}, cardOf = {};
   App.photos.forEach(function (p) {
     if (!p.disk || (p.kind || 'photo') === 'ref') return;
@@ -121,28 +131,111 @@ function cpMirrorApply(rs, letters) {
     (byStem[st] = byStem[st] || []).push(p);
   });
   App.cards.forEach(function (c) { cpCardPids(c).forEach(function (pid) { if (!cardOf[pid]) cardOf[pid] = c; }); });
+  return { byRel: byRel, byStem: byStem, cardOf: cardOf };
+}
+
+/** Файл в папке этапа → кадр отбора. raw — папки от папки съёмки на этапе. {p, letter} */
+function cpMirrorMatch(idx, raw, name, letters) {
+  var letter = '';
+  var segs = raw.map(function (sg) {
+    var mm = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(sg);
+    if (mm && letters.indexOf(mm[1]) !== -1) { letter = mm[1]; return mm[2]; }
+    return sg.replace(/_доработка$/i, '');
+  });
+  var rel = segs.concat([name]).join('/').toLowerCase();
+  var p = idx.byRel[rel];
+  if (!p) {
+    var cands = idx.byStem[cpStem(name)] || [];
+    var dir = segs.join('/');
+    p = cands.length === 1 ? cands[0] : cands.filter(function (c) {
+      var card = idx.cardOf[c.id];
+      return cpRelDir(c) === dir || (card && card.cpArticleDir === dir);
+    })[0];
+  }
+  return { p: p || null, letter: letter };
+}
+
+/** Кадры, чьи карточки сданы на сайт (и нет несданной карточки на ретуши / согласовании с ними). */
+function cpDonePids() {
+  var m = cpMeta(), del = m.delivered || {}, done = {}, keep = {};
+  App.cards.forEach(function (c) {
+    var pids = cpCardPids(c);
+    if (del[c.id]) pids.forEach(function (pid) { done[pid] = true; });
+    else {
+      var cs = m.cardStatus[c.id];
+      if (cs && (cs.s === 'retouch' || cs.s === 'approval')) pids.forEach(function (pid) { keep[pid] = true; });
+    }
+  });
+  Object.keys(keep).forEach(function (pid) { delete done[pid]; });
+  return done;
+}
+
+/**
+ * Что из папок съёмки в 03 отправить в Корзину: папка целиком, если в ней
+ * есть сданные кадры и нет несданных (файлы, которых нет в отборе, едут
+ * вместе с папкой); иначе — только сданные файлы.
+ */
+function cpRetouchCleanupPlan(found, idx, letters, done) {
+  var out = [];
+  (found || []).forEach(function (f) {
+    var tree = { path: f.path, dirs: {}, files: [] };
+    (f.files || []).forEach(function (file) {
+      if (file.name === CPDisk.STATE_FILE || file.path.indexOf(f.path + '/') !== 0) return;
+      var raw = file.path.slice(f.path.length + 1).split('/');
+      var name = raw.pop();
+      var mt = cpMirrorMatch(idx, raw, name, letters);
+      var node = tree, cur = f.path;
+      raw.forEach(function (sg) { cur += '/' + sg; node = node.dirs[sg] = node.dirs[sg] || { path: cur, dirs: {}, files: [] }; });
+      node.files.push({ path: file.path, state: mt.p ? (done[mt.p.id] ? 'done' : 'live') : 'other' });
+    });
+    (function count(n) {
+      n.d = 0; n.l = 0;
+      n.files.forEach(function (x) { if (x.state === 'done') n.d++; else if (x.state === 'live') n.l++; });
+      Object.keys(n.dirs).forEach(function (k) { var c = count(n.dirs[k]); n.d += c.d; n.l += c.l; });
+      return n;
+    })(tree);
+    (function pick(n) {
+      if (!n.d) return;
+      if (!n.l) { out.push(n.path); return; }
+      n.files.forEach(function (x) { if (x.state === 'done') out.push(x.path); });
+      Object.keys(n.dirs).forEach(function (k) { pick(n.dirs[k]); });
+    })(tree);
+  });
+  return out;
+}
+
+/** Сданное — из ретуши в Корзину Диска. */
+function cpRetouchTrash(paths, quiet) {
+  if (!paths.length) return Promise.resolve(0);
+  return CPDisk.trash(paths).then(function (res) {
+    var ok = res.filter(function (x) { return x.status === 'done' || x.status === 'gone'; });
+    var bad = res.filter(function (x) { return x.status === 'failed'; });
+    if (ok.length) {
+      cpEvent('retouch_trash', ok.map(function (x) { return x.path.split('/').pop(); }), { note: 'сдано на сайт — из ретуши в Корзину Диска: ' + ok.map(function (x) { return CPDisk.showPath(x.path); }).join(', ') });
+      cbToast('Сданное убрано из ретуши в Корзину Диска: ' + ok.length + (bad.length ? ', не получилось: ' + bad.length : ''));
+    } else if (bad.length && !quiet) cbToast('Не получилось убрать сданное из ретуши: ' + (bad[0].error || ''));
+    if (bad.length && window.console) console.warn('[CP] в Корзину не ушло', bad);
+    return ok.length;
+  }, function (e) {
+    if (window.console) console.warn('[CP] в Корзину', e && (e.body || e.message || e));
+    if (!quiet) cpHandleError(e, 'Убрать сданное из ретуши');
+    return 0;
+  });
+}
+
+/** Разложить найденные файлы по кадрам отбора и выставить статусы. */
+function cpMirrorApply(rs, letters, idx) {
+  var m = cpMeta(), who = 'Диск', now = new Date().toISOString();
+  idx = idx || cpMirrorIndex();
+  var cardOf = idx.cardOf;
   var pres = {}, unmatched = [];
   rs.forEach(function (r) {
     (r.found || []).forEach(function (f) {
       f.files.forEach(function (file) {
         if (file.name === CPDisk.STATE_FILE) return;
         var segs = file.path.slice(f.path.length + 1).split('/');
-        var name = segs.pop(), letter = '';
-        segs = segs.map(function (sg) {
-          var mm = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(sg);
-          if (mm && letters.indexOf(mm[1]) !== -1) { letter = mm[1]; return mm[2]; }
-          return sg.replace(/_доработка$/i, '');
-        });
-        var rel = segs.concat([name]).join('/').toLowerCase();
-        var p = byRel[rel];
-        if (!p) {
-          var cands = byStem[cpStem(name)] || [];
-          var dir = segs.join('/');
-          p = cands.length === 1 ? cands[0] : cands.filter(function (c) {
-            var card = cardOf[c.id];
-            return cpRelDir(c) === dir || (card && card.cpArticleDir === dir);
-          })[0];
-        }
+        var name = segs.pop();
+        var mt = cpMirrorMatch(idx, segs, name, letters), p = mt.p, letter = mt.letter;
         if (!p) { unmatched.push({ stage: r.stage.label, path: file.path }); return; }
         var pr = pres[p.id] = pres[p.id] || {};
         pr[r.stage.key] = { path: file.path, name: file.name, size: file.size, letter: letter, prio: f.prio };
@@ -194,9 +287,10 @@ function cpMirrorApply(rs, letters) {
   /* расхождения: статус есть, файла на этапе нет (только этапы с папками) */
   var has = {};
   rs.forEach(function (r) { has[r.stage.key] = true; });
-  var missing = [];
+  var missing = [], done = cpDonePids();
   Object.keys(m.status).forEach(function (pid) {
     var st = m.status[pid];
+    if (done[pid]) return;   /* сдано на сайт — в ретуши его и не должно быть */
     if ((st.s === 'approval' || st.s === 'retouch') && has[st.s] && !(pres[pid] && (pres[pid][st.s] || (st.s === 'approval' && pres[pid].retouch)))) {
       var p = cbPhotoById(pid);
       if (p && p.disk) missing.push({ pid: pid, s: st.s, name: p.name });
@@ -364,6 +458,19 @@ CP.openedHooks.push(function (path) {
     };
   })(cpSettingsToUi);
 })();
+
+CP_ACTION_LABEL.retouch_trash = 'сдано на сайт — убрано из ретуши в Корзину';
+CP_ACTION_LABEL.mirror = 'сверка с Диском';
+
+/** После сдачи на сайт: сверить (тихо) — сданное уйдёт из ретуши в Корзину. */
+function cpRetouchCleanupSoon() {
+  var path = CP.shoot && CP.shoot.path;
+  setTimeout(function () {
+    if (!CP.shoot || CP.shoot.path !== path) return;
+    var ready = typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : Promise.resolve();
+    ready.then(function () { return cpMirrorSync(true); });
+  }, 300);
+}
 
 (function cpMirrorCss() {
   var st = document.createElement('style');

@@ -292,6 +292,38 @@ var CPDisk = (function () {
       });
   }
 
+  /** В Корзину Диска (не навсегда: Диск хранит её 30 дней). Через прослойку пачками по 50, без неё — по одному.
+      Возвращает [{path, status: 'done'|'gone'|'failed', error}]. */
+  function trash(paths) {
+    paths = (paths || []).slice();
+    if (!paths.length) return Promise.resolve([]);
+    if (proxy) {
+      var out = [], chunks = [];
+      for (var i = 0; i < paths.length; i += 50) chunks.push(paths.slice(i, i + 50));
+      return chunks.reduce(function (p, ch) {
+        return p.then(function () {
+          return proxyReq({ a: 'trash' }, { method: 'POST', body: { paths: ch }, as: 'json' }).then(function (r) { out = out.concat((r && r.results) || []); });
+        });
+      }, Promise.resolve()).then(function () { return out; });
+    }
+    return paths.reduce(function (p, path) {
+      return p.then(function (acc) {
+        return api(ep(path), { path: path, permanently: 'false' }, 'DELETE').then(function (d) {
+          if (d._status === 202 && d.href) return waitOperation(d.href).then(function () { acc.push({ path: path, status: 'done' }); return acc; });
+          acc.push({ path: path, status: 'done' }); return acc;
+        }, function (e) {
+          acc.push({ path: path, status: e.status === 404 ? 'gone' : 'failed', error: String(e.body || e.message || e.status) });
+          return acc;
+        });
+      });
+    }, Promise.resolve([]));
+  }
+
+  /** Перенести на Диске [{from, path}] (папки назначения создаются). */
+  function proxyMove(items) {
+    return proxyReq({ a: 'move' }, { method: 'POST', body: { items: items }, as: 'json' });
+  }
+
   /* ---------- общий файл отбора ---------- */
 
   function statePath(shoot) { return shoot.replace(/\/+$/, '') + '/' + STATE_FILE; }
@@ -405,6 +437,7 @@ var CPDisk = (function () {
     previewBlob: previewBlob, downloadHref: downloadHref, downloadBlob: downloadBlob,
     ensureDir: ensureDir, uploadBlob: uploadBlob, copy: copy, waitOperation: waitOperation,
     readState: readState, writeState: writeState, stateRev: stateRev, safeName: safeName,
-    isVd: isVd, rootOf: rootOf, showPath: showPath, rawGet: rawGet
+    isVd: isVd, rootOf: rootOf, showPath: showPath, rawGet: rawGet,
+    trash: trash, proxyMove: proxyMove
   };
 })();

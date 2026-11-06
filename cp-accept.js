@@ -441,6 +441,7 @@ function cpRvApprove(ids) {
     cbRenderCards();
     cbRenderOutline();
     cbToast('Ретушь согласована, файлы в «Сайте»: карточек ' + todo.length);
+    if (typeof cpRetouchCleanupSoon === 'function') cpRetouchCleanupSoon();
   }).catch(function (e) {
     cbBusyHide();
     if (e && e.plain) { cbToast('Согласование: ' + e.message); return; }

@@ -185,6 +185,67 @@ async function doCopy(token, items, dirs) {
   return { status: 200, result: { results } };
 }
 
+/* ---------- Корзина и перенос: статус = где лежит файл ----------
+   Защита от ошибки страницы: папки первого уровня диска не трогаем
+   (нужно не меньше двух частей пути: disk:/03_РЕТУШЬ/съёмка). */
+function deepEnough(p) {
+  const rest = String(p || '').slice(rootOf(p).length).split('/').filter(Boolean);
+  return rest.length >= 2 && rest.indexOf('..') === -1;
+}
+
+async function doTrash(token, paths) {
+  const results = new Array(paths.length);
+  async function one(i) {
+    const p = paths[i];
+    if (!deepEnough(p)) { results[i] = { path: p, status: 'failed', error: 'слишком близко к корню диска' }; return; }
+    const r = await disk(token, 'DELETE', '/resources', { path: p, permanently: 'false' });
+    if (r.status === 204) results[i] = { path: p, status: 'done' };
+    else if (r.status === 404) results[i] = { path: p, status: 'gone' };
+    else if (r.status === 202 && r.data.href) {
+      const st = await waitOp(token, r.data.href);
+      results[i] = { path: p, status: st === 'success' ? 'done' : 'failed', error: st === 'success' ? undefined : st };
+    } else results[i] = { path: p, status: 'failed', error: r.data.message || r.data.description || ('HTTP ' + r.status) };
+  }
+  let next = 0;
+  async function worker() { while (next < paths.length) { const i = next++; try { await one(i); } catch (e) { results[i] = { path: paths[i], status: 'failed', error: String(e && e.message || e) }; } } }
+  const workers = [];
+  for (let w = 0; w < Math.min(6, paths.length); w++) workers.push(worker());
+  await Promise.all(workers);
+  return { status: 200, result: { results } };
+}
+
+async function doMove(token, items) {
+  const made = {};
+  function dirReady(d) { if (!made[d]) made[d] = ensureDir(token, d); return made[d]; }
+  const results = new Array(items.length);
+  async function one(i) {
+    const it = items[i];
+    if (!deepEnough(it.from) || !deepEnough(it.path)) { results[i] = { from: it.from, status: 'failed', error: 'слишком близко к корню диска' }; return; }
+    const parent = it.path.slice(0, it.path.lastIndexOf('/'));
+    const d = await dirReady(parent);
+    if (!d.ok) { results[i] = { from: it.from, status: 'failed', error: d.error }; return; }
+    let r = await disk(token, 'POST', '/resources/move', { from: it.from, path: it.path, overwrite: 'false' });
+    if (r.status === 409 && !(await isThere(token, it.path))) {
+      made[parent] = ensureDir(token, parent);
+      await made[parent];
+      r = await disk(token, 'POST', '/resources/move', { from: it.from, path: it.path, overwrite: 'false' });
+    }
+    if (r.status === 201) results[i] = { from: it.from, status: 'done' };
+    else if (r.status === 409) results[i] = { from: it.from, status: (await isThere(token, it.path)) ? 'exists' : 'failed', error: r.data.message || r.data.description };
+    else if (r.status === 404) results[i] = { from: it.from, status: 'gone' };
+    else if (r.status === 202 && r.data.href) {
+      const st = await waitOp(token, r.data.href);
+      results[i] = { from: it.from, status: st === 'success' ? 'done' : 'failed', error: st === 'success' ? undefined : st };
+    } else results[i] = { from: it.from, status: 'failed', error: r.data.message || r.data.description || ('HTTP ' + r.status) };
+  }
+  let next = 0;
+  async function worker() { while (next < items.length) { const i = next++; try { await one(i); } catch (e) { results[i] = { from: items[i].from, status: 'failed', error: String(e && e.message || e) }; } } }
+  const workers = [];
+  for (let w = 0; w < Math.min(6, items.length); w++) workers.push(worker());
+  await Promise.all(workers);
+  return { status: 200, result: { results } };
+}
+
 /* ---------- Object Storage (S3) для архивов выгрузки ----------
    Запись на Яндекс Диск сейчас ~0,1 МБ/с, поэтому готовый ZIP кладём в
    закрытый бакет в Yandex Cloud (живёт 3 дня, правило жизненного цикла),
@@ -870,6 +931,19 @@ module.exports.handler = async function (event) {
       Object.keys(req.props).slice(0, 20).forEach(k => { const v = req.props[k]; props[k] = v === null ? null : String(v).slice(0, 900); });
       const r = await disk(token, 'PATCH', '/resources', { path: req.path }, { custom_properties: props });
       return json(r.status === 200 ? 200 : r.status, r.status === 200 ? { ok: true } : { error: r.data.message || r.data.description || 'не записано' }, h);
+    }
+
+    /* в Корзину Диска (восстановить можно 30 дней) и перенос между папками этапов */
+    if (a === 'trash' || a === 'move') {
+      if (event.httpMethod !== 'POST') return json(405, { error: 'Нужен POST' }, h);
+      let body = event.body || '';
+      if (event.isBase64Encoded) body = Buffer.from(body, 'base64').toString('utf8');
+      let req;
+      try { req = JSON.parse(body); } catch (e) { return json(400, { error: 'Тело не JSON' }, h); }
+      const r = a === 'trash'
+        ? await doTrash(token, (Array.isArray(req.paths) ? req.paths : []).slice(0, 200).map(String))
+        : await doMove(token, (Array.isArray(req.items) ? req.items : []).slice(0, 200).filter(x => x && x.from && x.path));
+      return json(r.status, r.result, h);
     }
 
     return json(400, { error: 'Неизвестное действие: ' + a }, h);
