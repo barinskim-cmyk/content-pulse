@@ -58,7 +58,7 @@ const PREVIEW_CALLS = { single: 0, batch: 0, big: 0 };
 /* режим «превью заблокировано»: файлы — настоящие картинки, их будут уменьшать в браузере */
 if (process.env.BLOCK_PREVIEW) for (const k of [...FILES.keys()]) FILES.set(k, png(60, 40));
 const md5 = (b) => require('crypto').createHash('md5').update(b).digest('hex');
-const TRASHED = [], MOVED = [];   /* что ушло в Корзину Диска / перенесено между этапами */
+const TRASHED = [], MOVED = [], ZIPPART_CALLS = [];   /* что ушло в Корзину Диска / перенесено между этапами */
 const PROPS = new Map();   /* custom_properties папок (сводка съёмки) */
 const meta = (p) => {
   const name = p.split('/').pop();
@@ -184,12 +184,35 @@ async function route(r) {
       }
       if (b.op === 'done') {
         const u = MPU.get(b.key);
+        if (u && u.zip) {
+          /* один архив из кусков: в бакете — один файл */
+          if (!/\.zip$/.test(b.filename || '') || (b.parts || []).length !== u.calls) return json(502, { error: 'куски архива не сошлись' });
+          ZIPS.set(u.target, u.names); CLOUD.set(b.key, u.target);
+          return json(200, { url: 'https://storage.yandexcloud.net/content-pulse-exports-test/' + b.key + '?X-Amz-Signature=x&name=' + encodeURIComponent(b.filename), store: 'cloud' });
+        }
         const whole = Buffer.concat(Object.keys(u.parts).sort((a, c) => a - c).map(k => u.parts[k]));
         if (!whole.equals(FILES.get(u.from))) return json(502, { error: 'собрано неверно' });
         CLOUD.set(b.key, u.from);
         return json(200, { url: 'https://storage.yandexcloud.net/content-pulse-exports-test/' + b.key + '?X-Amz-Signature=x', store: 'cloud' });
       }
       return json(200, { ok: true });
+    }
+    if (q.a === 'zippart' && m === 'POST') {
+      const b = JSON.parse(req.postData() || '{}');
+      const u = MPU.get(b.key);
+      if (!u) return json(404, { error: 'нет загрузки' });
+      for (const e of b.entries) {
+        if (!FILES.has(e.from)) return json(422, { error: 'нет файла ' + e.from });
+        if (FILES.get(e.from).length !== e.size) return json(422, { error: 'размер изменился ' + e.from });
+      }
+      if (b.n !== (u.calls || 0) + 1 || b.offset !== (u.next || 0)) return json(400, { error: 'кусок не по порядку' });
+      ZIPPART_CALLS.push(b.n);
+      u.zip = true; u.target = b.target; u.calls = b.n; u.names = (u.names || []).concat(b.entries.map(e => e.name));
+      let off = b.offset;
+      const done = b.entries.map(e => { const d = { name: e.name, size: e.size, crc: 1, offset: off }; off += 30 + Buffer.byteLength(e.name) + e.size; return d; });
+      u.next = off;
+      if (b.final && (b.done || []).length + done.length !== u.names.length) return json(400, { error: 'оглавление неполное' });
+      return json(200, { n: b.n, etag: '"z' + b.n + '"', next: off, bytes: off - b.offset, done });
     }
     if (q.a === 'zip' && m === 'POST') {
       const b = JSON.parse(req.postData() || '{}');
@@ -345,7 +368,8 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('журнал показывает действие', (await page.textContent('#cpLogList')).includes('на ретушь'));
 
   /* скачивание отбора: подменяем выбор папки на OPFS (настоящая FS API в Chromium) */
-  await page.evaluate(() => document.getElementById('cpMenuDlSel').click());
+  /* у кадра в отборе нет размера (старая съёмка) — размер спросим у Диска, кадр не потеряется */
+  await page.evaluate(() => { App.photos.find(p => /\/a\.jpg$/.test(p.disk || '')).size = undefined; document.getElementById('cpMenuDlSel').click(); });
   await page.waitForFunction(() => App.projectMeta.cp.events.some(e => e.action === 'download_selection'), null, { timeout: 10000 });
   await page.waitForTimeout(500);
   const zSel = ZIPS.get('disk:/_ContentPulse/выгрузки/LM-1043_отбор_1.zip') || [];
@@ -353,14 +377,17 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('архив отбора скачивается обычной загрузкой браузера', DOWNLOADS.some(p => /выгрузки\/LM-1043_отбор_1\.zip$/.test(p)), DOWNLOADS.join(' | '));
   check('ссылку на папку у Яндекса не просим (папки он не отдаёт)', !log.some(l => /resources\/download disk:\/_ContentPulse\/выгрузки\/[^.]*$/.test(l)));
 
-  /* вся съёмка большая: части по размеру */
-  await page.evaluate(() => { CP.zipTarget = 250; document.getElementById('cpMenuDlAll').click(); });
+  /* вся съёмка большая: собирается за несколько вызовов, но архив — ОДИН (Маша, 06.11: «разбил на два куска») */
+  const callsBefore = ZIPPART_CALLS.length;
+  await page.evaluate(() => { CP.zipTarget = 250; CP.zipPartMin = 100; CP.directMin = 150; document.getElementById('cpMenuDlAll').click(); });
   await page.waitForFunction(() => App.projectMeta.cp.events.some(e => e.action === 'download_shoot'), null, { timeout: 10000 });
-  const zAll = [...ZIPS.keys()].filter(k => /LM-1043_вся съёмка_1_ч\d+\.zip$/.test(k));
-  const allNames = zAll.flatMap(k => ZIPS.get(k));
-  check('вся съёмка частями _ч1, _ч2...: все кадры с исходными папками', zAll.length >= 2 && allNames.length === 4 && allNames.some(n => n === 'LM-1043_вся съёмка_1/part2/c.jpg'), zAll.join(' | ') + ' :: ' + allNames.join(' | '));
-  check('карточка: кнопка на каждую часть', await page.evaluate(n => document.querySelectorAll('#cpDlCard a.cp-dlcard-btn').length === n, zAll.length));
-  await page.evaluate(() => { CP.zipTarget = 400 * 1024 * 1024; });
+  const zParts = [...ZIPS.keys()].filter(k => /LM-1043_вся съёмка_1_ч\d+\.zip$/.test(k));
+  const allNames = ZIPS.get('disk:/_ContentPulse/выгрузки/LM-1043_вся съёмка_1.zip') || [];
+  check('вся съёмка — один архив, собран за несколько вызовов; кадры крупнее порога видео — тоже в архиве', !zParts.length && ZIPPART_CALLS.length - callsBefore >= 2
+    && allNames.length === 4 && allNames.some(n => n === 'LM-1043_вся съёмка_1/part2/c.jpg'), JSON.stringify([ZIPPART_CALLS.slice(callsBefore), allNames, zParts]));
+  check('карточка: одна кнопка «Скачать ZIP»', await page.evaluate(() => document.querySelectorAll('#cpDlCard a.cp-dlcard-btn').length === 1 && /Скачать ZIP/.test(document.getElementById('cpDlCard').textContent)));
+  check('один архив скачивается', DOWNLOADS.some(p => /выгрузки\/LM-1043_вся съёмка_1\.zip$/.test(p)), DOWNLOADS.join(' | '));
+  await page.evaluate(() => { CP.zipTarget = 400 * 1024 * 1024; CP.zipPartMin = 6 * 1024 * 1024; CP.directMin = 48 * 1024 * 1024; });
 
   /* повторное открытие той же съёмки: отбор читается с Диска */
   await page.evaluate(() => { cpShowShelf(); });

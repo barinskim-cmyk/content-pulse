@@ -319,6 +319,16 @@ var CPDisk = (function () {
     }, Promise.resolve([]));
   }
 
+  /** Кусок одного архива (см. proxy/index.js doZipPart). */
+  function proxyZipPart(body) {
+    return proxyReq({ a: 'zippart' }, { method: 'POST', body: body, as: 'json' });
+  }
+
+  /** Размер и тип файла на Диске. */
+  function meta(path) {
+    return api(ep(path), { path: path, fields: 'name,size,type' });
+  }
+
   /** Перенести на Диске [{from, path}] (папки назначения создаются). */
   function proxyMove(items) {
     return proxyReq({ a: 'move' }, { method: 'POST', body: { items: items }, as: 'json' });
@@ -438,6 +448,6 @@ var CPDisk = (function () {
     ensureDir: ensureDir, uploadBlob: uploadBlob, copy: copy, waitOperation: waitOperation,
     readState: readState, writeState: writeState, stateRev: stateRev, safeName: safeName,
     isVd: isVd, rootOf: rootOf, showPath: showPath, rawGet: rawGet,
-    trash: trash, proxyMove: proxyMove
+    trash: trash, proxyMove: proxyMove, proxyZipPart: proxyZipPart, meta: meta
   };
 })();

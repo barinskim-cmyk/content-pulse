@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.54';
+var CP_VERSION = '2.0.55';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1847,14 +1847,95 @@ function cpHrefWhenReady(path) {
 }
 
 /**
- * Собрать архив(ы) выгрузки и начать скачивание.
+ * Собрать архив выгрузки и начать скачивание.
  * entries: [{from: путь на Диске, name: путь внутри архива, size}]
  * -> {parts:[{path, href, files, bytes}], files, bytes}
+ *
+ * Маша, 06.11: «выбрали карточки — разбил архив на два куска, а должен
+ * одним». Теперь архив всегда один: прослойка собирает его за несколько
+ * вызовов кусками одной загрузки в облако (cpZipOne). Несколько архивов —
+ * только если выборка больше 4 ГБ (предел ZIP) или облака нет.
  */
+CP.zipPartMin = 6 * 1024 * 1024;   /* кусок загрузки в облако, кроме последнего, — не меньше 5 МБ */
+
 function cpZipExport(name, entries, note) {
   entries = entries.filter(function (e) { return e.size > 0; });
   var total = entries.reduce(function (a, e) { return a + e.size; }, 0);
+  if (CPDisk.hasProxy() && total < CP_ZIP_FILE_MAX && entries.length < 60000) {
+    return cpZipOne(name, entries, note).catch(function (e) {
+      if (e && e.status === 501) return cpZipParts(name, entries, note);   /* облако не настроено */
+      throw e;
+    });
+  }
+  return cpZipParts(name, entries, note);
+}
+
+/** Один архив, собранный за несколько вызовов прослойки. */
+function cpZipOne(name, entries, note) {
+  var total = entries.reduce(function (a, e) { return a + e.size; }, 0);
+  var target = cpExportsDir() + '/' + name + '.zip';
+  var res = { parts: [], files: 0, bytes: 0 };
+  var up = null, parts = [], done = [], offset = 0, n = 0, i = 0, ts = Date.now();
+  cpDlCard(name, note, [], 'Собираю архив...');
+  function nextChunk() {
+    var chunk = [], bytes = 0;
+    var want = Math.max(CP.zipTarget, CP.zipPartMin);
+    while (i < entries.length && (!chunk.length || bytes < want)) { chunk.push(entries[i]); bytes += entries[i].size; i++; }
+    /* хвост меньше минимального куска — забираем в этот вызов */
+    var rest = 0;
+    for (var j = i; j < entries.length; j++) rest += entries[j].size;
+    if (rest > 0 && rest < CP.zipPartMin) while (i < entries.length) { chunk.push(entries[i]); bytes += entries[i].size; i++; }
+    var final = i >= entries.length;
+    n++;
+    var msg = 'Собираю архив ' + name + ': ' + cpMb(res.bytes + bytes) + ' из ' + cpMb(total) + ' · кадров ' + (res.files + chunk.length) + ' из ' + entries.length;
+    cbBusyShow(msg, Math.max(0.03, res.bytes / Math.max(1, total)));
+    cpDlCard(name, note, [], msg);
+    var t0 = Date.now();
+    var tick = setInterval(function () {
+      cbBusyShow(msg + ' · ' + Math.round((Date.now() - t0) / 1000) + ' с', Math.max(0.03, res.bytes / Math.max(1, total)));
+    }, 1000);
+    return CPDisk.proxyZipPart({
+      key: up.key, uploadId: up.uploadId, n: n, ts: ts, offset: offset, target: target, final: final,
+      entries: chunk.map(function (e) { return { from: e.from, name: name + '/' + e.name, size: e.size }; }),
+      done: final ? done : undefined
+    }).then(function (r) {
+      clearInterval(tick);
+      if (!r || !r.etag || !Array.isArray(r.done) || r.done.length !== chunk.length) throw new Error('кусок архива ' + n + ' собран не полностью');
+      parts.push({ n: r.n, etag: r.etag });
+      done = done.concat(r.done);
+      offset = r.next;
+      res.files += chunk.length;
+      res.bytes += bytes;
+      var ms = Math.max(1000, Date.now() - t0);
+      CP.zipTarget = Math.max(CP_ZIP_MIN, Math.min(CP_ZIP_MAX, Math.round(bytes / ms * CP_ZIP_PART_MS)));
+      return final ? null : nextChunk();
+    }, function (e) { clearInterval(tick); throw e; });
+  }
+  return CPDisk.proxyMpu({ op: 'start', type: 'application/zip' }).then(function (st) {
+    up = st;
+    return nextChunk();
+  }).then(function () {
+    return CPDisk.proxyMpu({ op: 'done', key: up.key, uploadId: up.uploadId, parts: parts, filename: name + '.zip' });
+  }).then(function (out) {
+    if (res.files !== entries.length) throw new Error('в архив попало ' + res.files + ' файлов из ' + entries.length);
+    res.parts.push({ path: target, href: out.url, files: res.files, bytes: res.bytes, label: 'Скачать ZIP', cloud: true });
+    cbBusyHide();
+    cpStartDownload(out.url);
+    cpDlCard(name, note, res.parts, '');
+    return res;
+  }).catch(function (e) {
+    cbBusyHide();
+    if (up) CPDisk.proxyMpu({ op: 'abort', key: up.key, uploadId: up.uploadId }).catch(function () { });
+    if (!(e && e.status === 501 && !up)) cpDlCard(name, note, [], '', 'Не удалось собрать архив: ' + ((e && (e.body || e.message)) || e));
+    throw e;
+  });
+}
+
+/** Запасной путь: несколько архивов (больше 4 ГБ или без облака). */
+function cpZipParts(name, entries, note) {
+  var total = entries.reduce(function (a, e) { return a + e.size; }, 0);
   var single = total <= CP.zipTarget;
+  if (total >= CP_ZIP_FILE_MAX) note = (note ? note + ' ' : '') + 'Больше 4 ГБ — несколько архивов, распакуйте их в одну папку.';
   var dir = cpExportsDir();
   var res = { parts: [], files: 0, bytes: 0 };
   var i = 0, k = 0;
@@ -1945,9 +2026,33 @@ function cpDirectExport(e, onProgress) {
  * Выгрузка целиком: обычные файлы — ZIP (частями, если много), крупные
  * (видео) — отдельными ссылками рядом. Возвращает {parts, files, bytes}.
  */
+var CP_VIDEO_RE = /\.(mp4|mov|m4v|avi|mkv|mxf|webm|mts|m2ts|r3d|braw)$/i;
+
+/** Размеры файлов, которых нет в отборе (старые съёмки): спросить у Диска. Нет файла — в список «не попало». */
+function cpFillSizes(entries) {
+  var need = entries.filter(function (e) { return !(e.size > 0); });
+  if (!need.length) return Promise.resolve({ entries: entries, lost: [] });
+  var lost = [];
+  return cpPool(need, 4, function (e) {
+    return CPDisk.meta(e.from).then(function (m) { if (m && m.size > 0) e.size = m.size; else lost.push(e); },
+      function () { lost.push(e); });
+  }).then(function () {
+    return { entries: entries.filter(function (e) { return e.size > 0; }), lost: lost };
+  });
+}
+
 function cpExportBundle(name, entries, note) {
-  var small = entries.filter(function (e) { return !(e.size > CP.directMin); });
-  var big = entries.filter(function (e) { return e.size > CP.directMin; });
+  return cpFillSizes(entries).then(function (fs) {
+    var lostNote = fs.lost.length ? ' Не попало (нет на Диске или пустой файл): ' + fs.lost.map(function (e) { return e.name.split('/').pop(); }).slice(0, 10).join(', ') + (fs.lost.length > 10 ? '…' : '') + '.' : '';
+    return cpExportBundleSized(name, fs.entries, (note || '') + lostNote);
+  });
+}
+
+function cpExportBundleSized(name, entries, note) {
+  /* отдельной ссылкой — только крупное видео; кадры любого размера — в архиве */
+  var isBig = function (e) { return e.size > CP.directMin && CP_VIDEO_RE.test(e.name); };
+  var small = entries.filter(function (e) { return !isBig(e); });
+  var big = entries.filter(isBig);
   var zipP = small.length ? cpZipExport(name, small, note) : Promise.resolve({ parts: [], files: 0, bytes: 0 });
   return zipP.then(function (res) {
     var chain = Promise.resolve(res);

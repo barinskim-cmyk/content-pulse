@@ -688,6 +688,89 @@ async function doZipInner(token, target, entries, store) {
   }
 }
 
+/* ---------- один архив за несколько вызовов ----------
+   Маша, 06.11: выбрали карточки — архив пришёл двумя кусками, а должен
+   одним. Части были нужны, чтобы каждый вызов функции шёл ~30 с. Теперь
+   части — это куски одной многочастной загрузки в бакет: страница шлёт
+   кадры пачками, каждый вызов дописывает свой кусок ZIP (заголовки и
+   данные; смещения — по ходу), последний вызов дописывает оглавление.
+   Бакет склеивает куски в один файл. Кусок, кроме последнего, — не меньше
+   5 МБ (правило хранилища), за этим следит страница.
+   req: {key, uploadId, n, ts, offset, entries:[{from,name,size}], final, done:[{name,size,crc,offset}]} */
+async function doZipPart(token, req, openPart) {
+  const t0 = Date.now();
+  if (!req.key || !req.uploadId || !(req.n >= 1)) return { status: 400, result: { error: 'Нет загрузки' } };
+  const dt = dosDateTime(new Date(+req.ts || Date.now()));
+  const start = +req.offset || 0;
+  const items = (Array.isArray(req.entries) ? req.entries : []).map((e) => ({ from: e.from, name: Buffer.from(String(e.name).replace(/^\/+/, ''), 'utf8'), size: +e.size || 0 }));
+  if (items.some((x) => !x.size)) return { status: 400, result: { error: 'Нет размеров файлов' } };
+  if (!items.length && !req.final) return { status: 400, result: { error: 'Нет файлов' } };
+  let dataLen = 0;
+  for (const x of items) dataLen += 30 + x.name.length + x.size;
+  let cdLen = 0, prev = [];
+  if (req.final) {
+    prev = (Array.isArray(req.done) ? req.done : []).map((d) => ({ name: Buffer.from(String(d.name).replace(/^\/+/, ''), 'utf8'), size: +d.size, crc: +d.crc >>> 0, offset: +d.offset }));
+    for (const d of prev) cdLen += 46 + d.name.length;
+    for (const x of items) cdLen += 46 + x.name.length;
+    if (prev.length + items.length >= 0xFFFF) return { status: 413, result: { error: 'В архиве больше 65 тысяч файлов' } };
+  }
+  const partLen = dataLen + (req.final ? cdLen + 22 : 0);
+  if (start + partLen >= 0xFFFFFFFF) return { status: 413, result: { error: 'Архив больше 4 ГБ' } };
+  const out = await (openPart || ((len) => openS3Upload(req.key, len, { partNumber: String(req.n), uploadId: req.uploadId }, 'application/octet-stream')))(partLen);
+  const AHEAD = 4;
+  const pending = [];
+  let next = 0;
+  function pump() {
+    while (next < items.length && pending.length < AHEAD) {
+      const x = items[next++];
+      const p = x.size > BIG_ENTRY ? Promise.resolve(null) : readDiskFile(token, x.from);
+      p.catch(() => { });
+      pending.push(p);
+    }
+  }
+  let offset = start;
+  const mine = [];
+  try {
+    pump();
+    for (let i = 0; i < items.length; i++) {
+      const x = items[i];
+      if (Date.now() - t0 > ZIP_BUDGET_MS) throw new Error('Яндекс отдаёт файлы слишком медленно: за ' + Math.round((Date.now() - t0) / 1000) + ' с прочитано ' + i + ' из ' + items.length);
+      const buf = await pending.shift();
+      pump();
+      let crc;
+      if (buf === null) {
+        let c = -1;
+        const n1 = await streamDiskFile(token, x.from, (b) => { c = crc32Update(c, b); });
+        if (n1 !== x.size) throw new Error(x.from.split('/').pop() + ': размер изменился (' + n1 + ' вместо ' + x.size + '), обновите съёмку');
+        crc = (c ^ -1) >>> 0;
+        await out.write(localHeader(x.name, crc, x.size, dt));
+        const n2 = await streamDiskFile(token, x.from, (b) => out.write(b));
+        if (n2 !== x.size) throw new Error(x.from.split('/').pop() + ': файл изменился во время сборки');
+      } else {
+        if (buf.length !== x.size) throw new Error(x.from.split('/').pop() + ': размер изменился (' + buf.length + ' вместо ' + x.size + '), обновите съёмку');
+        crc = crc32(buf);
+        await out.write(localHeader(x.name, crc, x.size, dt));
+        await out.write(buf);
+      }
+      mine.push({ name: x.name, size: x.size, crc, offset });
+      offset += 30 + x.name.length + x.size;
+    }
+    if (req.final) {
+      const cd = Buffer.concat(prev.concat(mine).map((d) => centralHeader(d.name, d.crc, d.size, d.offset, dt)));
+      await out.write(cd);
+      await out.write(endRecord(prev.length + mine.length, cd.length, offset));
+    }
+    const w = await out.end();
+    if (w.status !== 201 || !w.etag) throw new Error('Хранилище не приняло кусок архива: HTTP ' + w.status + ' ' + String(w.body || '').slice(0, 200));
+    console.log(JSON.stringify({ ev: 'zippart', n: req.n, files: items.length, bytes: partLen, ms: Date.now() - t0, final: !!req.final }));
+    return { status: 200, result: { n: req.n, etag: w.etag, next: offset, bytes: partLen, done: mine.map((d) => ({ name: d.name.toString('utf8'), size: d.size, crc: d.crc, offset: d.offset })) } };
+  } catch (e) {
+    out.abort();
+    console.log(JSON.stringify({ ev: 'zippart_error', error: String(e && e.message || e), ms: Date.now() - t0 }));
+    return { status: 422, result: { error: String(e && e.message || e) } };
+  }
+}
+
 module.exports.handler = async function (event) {
   const headers = event.headers || {};
   const origin = headers.Origin || headers.origin || '';
@@ -825,6 +908,17 @@ module.exports.handler = async function (event) {
       return json(r.status, r.result, h);
     }
 
+    if (a === 'zippart') {
+      if (event.httpMethod !== 'POST') return json(405, { error: 'Нужен POST' }, h);
+      if (!s3Ready()) return json(501, { error: 'Хранилище не настроено' }, h);
+      let body = event.body || '';
+      if (event.isBase64Encoded) body = Buffer.from(body, 'base64').toString('utf8');
+      let req;
+      try { req = JSON.parse(body); } catch (e) { return json(400, { error: 'Тело не JSON' }, h); }
+      const r = await doZipPart(token, req);
+      return json(r.status, r.result, h);
+    }
+
     if (a === 'zip') {
       if (event.httpMethod !== 'POST') return json(405, { error: 'Нужен POST' }, h);
       let body = event.body || '';
@@ -954,3 +1048,4 @@ module.exports.handler = async function (event) {
 
 /* для скриптов настройки и проверки (proxy/s3setup.js) */
 module.exports._s3 = { S3, s3Sign, s3Presign, openS3Upload, s3Ready, s3Call };
+module.exports._zip = { doZipPart, doMultipart };
