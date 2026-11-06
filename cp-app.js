@@ -14,6 +14,10 @@
    Префикс: cp*. Без эмодзи и иконок.
    ============================================================ */
 
+/* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
+   Виден на витрине под названием — по нему понятно, куда откатываться. */
+var CP_VERSION = '2.0.38';
+
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
   clientId: '36df38c93cb944318c0084640c77d76a',
@@ -163,7 +167,7 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
   shelf.id = 'cpShelf';
   shelf.innerHTML = ''
     + '<div class="cp-shelf-head">'
-    + '  <div class="cp-brand">CONTENT PULSE<small>ВИТРИНА СЪЁМОК</small></div>'
+    + '  <div class="cp-brand">CONTENT PULSE<small>ВИТРИНА СЪЁМОК · <span id="cpVersion" title="Номер версии программы — список версий в CHANGELOG.md">' + CP_VERSION + '</span></small></div>'
     + '  <div class="cp-sp"></div>'
     + '  <span class="cp-user" id="cpUser"></span>'
     + '  <button id="cpLogout" style="display:none">Выйти</button>'

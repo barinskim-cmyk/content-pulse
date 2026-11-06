@@ -208,6 +208,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('после входа токен убран из адреса', !(await page.url()).includes('access_token'));
   check('витрина: все съёмки из архива', (await page.$$('.cp-shoot')).length === 4);
   check('витрина: имя пользователя', (await page.textContent('#cpUser')) === 'Маша');
+  check('на витрине виден номер версии', /^2\.0\.\d+$/.test(await page.textContent('#cpVersion')));
 
   await page.fill('#cpShelfSearch', '1043');
   check('поиск по коду', (await page.$$('.cp-shoot')).length === 1);
