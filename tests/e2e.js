@@ -441,7 +441,8 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('ретушь с настройкой: <папка ретуши>/<съёмка>/<исходная папка>/<имя>', FILES.has('disk:/Архив/РЕТУШЬ/LM-1043/part2/c.jpg'));
   await page.evaluate(() => cpShowShelf());
   await page.fill('#cpShelfSearch', '');
-  await page.waitForFunction(() => document.querySelectorAll('.cp-shoot').length >= 2);
+  await page.waitForFunction(() => document.querySelectorAll('.cp-shoot').length >= 2 && CP.settings && CP.settings.retouch);
+  await page.evaluate(() => cpRenderShoots());
   check('папка ретуши в архиве не показывается как съёмка', await page.evaluate(() =>
     CP.shoots.some(s => s.name === 'РЕТУШЬ') && [...document.querySelectorAll('.cp-shoot')].every(b => b.dataset.name !== 'РЕТУШЬ')));
   await page.fill('#cpShelfSearch', '1043');
@@ -616,6 +617,49 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   }
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-site.png') });
   await page.click('[data-cp-sr="close"]');
+  /* приём ретуши: «Сдать» — папка архива и отдельная картинка, на приёмку; «Ретушь готова»; согласовать — в «Сайт»; на доработку */
+  {
+    const acc = await page.evaluate(() => {
+      cpAcceptOpen(CP.shoot.path, CP.shoot.name);
+      var f = (n) => new File(['RETOUCHED-' + n], n, { type: 'image/tiff' });
+      cpAcceptAdd([
+        { file: f('01_manekin2.tif'), rel: '2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST_Y_1/74596/01_manekin2.tif' },
+        { file: f('.DS_Store'), rel: '2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST_Y_1/.DS_Store/x' },
+        { file: f('IMG_0101.tif'), rel: '2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST_Y_1/лишнее/IMG_0101.tif' },
+        { file: f('чужой.jpg'), rel: '2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST_Y_1/лишнее/чужой.jpg' }
+      ]);
+      return new Promise(r => setTimeout(() => r({ plan: CP.accept.plan && { letter: CP.accept.letter, n: CP.accept.n, cards: Object.keys(CP.accept.plan.groups).length, un: CP.accept.plan.unmatched }, today: cpToday(),
+        text: document.getElementById('cpAccPlan').textContent }), 300));
+    });
+    check('«Сдать»: буква и номер из имени архива, карточки по папке и по имени кадра, чужое — списком', acc.plan && acc.plan.letter === 'Y' && acc.plan.n === '1' && acc.plan.cards === 2 && acc.plan.un.length === 1 && /Не нашлась карточка \(1\)/.test(acc.text), JSON.stringify(acc));
+    await page.click('[data-cp-acc="go"]');
+    await page.waitForFunction(() => Object.keys(cpMeta().rv || {}).length === 2, null, { timeout: 10000 }).catch(() => {});
+    const SH = 'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST';
+    const acceptPath = SH + '/_приёмка/' + acc.today + '_Y_1/74596/01_manekin2.tif';
+    check('загружено на приёмку: <съёмка>/_приёмка/<дата>_Y_1/<карточка>/, версии «на проверке»', FILES.has(acceptPath)
+      && await page.evaluate(() => Object.values(cpMeta().rv).every(l => l.length === 1 && l[0].status === 'review' && l[0].letter === 'Y')), [...FILES.keys()].filter(k => /_приёмка/.test(k)).join(' | '));
+    await page.click('[data-cp-acc="close"]');
+    const ids = await page.evaluate(() => Object.keys(cpMeta().rv));
+    check('на карточке с ретушью — версия, картинки и «Согласовать ретушь»; без ретуши — кнопки нет', await page.evaluate(x =>
+      x.every(id => document.querySelector('[data-cp-rv="' + id + '"] [data-cp-rva="approve"]')) && document.querySelectorAll('[data-cp-rva="approve"]').length === x.length, ids));
+    await page.check('#cpRvOnly');
+    check('«Ретушь готова»: видны только карточки с загруженной ретушью', await page.evaluate(x =>
+      [...document.querySelectorAll('#cbCards .cb-card')].every(el => (getComputedStyle(el).display !== 'none') === x.includes(el.getAttribute('data-cid'))), ids));
+    const c96 = await page.evaluate(() => App.cards.find(c => c.title === '74596').id);
+    await page.click('[data-cp-rv="' + c96 + '"] [data-cp-rva="approve"]');
+    await page.waitForFunction(id => cpMeta().rv[id][0].status === 'approved', c96, { timeout: 8000 }).catch(() => {});
+    check('согласовано: файлы в «Сайт / дата / Y_1 / съёмка / карточка», карточка загружена', FILES.has('disk:/Сайт/' + acc.today + '/Y_1/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/74596/01_manekin2.tif')
+      && await page.evaluate(id => !!cpMeta().delivered[id] && cpMeta().rv[id][0].status === 'approved', c96), [...FILES.keys()].filter(k => /Сайт\/2026/.test(k)).join(' | '));
+    const other = ids.find(i => i !== c96);
+    page.once('dialog', d => d.accept('свет пересвечен'));
+    await page.click('[data-cp-rv="' + other + '"] [data-cp-rva="rework"]');
+    await page.waitForTimeout(200);
+    check('на доработку: заметка, кнопок согласования нет, ждёт новой версии', await page.evaluate(id => cpMeta().rv[id][0].status === 'rework' && cpMeta().rv[id][0].note === 'свет пересвечен'
+      && !document.querySelector('[data-cp-rv="' + id + '"] [data-cp-rva]') && /доработке/.test(document.querySelector('[data-cp-rv="' + id + '"]').textContent), other));
+    await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-accept.png') });
+    await page.uncheck('#cpRvOnly');
+  }
+
   /* статус пачкой: отмеченные в списке справа — в брак, на согласование, снять, на ретушь */
   await page.evaluate(() => { CP.checked = {}; cbRenderOutline(); });
   const bt = await page.evaluate(() => [App.cards.find(c => c.title === '74596').id, App.cards.find(c => c.title === '74598').id, App.photos.find(p => /manekin2/.test(p.disk)).id]);
@@ -956,7 +1000,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.fill('#cpShelfSearch', '');
     await page.evaluate(() => cpRenderShoots());
     await page.waitForFunction(() => document.getElementById('cpStages') && !document.querySelector('.cp-stages-wait') && CP.shoots.length > 3, null, { timeout: 20000 }).catch(() => {});
-    check('сводка съёмок без неё — посчитана в фоне и записана в свойства папок', PROPS.has('disk:/Архив/LM-1043') && /^v3;/.test(PROPS.get('disk:/Архив/LM-1043').cp_sum)
+    check('сводка съёмок без неё — посчитана в фоне и записана в свойства папок', PROPS.has('disk:/Архив/LM-1043') && /^v4;/.test(PROPS.get('disk:/Архив/LM-1043').cp_sum)
       && /rt=1/.test((PROPS.get('disk:/Архив/2026-11-05_ЖДЁТ_РЕТУШИ') || {}).cp_sum || ''), JSON.stringify([...PROPS.entries()]));
     const shownFor = async key => { await page.click('[data-cp-stage="' + key + '"]'); return page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-shoot')].map(b => b.dataset.name)); };
     const rt = await shownFor('retouch');
@@ -980,7 +1024,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
       var row = n => [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === n);
       var a = row('2026-11-04_СДАНА').querySelector('.cp-artbar'), b = row('2026-11-05_ЖДЁТ_РЕТУШИ').querySelector('.cp-artbar'), c = row('2026-11-05_ЖДЁТ_СОГЛАСОВАНИЯ').querySelector('.cp-artbar');
       return a && /артикулов 1/.test(a.textContent) && /загружено 1/.test(a.textContent) && b && /ретушь 1/.test(b.textContent) && c && /согласование 1/.test(c.textContent) && !row('LM-2001').querySelector('.cp-artbar')
-        && /артикулов 3/.test(row('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST').querySelector('.cp-artbar').textContent) && /скачано \d/.test(row('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST').querySelector('.cp-artbar').textContent);
+        && /артикулов 3/.test(row('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST').querySelector('.cp-artbar').textContent) && /загружено 1/.test(row('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST').querySelector('.cp-artbar').textContent);
     }), await page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-artbar')].map(x => x.textContent).join(' | ')));
     await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-stages.png') });
     await page.fill('#cpShelfSearch', '1043');

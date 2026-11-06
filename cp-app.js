@@ -16,7 +16,7 @@
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.47';
+var CP_VERSION = '2.0.48';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -921,7 +921,7 @@ function cpMerge3(base, local, remote) {
   var bm = (base.meta || {}).cp || {}, lm = (local.meta || {}).cp || {}, rm = (remote.meta || {}).cp || {};
   out.meta = out.meta || {};
   var cp = out.meta.cp = cpClone(rm) || {};
-  ['status', 'cardStatus', 'downloads', 'likes', 'folderTags'].forEach(function (k) { cp[k] = cpMergeMap(bm[k], lm[k], rm[k]); });
+  ['status', 'cardStatus', 'downloads', 'likes', 'folderTags', 'delivered', 'rv'].forEach(function (k) { cp[k] = cpMergeMap(bm[k], lm[k], rm[k]); });
   var seen = {}, ev = [];
   (rm.events || []).concat(lm.events || []).forEach(function (e) {
     var key = e.ts + '|' + e.action + '|' + e.actor + '|' + JSON.stringify(e.items || []);
@@ -1190,6 +1190,8 @@ var CP_ACTION_LABEL = {
   merged: 'склеены версии отбора', restored: 'восстановлены несохранённые правки',
   collect_cards: 'собрал(а) карточки по папкам', restore_version: 'вернул(а) версию отбора',
   retouch_sync: 'докопировал(а) на ретушь',
+  added_to_approval_card: 'добавлено в карточку на согласовании — тоже на согласовании',
+  rt_upload: 'сдал(а) ретушь на приёмку', rt_approve: 'согласовал(а) ретушь — в «Сайт»', rt_rework: 'вернул(а) ретушь на доработку',
   removed_after_download: 'убрал(а) из отбора уже скачанное',
   added_to_retouch_card: 'добавил(а) кадры в карточку на ретуши',
   card_tag: 'поставил(а) тег карточке', card_untag: 'снял(а) тег с карточки'

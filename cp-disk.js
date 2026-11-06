@@ -195,7 +195,7 @@ var CPDisk = (function () {
                 if (r.name.charAt(0) === '_' || r.name === RETOUCH_DIR) return;
                 queue.push(r.path);
                 out.dirs.push(r.path);
-              } else if (allFiles ? !JUNK_RE.test(r.name) : PHOTO_RE.test(r.name)) {
+              } else if (allFiles ? !JUNK_RE.test(r.name) && r.name !== STATE_FILE : PHOTO_RE.test(r.name)) {
                 out.push(r);
               }
             });

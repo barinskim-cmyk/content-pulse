@@ -20,7 +20,10 @@
      согласование — карточка на согласовании;
      ретушь       — отправлена на ретушь, ретушёр ещё не забрал все кадры;
      скачано      — ретушёр забрал все кадры карточки;
-     загружено    — готовое нашлось в «Сайте» (проверка сдачи);
+     проверка     — ретушь сдана на приёмку, ждёт согласования
+                    (на доработке — снова «ретушь»);
+     загружено    — согласовано и лежит в «Сайте» (или нашлось там при
+                    проверке сдачи);
      брак         — карточка в браке (пересъём).
    Артикулы — папки артикулов по «Структуре съёмок» и карточки товара
    (по коду); у артикула с несколькими карточками — самая дальняя стадия.
@@ -30,6 +33,7 @@
      Отбор — есть артикулы в отборе (или отбора нет совсем);
      Согласование — есть карточки или кадры на согласовании;
      Ретушь — есть кадры на ретуши, которые ещё не скачали;
+     Проверка — есть сданная ретушь, которую ещё не согласовали;
      Не начаты — ни одной карточки с кадрами; Сданы — все артикулы
      загружены (или в браке); В работе — остальные.
    ============================================================ */
@@ -66,14 +70,18 @@ function cpShootSummary(data, codes) {
   data = data || {};
   codes = codes || {};
   var cp = (data.meta || {}).cp || {};
-  var status = cp.status || {}, cardStatus = cp.cardStatus || {}, dl = cp.downloads || {}, del = cp.delivered || {};
-  var s = { cards: 0, filled: 0, empty: 0, rt: 0, ra: 0, ap: 0, rs: 0, del: Object.keys(del).length, rc: 0, k: [0, 0, 0, 0, 0, 0] };
+  var status = cp.status || {}, cardStatus = cp.cardStatus || {}, dl = cp.downloads || {}, del = cp.delivered || {}, rv = cp.rv || {};
+  var s = { cards: 0, filled: 0, empty: 0, rt: 0, ra: 0, ap: 0, rs: 0, del: Object.keys(del).length, rc: 0, rv: 0, k: [0, 0, 0, 0, 0, 0, 0] };
+  Object.keys(rv).forEach(function (id) { var l = rv[id] || []; if (l.length && l[l.length - 1].status === 'review') s.rv++; });
   var cards = data.cards || [];
   var pidsOf = function (c) { return c.mode === 'auto' ? (c.pids || []) : (c.slots || []).map(function (x) { return x.pid; }).filter(Boolean); };
   var stageOf = function (c) {
     var ps = pidsOf(c), cs = cardStatus[c.id] && cardStatus[c.id].s;
-    if (cs === 'reshoot') return 5;
-    if (del[c.id]) return 4;
+    var vl = rv[c.id] || [], last = vl[vl.length - 1];
+    if (cs === 'reshoot') return 6;
+    if (del[c.id]) return 5;
+    if (last && last.status === 'review') return 4;
+    if (last && last.status === 'rework') return 2;
     if (ps.length && ps.every(function (pid) { return dl[pid] && dl[pid].n; })) return 3;
     if (cs === 'retouch') return 2;
     if (cs === 'approval') return 1;
@@ -111,29 +119,30 @@ function cpShootSummary(data, codes) {
 }
 
 function cpSumEncode(s) {
-  return 'v3;n=' + s.cards + ';f=' + s.filled + ';e=' + s.empty + ';rt=' + s.rt + ';ra=' + s.ra + ';ap=' + s.ap + ';rs=' + s.rs + ';d=' + s.del + ';rc=' + s.rc + ';k=' + s.k.join(',');
+  return 'v4;n=' + s.cards + ';f=' + s.filled + ';e=' + s.empty + ';rt=' + s.rt + ';ra=' + s.ra + ';ap=' + s.ap + ';rs=' + s.rs + ';d=' + s.del + ';rc=' + s.rc + ';rv=' + s.rv + ';k=' + s.k.join(',');
 }
 
 /* старые версии сводки (без стадий артикулов по папкам) не берём — пересчитываются в фоне */
 function cpSumDecode(str) {
-  if (!str || !/^v3;/.test(str)) return null;
-  var m = {}, k = [0, 0, 0, 0, 0, 0];
+  if (!str || !/^v4;/.test(str)) return null;
+  var m = {}, k = [0, 0, 0, 0, 0, 0, 0];
   str.split(';').slice(1).forEach(function (kv) {
     var p = kv.split('=');
     if (p[0] === 'k') k = p[1].split(',').map(function (x) { return +x || 0; });
     else m[p[0]] = +p[1] || 0;
   });
-  return { cards: m.n || 0, filled: m.f || 0, empty: m.e || 0, rt: m.rt || 0, ra: m.ra || 0, ap: m.ap || 0, rs: m.rs || 0, del: m.d || 0, rc: m.rc || 0, k: k };
+  return { cards: m.n || 0, filled: m.f || 0, empty: m.e || 0, rt: m.rt || 0, ra: m.ra || 0, ap: m.ap || 0, rs: m.rs || 0, del: m.d || 0, rc: m.rc || 0, rv: m.rv || 0, k: k };
 }
 
 /** Что нужно сделать со съёмкой (для фильтров). */
 function cpStagesOf(sum) {
   if (!sum) return null;
   var total = sum.k.reduce(function (a, b) { return a + b; }, 0);
-  var done = total > 0 && sum.k[4] > 0 && sum.k[4] + sum.k[5] === total;
+  var done = total > 0 && sum.k[5] > 0 && sum.k[5] + sum.k[6] === total;
   return {
     select: sum.k[0] > 0 || sum.filled === 0,
     retouch: sum.rt > 0,
+    review: sum.rv > 0,
     approval: sum.ap > 0,
     fresh: sum.filled === 0,
     work: sum.filled > 0 && !done,
@@ -181,7 +190,7 @@ function cpSumOf(d) {
 function cpStagesFor(d) {
   var sum = cpSumOf(d);
   if (sum) return cpStagesOf(sum);
-  return d.cpSumDone ? { select: true, retouch: false, approval: false, fresh: true, work: false, done: false } : null;
+  return d.cpSumDone ? { select: true, retouch: false, review: false, approval: false, fresh: true, work: false, done: false } : null;
 }
 
 var CP_STAGES = [
@@ -189,6 +198,7 @@ var CP_STAGES = [
   { key: 'select', label: 'Отбор' },
   { key: 'approval', label: 'Согласование' },
   { key: 'retouch', label: 'Ретушь' },
+  { key: 'review', label: 'Проверка' },
   { key: 'fresh', label: 'Не начаты', sep: true },
   { key: 'work', label: 'В работе' },
   { key: 'done', label: 'Сданы' }
@@ -216,7 +226,7 @@ function cpRenderStageBar() {
   if (!box) return;
   var hide = CP.settings && CP.settings.retouch;
   var shoots = (CP.shoots || []).filter(function (d) { return d.path !== hide; });
-  var keys = ['select', 'retouch', 'approval', 'fresh', 'work', 'done'];
+  var keys = ['select', 'retouch', 'review', 'approval', 'fresh', 'work', 'done'];
   var counts = { '': shoots.length }, pending = 0;
   keys.forEach(function (k) { counts[k] = 0; });
   shoots.forEach(function (d) {
@@ -232,7 +242,7 @@ function cpRenderStageBar() {
 
 var CP_ART_STAGES = [
   { label: 'отбор', cls: 'k1' }, { label: 'согласование', cls: 'k2' }, { label: 'ретушь', cls: 'k3' },
-  { label: 'скачано', cls: 'k4' }, { label: 'загружено', cls: 'k5' }, { label: 'брак', cls: 'k6' }
+  { label: 'скачано', cls: 'k4' }, { label: 'проверка', cls: 'k7' }, { label: 'загружено', cls: 'k5' }, { label: 'брак', cls: 'k6' }
 ];
 
 /** Под съёмкой: сколько артикулов на какой стадии — полоска и подписи с числами. */
@@ -273,6 +283,7 @@ cpRenderShoots = (function (orig) {
         else if (sum.k[0]) parts.push('<span class="cp-todo-s">в отборе: ' + sum.k[0] + ' арт.</span>');
         if (sum.rt) parts.push('<span class="cp-todo-r">ретушь не скачана: ' + sum.rt + ' кадр.</span>');
         if (sum.ap) parts.push('<span class="cp-todo-a">на согласовании: ' + sum.ap + '</span>');
+        if (sum.rv) parts.push('<span class="cp-todo-r">ретушь на проверке: ' + sum.rv + '</span>');
       }
       if (parts.length) meta.insertAdjacentHTML('beforeend', '<span class="cp-todo">' + parts.join(' · ') + '</span>');
       if (sum) b.insertAdjacentHTML('beforeend', cpArtBar(sum));
@@ -331,7 +342,7 @@ document.getElementById('cpShelfRefresh').onclick = function () { cpLoadShoots()
     + '.cp-artbar-line i{display:block;min-width:2px}'
     + '.cp-artbar-leg{white-space:normal;line-height:1.7}.cp-artbar-leg span{white-space:nowrap}.cp-artbar-leg b{color:#f2f2f1;font-weight:600}'
     + '.cp-artbar-leg span i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px;vertical-align:0}'
-    + '.cp-k1{background:#8a7a64}.cp-k2{background:#5b7aa0}.cp-k3{background:#C9956B}.cp-k4{background:#9a8a3c}.cp-k5{background:#5f8a63}.cp-k6{background:#b5533c}'
+    + '.cp-k1{background:#8a7a64}.cp-k2{background:#5b7aa0}.cp-k3{background:#C9956B}.cp-k4{background:#9a8a3c}.cp-k5{background:#5f8a63}.cp-k6{background:#b5533c}.cp-k7{background:#7a6a9a}'
     + '.cp-todo{display:block;margin-top:3px;white-space:normal}.cp-todo span{white-space:nowrap}.cp-todo-s{color:#cfcac2}.cp-todo-r{color:#e7c9a8}.cp-todo-a{color:#a9c3e0}.cp-todo-d{color:#9fc2a3}.cp-todo-w{color:#6d6d6c}';
   var st = document.createElement('style');
   st.textContent = css;

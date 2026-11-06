@@ -542,7 +542,7 @@ function cpPanelHidden() { return cpGet('cp_panel_off', '') === '1'; }
     + '.cp-obar{position:sticky;bottom:0;background:#161615;border-top:1px solid #2a2a28;padding:10px 12px;display:flex;flex-direction:column;gap:8px;margin-top:10px}'
     + '.cp-obar-n{font-size:11px;color:#a3a09a}.cp-obar-hint{font-size:10px;color:#a3a09a}'
     + '.cp-obar-l{display:flex;flex-wrap:wrap;gap:4px}.cp-obar-l button{min-width:28px;padding:3px 6px}'
-    + '.cp-obar-s{display:grid;grid-template-columns:1fr 1fr;gap:4px}.cp-obar-s button{padding:4px 6px;font-size:12px}'
+    + '.cp-obar-s{display:grid;grid-template-columns:1fr 1fr;gap:4px}.cp-obar-s button{padding:4px 4px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}'
     + '.cp-card-del{font-size:10px;color:#9fc2a3;border:1px solid #3d5a40;border-radius:10px;padding:1px 8px;margin-left:6px}'
     + 'body.cp-panel-off #cpPanel{display:none!important}';
   var st = document.createElement('style');

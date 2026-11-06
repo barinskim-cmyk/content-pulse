@@ -97,7 +97,8 @@ function cpGuardCheck() {
       changed = true;
     }
     removed.forEach(function (pid) { removals.push({ pid: pid, cid: cid }); });
-    if (card && cst && cst.s === 'retouch' && added.length) additions.push({ card: card, pids: added });
+    /* согласование и ретушь — атрибуты карточки: добавленный кадр их получает */
+    if (card && cst && (cst.s === 'retouch' || cst.s === 'approval') && added.length) additions.push({ card: card, pids: added, s: cst.s });
   });
   /* сначала убранные: теряют статус, полученный от карточки, — кроме брака */
   removals.forEach(function (r) {
@@ -122,7 +123,12 @@ function cpGuardCheck() {
       var p = cbPhotoById(pid);
       return p && (p.kind || 'photo') !== 'ref' && (!st || st.s === 'removed');
     });
-    if (fresh.length) inherit.push({ card: x.card, pids: fresh });
+    if (!fresh.length) return;
+    if (x.s === 'approval') {
+      fresh.forEach(function (pid) { m.status[pid] = { s: 'approval', by: actor, ts: ts, card: x.card.id }; });
+      cpEvent('added_to_approval_card', cpPhotoNames(fresh), { card: x.card.title }, true);
+      changed = true;
+    } else inherit.push({ card: x.card, pids: fresh });
   });
   if (warnCards.length) {
     warnCards.forEach(function (w) {
