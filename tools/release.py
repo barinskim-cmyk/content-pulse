@@ -7,8 +7,11 @@
 Одним коммитом: следующий номер 2.0.N из tools/versions.tsv ставится в
 CP_VERSION (cp-app.js, его видно на витрине) и в ?v= у скриптов
 (index.html — браузер берёт свежие файлы), строка дописывается в
-versions.tsv, пересобирается CHANGELOG.md. Потом метка v2.0.N и отправка
-на GitHub вместе с меткой. Версию прослойки (Yandex Cloud) передавать,
+versions.tsv, пересобирается CHANGELOG.md; в конце заголовка коммита —
+«(2.0.N)». Метки git (tags) отсюда на GitHub не отправляются (прокси
+пускает только ветку), поэтому коммит версии записывается в versions.tsv:
+у прошлых версий — сразу, у новой — при следующем выпуске (ищется по
+«(2.0.N)» в заголовке). Версию прослойки (Yandex Cloud) передавать,
 если её выкладывали в этой правке — печатает proxy/deploy.py.
 
     python3 tools/release.py --changelog   — только пересобрать CHANGELOG.md
@@ -37,7 +40,7 @@ def rows():
     for line in open(TSV, encoding='utf-8'):
         if line.strip():
             p = line.rstrip('\n').split('\t')
-            out.append((p + [''] * 4)[:4])   # номер, когда (МСК), что поменялось, версия прослойки
+            out.append((p + [''] * 5)[:5])   # номер, когда (МСК), что поменялось, версия прослойки, коммит
     return out
 
 
@@ -47,18 +50,19 @@ def changelog():
             'Откатиться — сказать «верни версию 2.0.N»: код этой версии вернётся новой версией '
             '(история не теряется), прослойка в Yandex Cloud — на версию из колонки «Прослойка». '
             'Как это делается — tools/rollback.md.', '',
-            '| Версия | Когда (МСК) | Что поменялось | Прослойка |', '|---|---|---|---|']
+            '| Версия | Когда (МСК) | Что поменялось | Прослойка | Коммит |', '|---|---|---|---|---|']
     body, proxy = [], ''
-    for n, when, text, pv in rows():
+    for n, when, text, pv, commit in rows():
         if pv:
             proxy = pv
-        body.append('| 2.0.%s | %s | %s | %s |' % (n, when, text, ('**' + pv + '**') if pv else (proxy or '—')))
+        body.append('| 2.0.%s | %s | %s | %s | %s |' % (n, when, text, ('**' + pv + '**') if pv else (proxy or '—'), commit or 'последний'))
     open(os.path.join(ROOT, 'CHANGELOG.md'), 'w', encoding='utf-8').write('\n'.join(head + body[::-1]) + '\n')
 
 
 def main():
     text, msgfile = sys.argv[1], sys.argv[2]
     pv = sys.argv[3] if len(sys.argv) > 3 else ''
+    backfill()
     n = int(rows()[-1][0]) + 1
     ver = '2.0.%d' % n
     app = os.path.join(ROOT, 'cp-app.js')
@@ -72,20 +76,31 @@ def main():
     open(idx, 'w', encoding='utf-8').write(re.sub(r'(cp-[a-z]+\.js\?v=)[0-9a-z.]+', r'\g<1>' + ver, h))
     when = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)).strftime('%d.%m.%Y %H:%M')
     with open(TSV, 'a', encoding='utf-8') as f:
-        f.write('%d\t%s\t%s\t%s\n' % (n, when, text, pv))
+        f.write('%d\t%s\t%s\t%s\t\n' % (n, when, text, pv))
     changelog()
     sh('git', 'add', 'cp-app.js', 'index.html', 'tools/versions.tsv', 'CHANGELOG.md')
     msg = re.sub(r'\n*Co-Authored-By:.*', '', open(msgfile, encoding='utf-8').read().strip(), flags=re.S)
     first, _, rest = msg.partition('\n')
     sh(*GIT, 'commit', '-q', '-m', '%s (%s)%s%s' % (first, ver, '\n' + rest if rest else '', TRAILER))
-    sh(*GIT, 'tag', '-a', 'v' + ver, '-m', text)
     sh('git', 'push', '-q', 'origin', 'main')
-    sh('git', 'push', '-q', 'origin', 'v' + ver)
     print(ver, sh('git', 'rev-parse', '--short', 'HEAD'))
+
+
+def backfill():
+    """Дописать коммиты версиям, у которых его ещё нет (ищем «(2.0.N)» в заголовке)."""
+    rs, changed = rows(), False
+    for r in rs:
+        if not r[4]:
+            h = sh('git', 'log', '--format=%h', '-F', '--grep', '(2.0.%s)' % r[0], '-n', '1')
+            if h:
+                r[4], changed = h, True
+    if changed:
+        open(TSV, 'w', encoding='utf-8').write(''.join('\t'.join(r) + '\n' for r in rs))
 
 
 if __name__ == '__main__':
     if sys.argv[1:2] == ['--changelog']:
+        backfill()
         changelog()
     else:
         main()
