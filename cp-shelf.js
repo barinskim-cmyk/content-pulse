@@ -84,6 +84,9 @@ var CP_DICT_TEMPLATE = [
     + '.cp-fold-all{border-bottom:1px solid #2a2a28;margin-top:10px}'
     + '.cp-fold-name{flex:1;font-weight:600}'
     + '.cp-fold-props{display:flex;flex-wrap:wrap;gap:4px;align-items:center;justify-content:flex-end}'
+    + '.cp-fold-sub{border-bottom-color:#1a1a18}.cp-fold-sub label span{color:#cfcac2}'
+    + '.cp-fold-exp{background:none;border:1px solid #2f2f2c;color:#a3a09a;font-size:10px;padding:2px 6px;border-radius:2px;cursor:pointer;white-space:nowrap}'
+    + '.cp-fold-exp:hover{border-color:#C9956B;color:#e7c9a8}'
     + '.cp-state{font-size:10px;color:#a3a09a;border:1px solid #3a3a37;border-radius:10px;padding:1px 7px;white-space:nowrap}'
     + '.cp-state-retouch{color:#e7c9a8;border-color:#5a4632}.cp-state-dl{color:#9fc2a3;border-color:#3d5a40}'
     + '.cp-state-removed{color:#f2b8a0;border-color:#8a4a32}'
@@ -264,7 +267,7 @@ function cpMarkSelected() {
 
 function cpSelectShoot(path, name, modified) {
   CP.sel = { path: path, name: name, modified: modified, loading: true,
-    folders: {}, status: '', tag: '', dl: '', data: null, rev: '', files: [], dirs: [] };
+    folders: {}, open: {}, status: '', tag: '', dl: '', data: null, rev: '', files: [], dirs: [] };
   cpMarkSelected();
   cpRenderPanel();
   var sel = CP.sel;
@@ -385,13 +388,14 @@ function cpRelOf(shootPath, disk) {
 /** Индекс кадров съёмки: disk -> {pid, rel, dir, status, dl, tags[], cards[]} */
 function cpPhotoIndex(sel) {
   var data = sel.data || {}, meta = cpSelMeta(data);
-  var pidByDisk = {}, cardTags = {}, cardsOf = {};
+  var pidByDisk = {}, cardTags = {}, cardsOf = {}, artDirOf = {};
   (data.photos || []).forEach(function (p) { if (p.disk) pidByDisk[p.disk] = p.id; });
   (data.cards || []).forEach(function (c, ci) {
     var pids = c.mode === 'auto' ? (c.pids || []) : (c.slots || []).map(function (s) { return s.pid; });
     pids.forEach(function (pid) {
       if (!pid) return;
       (cardsOf[pid] = cardsOf[pid] || []).push(ci);
+      if (c.cpArticleDir && !artDirOf[pid]) artDirOf[pid] = c.cpArticleDir;
       (c.tags || []).forEach(function (t) { (cardTags[pid] = cardTags[pid] || {})[t] = true; });
     });
   });
@@ -400,12 +404,16 @@ function cpPhotoIndex(sel) {
     var rel = cpRelOf(sel.path, f.path);
     var dir = rel.indexOf('/') === -1 ? '' : rel.slice(0, rel.lastIndexOf('/'));
     var pid = pidByDisk[f.path] || null;
+    /* кадр лука в карточке артикула относится и к папке этого артикула:
+       выбрали папку артикула — он скачивается с ней, её теги и статусы — его */
+    var dirs = [dir], ad = pid && artDirOf[pid];
+    if (ad && ad !== dir && dir.indexOf(ad + '/') !== 0) dirs.push(ad);
     var tags = {};
     Object.keys(meta.folderTags).forEach(function (fp) {
-      if (fp === '' || dir === fp || dir.indexOf(fp + '/') === 0) (meta.folderTags[fp] || []).forEach(function (t) { tags[t] = true; });
+      if (fp === '' || dirs.some(function (d) { return d === fp || d.indexOf(fp + '/') === 0; })) (meta.folderTags[fp] || []).forEach(function (t) { tags[t] = true; });
     });
     if (pid && cardTags[pid]) Object.keys(cardTags[pid]).forEach(function (t) { tags[t] = true; });
-    idx[f.path] = { file: f, pid: pid, rel: rel, dir: dir,
+    idx[f.path] = { file: f, pid: pid, rel: rel, dir: dir, dirs: dirs,
       status: pid && meta.status[pid] ? meta.status[pid].s : '',
       dl: pid && meta.downloads[pid] ? meta.downloads[pid].n : 0,
       tags: Object.keys(tags), cards: pid ? (cardsOf[pid] || []) : [] };
@@ -442,7 +450,7 @@ function cpFiltered(sel) {
   var idx = cpPhotoIndex(sel);
   var folders = Object.keys(sel.folders).filter(function (k) { return sel.folders[k]; });
   return Object.keys(idx).map(function (k) { return idx[k]; }).filter(function (x) {
-    if (folders.length && !folders.some(function (f) { return x.dir === f || x.dir.indexOf(f + '/') === 0; })) return false;
+    if (folders.length && !folders.some(function (f) { return x.dirs.some(function (d) { return d === f || d.indexOf(f + '/') === 0; }); })) return false;
     if (sel.status === 'none' && x.status) return false;
     if (sel.status && sel.status !== 'none' && x.status !== sel.status) return false;
     if (sel.tag && x.tags.indexOf(sel.tag) === -1) return false;
@@ -453,6 +461,48 @@ function cpFiltered(sel) {
 }
 
 /* ---------- отрисовка панели ---------- */
+
+/** Дерево папок съёмки: родитель (относительный путь, '' — корень) -> дочерние папки. */
+function cpFolderTree(sel) {
+  var root = sel.path.replace(/\/+$/, '') + '/';
+  var all = {};
+  (sel.files.dirs || []).forEach(function (d) { if (d.indexOf(root) === 0) all[d.slice(root.length)] = true; });
+  sel.files.forEach(function (f) {
+    var parts = cpRelOf(sel.path, f.path).split('/');
+    parts.pop();
+    for (var i = 1; i <= parts.length; i++) all[parts.slice(0, i).join('/')] = true;
+  });
+  (sel.dirs || []).forEach(function (d) { all[d.name] = true; });
+  var kids = {};
+  Object.keys(all).forEach(function (r) {
+    if (!r) return;
+    var par = r.indexOf('/') === -1 ? '' : r.slice(0, r.lastIndexOf('/'));
+    (kids[par] = kids[par] || []).push(r);
+  });
+  Object.keys(kids).forEach(function (k) {
+    kids[k].sort(function (a, b) { return a.split('/').pop().localeCompare(b.split('/').pop(), undefined, { numeric: true }); });
+  });
+  return kids;
+}
+
+/** Сводка по каждой папке вместе с вложенными: кадров, на ретуши, скачано... — за один проход. */
+function cpFolderAgg(idx) {
+  var agg = {};
+  Object.keys(idx).forEach(function (k) {
+    var x = idx[k], seen = {};
+    (x.dirs || [x.dir]).forEach(function (d) {
+      var parts = d ? d.split('/') : [];
+      for (var i = 1; i <= parts.length; i++) seen[parts.slice(0, i).join('/')] = true;
+    });
+    Object.keys(seen).forEach(function (fp) {
+      var a = agg[fp] || (agg[fp] = { n: 0, retouch: 0, approval: 0, reshoot: 0, removed: 0, dl: 0 });
+      a.n++;
+      if (x.status && a[x.status] !== undefined) a[x.status]++;
+      if (x.dl) a.dl++;
+    });
+  });
+  return agg;
+}
 
 /** Что внутри папки (с вложенными): сколько на ретуши, скачано и т. д. fp=null — вся съёмка. */
 function cpFolderState(idx, fp) {
@@ -523,9 +573,6 @@ function cpRenderPanel() {
   }
   var meta = cpSelMeta(sel.data);
   var idx = cpPhotoIndex(sel);
-  var countIn = function (fp) {
-    return Object.keys(idx).filter(function (k) { var d = idx[k].dir; return d === fp || d.indexOf(fp + '/') === 0; }).length;
-  };
   var body = '';
   var untagAttr = function (html, fp) { return html.replace(/data-cp-untag=/g, 'data-cp-fold-untag="' + cbEsc(fp) + '" data-cp-untag='); };
   var plus = function (fp) { return '<button class="cp-addtag" data-cp-addtag="' + cbEsc(fp) + '" title="Добавить тег">+</button>'; };
@@ -535,18 +582,31 @@ function cpRenderPanel() {
     + '<span class="cp-fold-props">' + cpStateChips(cpFolderState(idx, null))
     + untagAttr(cpTagChips(meta.folderTags[''] || [], true), '') + plus('') + '</span></div>';
 
-  /* папки следующего уровня: что внутри (ретушь, скачано...) и теги, «+» — тег из словаря */
+  /* дерево папок до последнего уровня: у каждой — галочка для скачивания,
+     что внутри (ретушь, скачано... — вместе с вложенными), теги и «+» */
+  var kids = cpFolderTree(sel), agg = cpFolderAgg(idx);
+  var top = kids[''] || [];
   var nChecked = Object.keys(sel.folders).filter(function (k) { return sel.folders[k]; }).length;
-  body += '<h4>Папки · ' + sel.dirs.length
-    + (sel.dirs.length > 1 ? ' · <a href="#" data-cp-p="foldall">' + (nChecked === sel.dirs.length ? 'снять все' : 'отметить все') + '</a>' : '') + '</h4>';
-  if (!sel.dirs.length) body += '<div class="cp-note">Вложенных папок нет — все кадры лежат в корне съёмки.</div>';
-  sel.dirs.forEach(function (d) {
-    var fp = d.name;
-    var own = meta.folderTags[fp] || [];
-    body += '<div class="cp-fold"><label><input type="checkbox" data-cp-fold="' + cbEsc(fp) + '"'
-      + (sel.folders[fp] ? ' checked' : '') + '><span>' + cbEsc(d.name) + ' <small>· ' + countIn(fp) + '</small></span></label>'
-      + '<span class="cp-fold-props">' + cpStateChips(cpFolderState(idx, fp)) + untagAttr(cpTagChips(own, true), fp) + plus(fp) + '</span></div>';
-  });
+  var topChecked = top.filter(function (fp) { return sel.folders[fp]; }).length;
+  var nested = top.some(function (fp) { return (kids[fp] || []).length; });
+  var anyOpen = Object.keys(sel.open || {}).some(function (k) { return sel.open[k]; });
+  body += '<h4>Папки · ' + top.length
+    + (top.length > 1 ? ' · <a href="#" data-cp-p="foldall">' + (topChecked === top.length ? 'снять все' : 'отметить все') + '</a>' : '')
+    + (nested ? ' · <a href="#" data-cp-p="expall">' + (anyOpen ? 'свернуть все' : 'раскрыть все') + '</a>' : '') + '</h4>';
+  if (!top.length) body += '<div class="cp-note">Вложенных папок нет — все кадры лежат в корне съёмки.</div>';
+  var row = function (fp, depth, above) {
+    var ch = kids[fp] || [], open = !!(sel.open && sel.open[fp]), on = !!sel.folders[fp];
+    var a = agg[fp] || { n: 0 };
+    body += '<div class="cp-fold' + (depth ? ' cp-fold-sub' : '') + '" style="padding-left:' + (depth * 18) + 'px">'
+      + '<label><input type="checkbox" data-cp-fold="' + cbEsc(fp) + '"' + (on || above ? ' checked' : '')
+      + (above ? ' disabled title="Уже отмечена папка выше — эта скачается вместе с ней"' : '') + '>'
+      + '<span>' + cbEsc(fp.split('/').pop()) + ' <small>· ' + a.n + '</small></span></label>'
+      + (ch.length ? '<button class="cp-fold-exp" data-cp-exp="' + cbEsc(fp) + '">' + (open ? 'свернуть' : 'папок: ' + ch.length
+        + (function () { var n = Object.keys(sel.folders).filter(function (k) { return sel.folders[k] && k.indexOf(fp + '/') === 0; }).length; return n && !on && !above ? ' · отмечено ' + n : ''; })()) + '</button>' : '')
+      + '<span class="cp-fold-props">' + cpStateChips(a) + untagAttr(cpTagChips(meta.folderTags[fp] || [], true), fp) + plus(fp) + '</span></div>';
+    if (open) ch.forEach(function (c) { row(c, depth + 1, above || on); });
+  };
+  top.forEach(function (fp) { row(fp, 0, false); });
 
   /* тег сразу нескольким отмеченным папкам */
   var nf = Object.keys(sel.folders).filter(function (k) { return sel.folders[k]; }).length;
@@ -588,11 +648,16 @@ function cpRenderPanel() {
     + (others.length ? '<br>и других файлов: <b>' + others.length + '</b> · ' + cpMb(othersBytes) : '')
     + (again ? '<br><span class="cp-warn">уже скачивали: ' + again + '</span>' : '');
 
+  /* перерисовка не должна прыгать наверх, когда раскрываешь папку внизу списка */
+  var oldBody = panel.querySelector('.cp-panel-body');
+  var keepScroll = oldBody && panel.getAttribute('data-path') === sel.path ? oldBody.scrollTop : 0;
+  panel.setAttribute('data-path', sel.path);
   panel.innerHTML = head + '<div class="cp-panel-body">' + body + '</div>'
     + '<div class="cp-panel-actions"><div class="cp-sum">' + sum + '</div>'
     + '<button data-cp-p="open">Открыть</button>'
     + '<button class="cb-primary" data-cp-p="download"' + (items.length || others.length ? '' : ' disabled') + '>'
     + (nChecked ? 'Скачать отмеченные' : 'Скачать') + '</button></div>';
+  if (keepScroll) panel.querySelector('.cp-panel-body').scrollTop = keepScroll;
 }
 
 /* ---------- изменения отбора с витрины (чтение-правка-запись) ---------- */
@@ -850,6 +915,15 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
     if (CP.dict === undefined) cpLoadDict().then(openPop, openPop); else openPop();
     return;
   }
+  var exp = e.target.closest('[data-cp-exp]');
+  if (exp) {
+    e.preventDefault();
+    var fp = exp.getAttribute('data-cp-exp');
+    sel.open = sel.open || {};
+    sel.open[fp] = !sel.open[fp];
+    cpRenderPanel();
+    return;
+  }
   var b = e.target.closest('[data-cp-p]');
   if (!b) return;
   e.preventDefault();
@@ -858,8 +932,16 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
   else if (act === 'open') cpOpenShoot(sel.path, sel.name);
   else if (act === 'download') cpShelfDownload();
   else if (act === 'foldall') {
-    var allOn = sel.dirs.every(function (d) { return sel.folders[d.name]; });
-    sel.dirs.forEach(function (d) { sel.folders[d.name] = !allOn; });
+    var top = cpFolderTree(sel)[''] || [];
+    var allOn = top.every(function (fp) { return sel.folders[fp]; });
+    sel.folders = {};
+    if (!allOn) top.forEach(function (fp) { sel.folders[fp] = true; });
+    cpRenderPanel();
+  }
+  else if (act === 'expall') {
+    var anyOpen = Object.keys(sel.open || {}).some(function (k) { return sel.open[k]; });
+    sel.open = {};
+    if (!anyOpen) { var kids = cpFolderTree(sel); Object.keys(kids).forEach(function (k) { if (k) sel.open[k] = true; }); }
     cpRenderPanel();
   }
   else if (act === 'bench') cpBench();
@@ -876,7 +958,12 @@ document.getElementById('cpPanel').addEventListener('change', function (e) {
   var sel = CP.sel;
   if (!sel) return;
   var t = e.target;
-  if (t.hasAttribute('data-cp-fold')) sel.folders[t.getAttribute('data-cp-fold')] = t.checked;
+  if (t.hasAttribute('data-cp-fold')) {
+    var fp = t.getAttribute('data-cp-fold');
+    sel.folders[fp] = t.checked;
+    /* отметили папку — отметки вложенных в ней больше не нужны (она скачается целиком) */
+    if (t.checked) Object.keys(sel.folders).forEach(function (k) { if (k.indexOf(fp + '/') === 0) delete sel.folders[k]; });
+  }
   else if (t.id === 'cpFTag') sel.tag = t.value;
   else if (t.id === 'cpFStatus') sel.status = t.value;
   else if (t.id === 'cpFDl') sel.dl = t.value;

@@ -553,6 +553,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     JSON.stringify(await page.evaluate(() => App.projectMeta.cp.events.filter(e => e.action === 'retouch_sync').map(e => e.note))));
 
   /* все файлы: видео тоже уходит в архив */
+  await page.waitForFunction(() => !App.dirty && !CP.saving, null, { timeout: 8000 });
   await page.evaluate(() => cpShowShelf());
   await page.fill('#cpShelfSearch', 'МОДЕЛЬ');
   await page.click('.cp-shoot');
@@ -563,11 +564,40 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('«Все файлы»: видео посчитано, мусор (.DS_Store) — нет', true);
   await page.click('[data-cp-p="download"]');
   await page.waitForFunction(() => [...document.querySelectorAll('#cpDlCard a.cp-dlcard-btn')].some(a => a.textContent === 'clip.mp4'), null, { timeout: 10000 });
+  for (let i = 0; i < 30 && !DOWNLOADS.some(p => /видео\/clip\.mp4$/.test(p)); i++) await page.waitForTimeout(100);
   check('крупное видео — отдельной ссылкой, перенесено частями и скачивается', MPU_PARTS.length === 3 && DOWNLOADS.some(p => /видео\/clip\.mp4$/.test(p)), MPU_PARTS.join(',') + ' :: ' + DOWNLOADS.slice(-3).join(' | '));
   await page.evaluate(() => { CP.directMin = 200 * 1024 * 1024; CP.directPart = 256 * 1024 * 1024; });
   const zVid = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST_1\.zip$/.test(k)).flatMap(([, v]) => v);
   check('карточка артикула в выгрузке — исходная папка артикула с луком', zVid.some(n => /_1\/1\/74595_модель\/IMG_0101\.jpg$/.test(n)) && zVid.some(n => /_1\/1\/74595_модель\/manekin\.jpg$/.test(n)), zVid.join(' | '));
   check('«Все файлы»: кадры в архиве, видео в архив не попало', !zVid.some(n => /clip\.mp4$/.test(n)) && zVid.filter(n => /\.jpg$/.test(n)).length === 3, zVid.join(' | '));
+
+  /* дерево папок на панели: раскрыть до последнего уровня, отметить одну вложенную, статусы вложенных */
+  await page.selectOption('#cpFAll', '');
+  check('папки с вложенными — кнопка «папок: N», вложенные скрыты', await page.evaluate(() =>
+    /папок: 3/.test(document.querySelector('[data-cp-exp="1"]').textContent) && !document.querySelector('[data-cp-fold="1/74595_модель"]')));
+  await page.click('[data-cp-exp="1"]');
+  check('раскрыл лук: артикулы со счётом и статусами (на ретуши), пустая папка — тоже', await page.evaluate(() => {
+    var row = n => document.querySelector('[data-cp-fold="' + n + '"]').closest('.cp-fold');
+    return /на ретуши 2/.test(row('1/74595_модель').textContent) && /· 2/.test(row('1/74595_модель').textContent) && /· 0/.test(row('1/74598_модель').textContent) && /на ретуши 1/.test(row('1/74596_модель').textContent);
+  }), await page.evaluate(() => [...document.querySelectorAll('#cpPanel .cp-fold-sub')].map(r => r.textContent).join(' | ')));
+  await page.check('[data-cp-fold="1/74596_модель"]');
+  check('отмечена вложенная папка — в скачивание идёт только она', /Будет скачано: 1 из 3/.test(await page.textContent('#cpPanel .cp-sum')), await page.textContent('#cpPanel .cp-sum'));
+  await page.check('[data-cp-fold="1"]');
+  check('отметил лук — вложенные отмечены вместе с ним и заблокированы', await page.evaluate(() =>
+    document.querySelector('[data-cp-fold="1/74596_модель"]').checked && document.querySelector('[data-cp-fold="1/74596_модель"]').disabled && !CP.sel.folders['1/74596_модель']));
+  await page.uncheck('[data-cp-fold="1"]');
+  await page.check('[data-cp-fold="1/74595_модель"]');
+  const zipsBefore = ZIPS.size;
+  await page.click('[data-cp-p="download"]');
+  await page.waitForFunction(n => window.__zipsDone === undefined || true, zipsBefore);
+  await page.waitForTimeout(1500);
+  const zSub = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST_2\.zip$/.test(k)).flatMap(([, v]) => v);
+  check('«Скачать отмеченные» по вложенной папке: в архиве только её кадры', zSub.length === 2 && zSub.every(n => /74595_модель\//.test(n)), zSub.join(' | '));
+  await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-tree-open.png') });
+  await page.click('[data-cp-p="expall"]');
+  check('«свернуть все» сворачивает дерево', await page.evaluate(() => !document.querySelector('[data-cp-fold="1/74595_модель"]')));
+  check('у свёрнутой папки видно, что внутри отмечено', /отмечено 1/.test(await page.textContent('[data-cp-exp="1"]')));
+  await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-tree.png') });
 
   /* оптика: выгрузка как в папках */
   await page.evaluate(() => cpShowShelf());
