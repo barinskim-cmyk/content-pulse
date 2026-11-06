@@ -722,6 +722,61 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.uncheck('#cpRvOnly');
   }
 
+  /* 04_ОТРЕТУШИРОВАНО (Маша, 06.11): сдача в папку этапа как в исходниках, «На сайт» — перенос в 05/<дата>/<съёмка>/<артикул>,
+     «На доработку» — «_доработка» в 04, новая версия — рядом, старая папка в Корзину; выработка — таблица в служебной папке */
+  {
+    const RV = 'disk:/Этапы/04_ОТРЕТУШИРОВАНО', ST = 'disk:/Этапы/05_САЙТ', SN = '2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST';
+    ['disk:/Этапы', RV, ST].forEach(d => DIRS.add(d));
+    const prev = await page.evaluate(([rv, st]) => { const p = { site: CP.settings.site, retouched: CP.settings.retouched };
+      Object.assign(CP.settings, { retouched: rv, site: st }); localStorage.setItem('cp_rt_letter', 'U'); return p; }, [RV, ST]);
+    const today = await page.evaluate(() => cpToday());
+    const up = async (list) => {
+      await page.evaluate(l => {
+        cpAcceptOpen(CP.shoot.path, CP.shoot.name);
+        cpAcceptAdd(l.map(x => ({ file: new File(['RT-' + x[1]], x[1], { type: 'image/tiff' }), rel: x[0] + '/' + x[1] })));
+      }, list);
+      await page.waitForFunction(() => document.querySelector('[data-cp-acc="go"]'), null, { timeout: 5000 });
+      const txt = await page.textContent('#cpAccPlan');
+      await page.click('[data-cp-acc="go"]');
+      await page.waitForFunction(() => /Загружено в/.test((document.getElementById('cpAccPlan') || {}).textContent || ''), null, { timeout: 10000 }).catch(() => {});
+      await page.click('[data-cp-acc="close"]');
+      return txt;
+    };
+    const t1 = await up([['готово/74595', 'manekin.tif'], ['готово/74596', 'manekin2.tif']]);
+    const inRv = n => [...FILES.keys()].filter(k => k.indexOf(RV + '/' + SN + '/') === 0 && k.endsWith('/' + n));
+    check('сдача в 04: кнопка «Загрузить в 04_ОТРЕТУШИРОВАНО», буква с прошлого раза (U), файлы — 04/<съёмка>/<папка артикула>/',
+      /Загрузить в 04_ОТРЕТУШИРОВАНО/.test(t1) && inRv('manekin.tif').length === 1 && inRv('manekin2.tif').length === 1 && /\/74595[^/]*\/manekin\.tif$/.test(inRv('manekin.tif')[0]),
+      JSON.stringify([t1, inRv('manekin.tif'), inRv('manekin2.tif')]));
+    /* карточки, которым досталась эта сдача (у артикула бывает две карточки — смотрим по версиям) */
+    const ids = await page.evaluate(() => { const rv = cpMeta().rv, f = n => Object.keys(rv).find(id => { const l = rv[id].slice(-1)[0]; return l && l.letter === 'U' && l.files.some(x => x.name === n); });
+      return { a: f('manekin.tif'), b: f('manekin2.tif') }; });
+    check('на карточке — «На сайт» и «На доработку»', await page.evaluate(i => /На сайт/.test(document.querySelector('[data-cp-rv="' + i + '"] [data-cp-rva="approve"]').textContent), ids.b));
+    await page.click('[data-cp-rv="' + ids.b + '"] [data-cp-rva="approve"]');
+    const siteB = ST + '/' + today + '/' + SN + '/74596/manekin2.tif';
+    for (let i = 0; i < 60 && !FILES.has(siteB); i++) await page.waitForTimeout(100);
+    await page.waitForFunction(i => cpMeta().rv[i].slice(-1)[0].status === 'approved', ids.b, { timeout: 5000 }).catch(() => {});
+    check('«На сайт»: папка артикула переехала в 05/<дата>/<съёмка>/<артикул>, в 04 её больше нет', FILES.has(siteB) && !inRv('manekin2.tif').length
+      && await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].status === 'approved' && !!cpMeta().delivered[i], ids.b), JSON.stringify([...FILES.keys()].filter(k => /Этапы/.test(k))));
+    page.once('dialog', d => d.accept('тени'));
+    await page.click('[data-cp-rv="' + ids.a + '"] [data-cp-rva="rework"]');
+    for (let i = 0; i < 60 && !inRv('manekin.tif').some(k => /_доработка\//.test(k)); i++) await page.waitForTimeout(100);
+    await page.waitForFunction(i => cpMeta().rv[i].slice(-1)[0].status === 'rework', ids.a, { timeout: 5000 }).catch(() => {});
+    check('«На доработку»: папка в 04 с припиской «_доработка», заметка на карточке', inRv('manekin.tif').some(k => /_доработка\/manekin\.tif$/.test(k))
+      && await page.evaluate(i => { const l = cpMeta().rv[i].slice(-1)[0]; return l.status === 'rework' && l.note === 'тени' && /_доработка$/.test(l.dir); }, ids.a), JSON.stringify(inRv('manekin.tif')));
+    await up([['готово/74595', 'manekin.tif']]);
+    for (let i = 0; i < 60 && !TRASHED.some(p => /_доработка$/.test(p)); i++) await page.waitForTimeout(100);
+    check('новая версия после доработки — рядом, папка с доработкой ушла в Корзину', inRv('manekin.tif').length === 1 && !/_доработка/.test(inRv('manekin.tif')[0]) && TRASHED.some(p => /_доработка$/.test(p))
+      && await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].status === 'review', ids.a), JSON.stringify([inRv('manekin.tif'), TRASHED.slice(-3)]));
+    await page.click('[data-cp-rv="' + ids.a + '"] [data-cp-rva="approve"]');
+    for (let i = 0; i < 80 && !TRASHED.includes(RV + '/' + SN); i++) await page.waitForTimeout(100);
+    check('всё на сайте — папка съёмки в 04 опустела и ушла в Корзину', FILES.has(ST + '/' + today + '/' + SN + '/74595/manekin.tif') && TRASHED.includes(RV + '/' + SN), JSON.stringify(TRASHED.slice(-4)));
+    for (let i = 0; i < 40 && !/принято[\s\S]*принято/.test((FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString()); i++) await page.waitForTimeout(100);
+    const out = (FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString();
+    check('выработка: таблица в служебной папке — сдано ×3, доработка, принято ×2, с буквой и датой', /^\uFEFFдата;время;ретушёр/.test(out) && (out.match(/;сдано;/g) || []).length === 3
+      && (out.match(/;принято;/g) || []).length === 2 && /;доработка: тени;/.test(out) && out.split('\n').some(l => l.indexOf(today + ';') === 0 && /;U;/.test(l)), out);
+    await page.evaluate(p => { CP.settings.site = p.site; if (p.retouched) CP.settings.retouched = p.retouched; else delete CP.settings.retouched; cbRenderCards(); }, prev);
+  }
+
   /* статус = где лежит файл (шаг 1): сверка съёмки с папками этапов */
   {
     const RTS = 'disk:/Архив/РЕТУШЬ/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/';
