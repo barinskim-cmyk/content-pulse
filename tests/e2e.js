@@ -658,6 +658,45 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.uncheck('#cpRvOnly');
   }
 
+  /* статус = где лежит файл (шаг 1): сверка съёмки с папками этапов */
+  {
+    const RTS = 'disk:/Архив/РЕТУШЬ/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/';
+    /* ретушёр переименовал папку артикула: U_74596_модель — буква на Диске */
+    DIRS.add(RTS + '1/U_74596_модель');
+    for (const k of [...FILES.keys()]) if (k.indexOf(RTS + '1/74596_модель/') === 0) { FILES.set(k.replace('/1/74596_модель/', '/1/U_74596_модель/'), FILES.get(k)); FILES.delete(k); }
+    FILES.set(RTS + '1/чужой.jpg', Buffer.from('Z'.repeat(40)));
+    for (const k of [...FILES.keys()]) if (k.indexOf(RTS) === 0 && /IMG_0101/.test(k)) FILES.delete(k);   /* IMG_0101 на ретуши нет */
+    /* папка согласования: съёмка с очерёдностью «!_» */
+    const AP = 'disk:/Этапы/02_СОГЛАСОВАНИЕ', APS = AP + '/!_2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST';
+    ['disk:/Этапы', AP, APS, APS + '/1', APS + '/1/74595_модель'].forEach(d => DIRS.add(d));
+    FILES.set(APS + '/1/74595_модель/manekin.jpg', Buffer.from('M'.repeat(40)));
+    const img = await page.evaluate(() => {
+      CP.dict = cpParseDict('[Ретушёры: один]\nY\nU');
+      CP.settings = Object.assign(CP.settings || {}, { approve: 'disk:/Этапы/02_СОГЛАСОВАНИЕ' });
+      var p = App.photos.find(x => /IMG_0101/.test(x.disk));
+      window.__prevImgStatus = cpMeta().status[p.id];
+      cpMeta().status[p.id] = { s: 'approval', by: 'тест', ts: new Date().toISOString() };
+      return p.id;
+    });
+    const res = await page.evaluate(() => cpMirrorSync(false).then(r => r && { changed: r.changed, missing: r.missing.map(x => x.name + ':' + x.s), unmatched: r.unmatched.map(x => x.path), roots: r.roots }));
+    const c96 = await page.evaluate(() => App.cards.find(c => c.title === '74596'));
+    check('сверка: буква из имени папки на Диске (U_74596_модель) стала тегом карточки', (c96.tags || []).includes('U') && !(c96.tags || []).includes('Y'), JSON.stringify([c96.tags, res]));
+    check('сверка: папка съёмки найдена и с очерёдностью «!_», чужой файл на Диске — в расхождениях', res && res.roots.some(r => r.label === 'Согласование' && r.found.some(f => /!_2026-10-27/.test(f))) && res.unmatched.some(x => /чужой\.jpg$/.test(x)), JSON.stringify(res));
+    check('сверка: статус есть, файла нет — в расхождениях, сама не снимает', res && res.missing.includes('IMG_0101.jpg:approval') && await page.evaluate(id => cpMeta().status[id].s === 'approval', img), JSON.stringify(res));
+    check('в строке съёмки — «Диск: расхождений N»', /Диск: расхождений \d/.test(await page.textContent('#cpStatusLine')), await page.textContent('#cpStatusLine'));
+    await page.click('#cpMirrorLink');
+    await page.waitForSelector('#cpMirrorBox.cp-open', { timeout: 3000 });
+    await page.click('[data-cp-mr="clear"]');
+    check('«Снять статусы без файлов»', await page.evaluate(id => !cpMeta().status[id], img));
+    await page.click('[data-cp-mr="close"]');
+    /* файл появился на этапе — статус ставится сам */
+    DIRS.add(APS + '/1');
+    FILES.set(APS + '/1/IMG_0101.jpg', Buffer.from('I'.repeat(40)));
+    await page.evaluate(() => cpMirrorSync(true));
+    check('файл лежит в согласовании — кадр «на согласовании» (поставил Диск)', await page.evaluate(id => cpMeta().status[id] && cpMeta().status[id].s === 'approval' && cpMeta().status[id].by === 'Диск', img));
+    await page.evaluate(id => { delete CP.settings.approve; CP.mirror = null; if (window.__prevImgStatus) cpMeta().status[id] = window.__prevImgStatus; cbMarkDirty(); }, img);
+  }
+
   /* статус пачкой: отмеченные в списке справа — в брак, на согласование, снять, на ретушь */
   await page.evaluate(() => { CP.checked = {}; cbRenderOutline(); });
   const bt = await page.evaluate(() => [App.cards.find(c => c.title === '74596').id, App.cards.find(c => c.title === '74598').id, App.photos.find(p => /manekin2/.test(p.disk)).id]);
@@ -991,6 +1030,9 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
         meta: { cp: { status: status ? { p1: { s: status, by: 't', ts: '2026-11-06T10:00:00Z', card: 'c1' } } : {}, cardStatus: cardStatus ? { c1: { s: cardStatus, by: 't', ts: '2026-11-06T10:00:00Z' } } : {}, downloads: {}, likes: {}, folderTags: {}, events: [], delivered: delivered ? { c1: { files: 1, letter: 'Y', date: '06.11.2026' } } : {} } } })));
     };
     mk('2026-11-04_СДАНА', 'retouch', 'retouch', true);
+    /* папка сданной съёмки ещё лежит в ретуши — но в фильтре ретуши её быть не должно */
+    DIRS.add('disk:/Архив/РЕТУШЬ/2026-11-04_СДАНА'); FILES.set('disk:/Архив/РЕТУШЬ/2026-11-04_СДАНА/x.jpg', Buffer.from('X'.repeat(50)));
+    DIRS.add('disk:/Архив/РЕТУШЬ/2026-11-03_ЗАБРАЛИ'); FILES.set('disk:/Архив/РЕТУШЬ/2026-11-03_ЗАБРАЛИ/x.jpg', Buffer.from('X'.repeat(50)));
     mk('2026-11-03_ЗАБРАЛИ', 'retouch', 'retouch', false, ['Y']);
     mk('2026-11-05_ЖДЁТ_РЕТУШИ', 'retouch', 'retouch');
     mk('2026-11-05_ЖДЁТ_СОГЛАСОВАНИЯ', 'approval', 'approval');
@@ -1007,7 +1049,8 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
       && /rt=1/.test((PROPS.get('disk:/Архив/2026-11-05_ЖДЁТ_РЕТУШИ') || {}).cp_sum || ''), JSON.stringify([...PROPS.entries()]));
     const shownFor = async key => { await page.click('[data-cp-stage="' + key + '"]'); return page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-shoot')].map(b => b.dataset.name)); };
     const rt = await shownFor('retouch');
-    check('фильтр «Ретушь»: есть съёмка с нескачанной ретушью, нет съёмки на согласовании', rt.includes('2026-11-05_ЖДЁТ_РЕТУШИ') && !rt.includes('2026-11-05_ЖДЁТ_СОГЛАСОВАНИЯ'), rt.join(' | '));
+    check('фильтр папки ретуши: съёмки, у которых папка лежит в РЕТУШЬ; без папки на Диске — нет', rt.includes('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST') && rt.includes('LM-1043') && !rt.includes('2026-11-05_ЖДЁТ_РЕТУШИ'), rt.join(' | '));
+    check('фильтр ретуши: полностью сданная съёмка скрыта, хотя папка в ретуши лежит; недоделанная — видна', !rt.includes('2026-11-04_СДАНА') && rt.includes('2026-11-03_ЗАБРАЛИ'), rt.join(' | '));
     const ap = await shownFor('approval');
     check('фильтр «Согласование»', ap.includes('2026-11-05_ЖДЁТ_СОГЛАСОВАНИЯ') && !ap.includes('2026-11-05_ЖДЁТ_РЕТУШИ'), ap.join(' | '));
     const sl = await shownFor('select');
@@ -1018,16 +1061,18 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
       return /ждут ретушёра: 1/.test(row('2026-11-05_ЖДЁТ_РЕТУШИ').textContent) && /отбора нет/.test(row('LM-2001').textContent)
         && /отбор 1/.test((row('2026-09-21_SV_ОПТИКА_N').querySelector('.cp-artbar') || {}).textContent || '');
     }));
-    check('счётчики на кнопках фильтра', /Ретушь\s*\d+/.test(await page.textContent('#cpStages')), await page.textContent('#cpStages'));
-    const fr = await shownFor('fresh'), wk = await shownFor('work'), dn = await shownFor('done');
-    check('готовность: «Не начаты» — LM-2001, «В работе» — ждёт ретуши, «Сданы» — сданная', fr.includes('LM-2001') && !fr.includes('2026-11-04_СДАНА')
-      && wk.includes('2026-11-05_ЖДЁТ_РЕТУШИ') && !wk.includes('2026-11-04_СДАНА') && dn.includes('2026-11-04_СДАНА') && !dn.includes('LM-2001'), JSON.stringify([fr, wk, dn]));
+    check('фильтры названы как папки на Диске: архив, Отбор, РЕТУШЬ…', /^Архив\s*\d+Отбор/.test((await page.textContent('#cpStages')).trim()) && /РЕТУШЬ\s*\d+/.test(await page.textContent('#cpStages')), await page.textContent('#cpStages'));
+    /* задали папку согласования — фильтр называется как она и показывает съёмки, у которых там есть папка */
+    await page.evaluate(() => { CP.settings.approve = 'disk:/Этапы/02_СОГЛАСОВАНИЕ'; return cpScanStages(); });
+    const ap2 = await shownFor('approval');
+    check('папка согласования: фильтр «02_СОГЛАСОВАНИЕ», съёмка с «!_» в нём, без папки — нет', /02_СОГЛАСОВАНИЕ\s*1/.test(await page.textContent('#cpStages')) && ap2.includes('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST') && !ap2.includes('2026-11-05_ЖДЁТ_СОГЛАСОВАНИЯ'), JSON.stringify([ap2, await page.textContent('#cpStages')]));
+    await page.evaluate(() => { delete CP.settings.approve; return cpScanStages(); });
     await page.click('[data-cp-stage=""]');
     check('под съёмкой — артикулы по стадиям: полоска и числа', await page.evaluate(() => {
       var row = n => [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === n);
       var a = row('2026-11-04_СДАНА').querySelector('.cp-artbar'), b = row('2026-11-05_ЖДЁТ_РЕТУШИ').querySelector('.cp-artbar'), c = row('2026-11-05_ЖДЁТ_СОГЛАСОВАНИЯ').querySelector('.cp-artbar');
-      return a && /артикулов 1/.test(a.textContent) && /загружено 1/.test(a.textContent) && b && /ретушь 1/.test(b.textContent) && c && /согласование 1/.test(c.textContent) && !row('LM-2001').querySelector('.cp-artbar')
-        && /артикулов 3/.test(row('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST').querySelector('.cp-artbar').textContent) && /загружено 1/.test(row('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST').querySelector('.cp-artbar').textContent)
+      return a && /артикулов 1/.test(a.textContent) && /Сайт 1/.test(a.textContent) && b && /РЕТУШЬ 1/.test(b.textContent) && c && /Согласование 1/.test(c.textContent) && !row('LM-2001').querySelector('.cp-artbar')
+        && /артикулов 3/.test(row('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST').querySelector('.cp-artbar').textContent) && /Сайт 1/.test(row('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST').querySelector('.cp-artbar').textContent)
         && /забрали 1/.test(row('2026-11-03_ЗАБРАЛИ').querySelector('.cp-artbar').textContent) && !/скачано/.test(document.getElementById('cpShelfList').textContent);
     }), await page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-artbar')].map(x => x.textContent).join(' | ')));
     await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-stages.png') });

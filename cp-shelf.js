@@ -339,7 +339,7 @@ function cpParseSettings(text) {
     if (!m) return;
     var key = CP_SETTING_KEYS[m[1].toLowerCase()];
     if (!key || !m[2]) return;
-    out[key] = key === 'retouch' || key === 'site' ? cpNormArchive(m[2]) : m[2];
+    out[key] = ['retouch', 'site', 'approve', 'retouched'].indexOf(key) !== -1 ? cpNormArchive(m[2]) : m[2];
   });
   return out;
 }

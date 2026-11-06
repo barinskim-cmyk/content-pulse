@@ -140,16 +140,12 @@ function cpSumDecode(str) {
 /** Что нужно сделать со съёмкой (для фильтров). */
 function cpStagesOf(sum) {
   if (!sum) return null;
-  var total = sum.k.reduce(function (a, b) { return a + b; }, 0);
-  var done = total > 0 && sum.k[5] > 0 && sum.k[5] + sum.k[6] === total;
   return {
     select: sum.k[0] > 0 || sum.filled === 0,
-    retouch: sum.k[2] > 0,
-    review: sum.rv > 0,
     approval: sum.ap > 0,
-    fresh: sum.filled === 0,
-    work: sum.filled > 0 && !done,
-    done: done
+    retouch: sum.k[2] + sum.k[3] > 0,
+    review: sum.rv > 0,
+    site: sum.k[5] > 0
   };
 }
 
@@ -189,23 +185,87 @@ function cpSumOf(d) {
   return cpSumDecode(d.custom_properties && d.custom_properties[CP_SUM_KEY]) || d.cpSum || null;
 }
 
-/** Что нужно сделать со съёмкой; отбора нет совсем — нужен отбор; null — ещё не знаем. */
-function cpStagesFor(d) {
-  var sum = cpSumOf(d);
-  if (sum) return cpStagesOf(sum);
-  return d.cpSumDone ? { select: true, retouch: false, review: false, approval: false, fresh: true, work: false, done: false } : null;
+/* ---------- фильтры витрины = этапы = папки на Диске ----------
+   Маша, 06.11.2026: «название фильтра совпадает с названием папки на
+   Диске… наш фильтр — это папка… есть съёмки активные, которые ждут
+   чего-то; их нейминг появляется на соответствующем этапе». Фильтры:
+     <папка архива> (01_ИСХОДНИКИ) — все съёмки;
+     Отбор — промежуточный этап внутри исходников (по сводке отбора);
+     <папка согласования> (02_…), <ретуши> (03_…), <проверки> (04_…),
+     <сайта> (05_…) — съёмки, у которых папка есть в этой папке этапа
+     (очерёдность «!_», «1_» в начале имени не мешает; в «Сайте» съёмка
+     может лежать глубже: дата / буква_номер / съёмка).
+   Папка этапа не задана — фильтр по сводке отбора, с обычным названием. */
+
+CP.stagePresence = {};   /* ключ этапа -> {имя съёмки в нижнем регистре: true} */
+
+var CP_STAGE_SETTING = { approval: 'approve', retouch: 'retouch', review: 'retouched', site: 'site' };
+var CP_STAGE_DEFAULT = { approval: 'Согласование', retouch: 'Ретушь', review: 'Проверка ретуши', site: 'Сайт' };
+
+function cpFolderBase(path) { return path ? String(path).replace(/\/+$/, '').split('/').pop() : ''; }
+function cpStageLabel(key) { return cpFolderBase(CP.settings && CP.settings[CP_STAGE_SETTING[key]]) || CP_STAGE_DEFAULT[key]; }
+
+/** Какие съёмки лежат в папках этапов: по одному обходу на этап (до 3 уровней). */
+function cpScanStages() {
+  var s = CP.settings || {}, archive = CP.archive;
+  var known = {};
+  (CP.shoots || []).forEach(function (d) { known[d.name.toLowerCase()] = true; });
+  var shootLike = /^\d{4}-\d{2}-\d{2}_./;
+  return Promise.all(Object.keys(CP_STAGE_SETTING).map(function (key) {
+    var root = s[CP_STAGE_SETTING[key]];
+    if (!root) return Promise.resolve([key, null]);
+    var names = {};
+    var level = function (paths, depth) {
+      if (!paths.length || depth > 3) return Promise.resolve();
+      return cpPool(paths, 4, function (p) { return cpListDirs(p); }).then(function (lists) {
+        var next = [];
+        lists.forEach(function (ds) {
+          (ds || []).forEach(function (x) {
+            var bare = x.name.replace(/^(!|\d{1,2})_/, '');
+            if (known[bare.toLowerCase()] || shootLike.test(bare)) names[bare.toLowerCase()] = true;
+            else if (x.name.charAt(0) !== '_') next.push(x.path);
+          });
+        });
+        return level(next, depth + 1);
+      });
+    };
+    return level([root], 1).then(function () { return [key, names]; }, function () { return [key, null]; });
+  })).then(function (pairs) {
+    if (CP.archive !== archive) return;
+    CP.stagePresence = {};
+    pairs.forEach(function (kv) { if (kv[1]) CP.stagePresence[kv[0]] = kv[1]; });
+    cpRenderShoots();
+  });
 }
 
-var CP_STAGES = [
-  { key: '', label: 'Все' },
-  { key: 'select', label: 'Отбор' },
-  { key: 'approval', label: 'Согласование' },
-  { key: 'retouch', label: 'Ретушь' },
-  { key: 'review', label: 'Проверка' },
-  { key: 'fresh', label: 'Не начаты', sep: true },
-  { key: 'work', label: 'В работе' },
-  { key: 'done', label: 'Сданы' }
-];
+/** В каких фильтрах съёмка; null — ещё не знаем (сводка считается). */
+function cpStagesFor(d) {
+  var sum = cpSumOf(d);
+  var st = sum ? cpStagesOf(sum) : (d.cpSumDone ? { select: true, approval: false, retouch: false, review: false, site: false } : null);
+  var name = d.name.toLowerCase(), any = false;
+  Object.keys(CP_STAGE_SETTING).forEach(function (key) {
+    var pres = CP.stagePresence[key];
+    if (!pres) return;
+    st = st || { select: false, approval: false, retouch: false, review: false, site: false };
+    st[key] = !!pres[name];
+    any = true;
+  });
+  /* Ретушь — конечная точка копий: съёмка, у которой всё сдано на сайт и в работе ничего не осталось,
+     из фильтра ретуши пропадает, хотя её папка там ещё лежит. */
+  if (st && st.retouch && sum && sum.k[5] > 0 && sum.k[2] + sum.k[3] + sum.k[4] === 0) st.retouch = false;
+  return st;
+}
+
+function cpStageList() {
+  return [
+    { key: '', label: cpFolderBase(CP.archive) || 'Исходники' },
+    { key: 'select', label: 'Отбор' },
+    { key: 'approval', label: cpStageLabel('approval') },
+    { key: 'retouch', label: cpStageLabel('retouch') },
+    { key: 'review', label: cpStageLabel('review') },
+    { key: 'site', label: cpStageLabel('site') }
+  ];
+}
 
 (function cpStageBar() {
   var bar = document.getElementById('cpShelfBar');
@@ -229,33 +289,35 @@ function cpRenderStageBar() {
   if (!box) return;
   var hide = CP.settings && CP.settings.retouch;
   var shoots = (CP.shoots || []).filter(function (d) { return d.path !== hide; });
-  var keys = ['select', 'retouch', 'review', 'approval', 'fresh', 'work', 'done'];
+  var list = cpStageList();
   var counts = { '': shoots.length }, pending = 0;
-  keys.forEach(function (k) { counts[k] = 0; });
+  list.forEach(function (x) { if (x.key) counts[x.key] = 0; });
   shoots.forEach(function (d) {
+    if (!cpSumOf(d) && !d.cpSumDone) pending++;
     var st = cpStagesFor(d);
-    if (!st) { pending++; return; }
-    keys.forEach(function (k) { if (st[k]) counts[k]++; });
+    if (st) list.forEach(function (x) { if (x.key && st[x.key]) counts[x.key]++; });
   });
-  box.innerHTML = CP_STAGES.map(function (s) {
-    return (s.sep ? '<span class="cp-stages-sep"></span>' : '') + '<button data-cp-stage="' + s.key + '"' + (CP.stageFilter === s.key ? ' class="cp-on"' : '') + '>' + s.label
+  if (list.every(function (x) { return x.key !== CP.stageFilter; })) CP.stageFilter = '';
+  box.innerHTML = list.map(function (s) {
+    return '<button data-cp-stage="' + s.key + '"' + (CP.stageFilter === s.key ? ' class="cp-on"' : '') + '>' + cbEsc(s.label)
       + ' <small>' + counts[s.key] + '</small></button>';
   }).join('') + (pending ? '<small class="cp-stages-wait" title="Съёмки без сводки: читаю их отборы">считаю ' + pending + '…</small>' : '');
 }
 
 var CP_ART_STAGES = [
-  { label: 'отбор', cls: 'k1' }, { label: 'согласование', cls: 'k2' }, { label: 'ретушь', cls: 'k3' },
-  { label: 'забрали', cls: 'k4' }, { label: 'проверка', cls: 'k7' }, { label: 'загружено', cls: 'k5' }, { label: 'брак', cls: 'k6' }
+  { label: 'отбор', cls: 'k1' }, { stage: 'approval', cls: 'k2' }, { stage: 'retouch', cls: 'k3' },
+  { label: 'забрали', cls: 'k4' }, { stage: 'review', cls: 'k7' }, { stage: 'site', cls: 'k5' }, { label: 'брак', cls: 'k6' }
 ];
+function cpArtLabel(i) { var x = CP_ART_STAGES[i]; return x.stage ? cpStageLabel(x.stage) : x.label; }
 
 /** Под съёмкой: сколько артикулов на какой стадии — полоска и подписи с числами. */
 function cpArtBar(sum) {
   var k = sum.k || [], n = k.reduce(function (a, b) { return a + b; }, 0);
   if (!n) return '';
   return '<div class="cp-artbar"><div class="cp-artbar-line">' + k.map(function (x, i) {
-    return x ? '<i class="cp-' + CP_ART_STAGES[i].cls + '" style="flex:' + x + '" title="' + CP_ART_STAGES[i].label + ': ' + x + '"></i>' : '';
+    return x ? '<i class="cp-' + CP_ART_STAGES[i].cls + '" style="flex:' + x + '" title="' + cbEsc(cpArtLabel(i)) + ': ' + x + '"></i>' : '';
   }).join('') + '</div><div class="cp-artbar-leg">артикулов ' + n + k.map(function (x, i) {
-    return x ? ' · <span><i class="cp-' + CP_ART_STAGES[i].cls + '"></i>' + CP_ART_STAGES[i].label + ' <b>' + x + '</b></span>' : '';
+    return x ? ' · <span><i class="cp-' + CP_ART_STAGES[i].cls + '"></i>' + cbEsc(cpArtLabel(i)) + ' <b>' + x + '</b></span>' : '';
   }).join('') + '</div></div>';
 }
 
@@ -328,7 +390,11 @@ function cpFillSummaries() {
 cpLoadShoots = (function (orig) {
   return function () {
     var r = orig.apply(this, arguments);
-    Promise.resolve(r).then(function () { cpFillSummaries(); });
+    Promise.resolve(r).then(function () {
+      cpFillSummaries();
+      var ready = typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : Promise.resolve();
+      ready.then(cpScanStages, function () { });
+    });
     return r;
   };
 })(cpLoadShoots);
