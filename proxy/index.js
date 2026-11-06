@@ -188,9 +188,9 @@ async function doCopy(token, items, dirs) {
 /* ---------- Корзина и перенос: статус = где лежит файл ----------
    Защита от ошибки страницы: папки первого уровня диска не трогаем
    (нужно не меньше двух частей пути: disk:/03_РЕТУШЬ/съёмка). */
-function deepEnough(p) {
+function deepEnough(p, min) {
   const rest = String(p || '').slice(rootOf(p).length).split('/').filter(Boolean);
-  return rest.length >= 2 && rest.indexOf('..') === -1;
+  return rest.length >= (min || 2) && rest.indexOf('..') === -1;
 }
 
 async function doTrash(token, paths) {
@@ -220,7 +220,8 @@ async function doMove(token, items) {
   const results = new Array(items.length);
   async function one(i) {
     const it = items[i];
-    if (!deepEnough(it.from) || !deepEnough(it.path)) { results[i] = { from: it.from, status: 'failed', error: 'слишком близко к корню диска' }; return; }
+    /* перенос (переименование папки этапа в корне общего диска) — можно и на первом уровне, но не сам корень */
+    if (!deepEnough(it.from, 1) || !deepEnough(it.path, 1)) { results[i] = { from: it.from, status: 'failed', error: 'корень диска не переносим' }; return; }
     const parent = it.path.slice(0, it.path.lastIndexOf('/'));
     const d = await dirReady(parent);
     if (!d.ok) { results[i] = { from: it.from, status: 'failed', error: d.error }; return; }

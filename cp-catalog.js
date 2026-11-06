@@ -18,7 +18,9 @@
      «этап <папка> = исходники | согласование | ретушь | отретушировано |
      сайт | не показывать».
    - Фильтры витрины — эти папки, по их именам; нет папки — нет фильтра.
-   - Недостающие папки этапов создаются только кнопкой «Создать».
+   - Недостающие папки этапов создаются, а папки с номером не по порядку
+     переименовываются (04_САЙТ → 05_САЙТ) — только кнопкой «Исправить»,
+     с подтверждением.
    ============================================================ */
 
 var CP_CAT_ROLES = [
@@ -74,10 +76,6 @@ function cpCatMerge(settings) {
   });
   settings.catalog = cpCatalog();
   return settings;
-}
-
-function cpCatMissing() {
-  return CP_CAT_ROLES.filter(function (r) { return !cpCatDirs(r.role).length; });
 }
 
 /* служебная папка каталога — внутри него */
@@ -168,8 +166,8 @@ function cpCatRender() {
     sd.textContent = CPDisk.showPath(CP_CONFIG.serviceDir);
     if (sd.nextSibling && sd.nextSibling.nodeType === 3) sd.nextSibling.textContent = cat ? ' — внутри каталога' : ' — рядом с архивом';
   }
-  var miss = cat && CP.catalogList ? cpCatMissing() : [];
-  cpCatNotice(miss);
+  var plan = cat && CP.catalogList ? cpCatPlan() : { create: [], rename: [] };
+  cpCatNotice(plan);
   if (!box) return;
   if (!cat || !CP.catalogList) {
     box.innerHTML = '<div class="cp-set-dir">Укажите выше папку, где лежат все этапы (01_ИСХОДНИКИ, 02…, 05_САЙТ), — программа прочитает их сама</div>';
@@ -182,17 +180,50 @@ function cpCatRender() {
     return '<div class="cp-cat-row"><span class="cp-cat-name">' + cbEsc(d.name) + '</span><select data-cp-cat="' + cbEsc(d.name) + '">'
       + opts.map(function (w) { return '<option' + (w === cur ? ' selected' : '') + '>' + cbEsc(w) + '</option>'; }).join('') + '</select></div>';
   }).join('');
-  if (miss.length) {
-    html += '<div class="cp-set-dir">Нет папок для: ' + miss.map(function (r) { return cbEsc(r.word) + ' (' + cbEsc(r.def) + ')'; }).join(', ')
-      + '</div><div class="cp-set-line"><button data-cp-cat-make="1">Создать недостающие</button></div>';
+  if (plan.create.length || plan.rename.length) {
+    html += '<div class="cp-set-dir">' + cpCatPlanText(plan) + '</div><div class="cp-set-line"><button data-cp-cat-make="1">Исправить папки</button></div>';
   }
   box.innerHTML = html;
 }
 
-/** Строка на витрине: каких этапов в каталоге нет. */
-function cpCatNotice(miss) {
+/**
+ * Порядок этапов: каких папок нет и у каких неверный номер.
+ * Маша, 06.11: «если какой-то этап пропущен, мы его создаём, но при этом
+ * следующий нужно переименовать, чтобы он был не 04, а 05».
+ * Номер — место роли в цепочке: 01 исходники, 02 согласование (отбор),
+ * 03 ретушь, 04 отретушировано, 05 сайт. Папки без номера и «не показывать»
+ * не трогаем. Если папка с нужным именем уже есть — не переименовываем.
+ * -> {create:[{role, name}], rename:[{dir, to, role}]}
+ */
+function cpCatPlan() {
+  var plan = { create: [], rename: [] };
+  if (!CP.catalogList) return plan;
+  var taken = {};
+  CP.catalogList.forEach(function (d) { taken[d.name.toLowerCase()] = true; });
+  CP_CAT_ROLES.forEach(function (r, i) {
+    var num = (i + 1 < 10 ? '0' : '') + (i + 1);
+    var d = cpCatDirs(r.role)[0];
+    if (!d) { if (!taken[r.def.toLowerCase()]) plan.create.push({ role: r, name: r.def }); return; }
+    var m = CP_CAT_RE.exec(d.name);
+    if (!m || m[1] === num) return;
+    var to = num + d.name.slice(2);
+    if (taken[to.toLowerCase()]) return;
+    plan.rename.push({ dir: d, to: to, role: r });
+  });
+  return plan;
+}
+
+function cpCatPlanText(plan) {
+  var parts = [];
+  if (plan.create.length) parts.push('нет: ' + plan.create.map(function (c) { return cbEsc(c.name); }).join(', '));
+  if (plan.rename.length) parts.push('номер не по порядку: ' + plan.rename.map(function (x) { return cbEsc(x.dir.name) + ' → ' + cbEsc(x.to); }).join(', '));
+  return 'В каталоге ' + parts.join('; ');
+}
+
+/** Строка на витрине: каких этапов нет, какие не по порядку. */
+function cpCatNotice(plan) {
   var el = document.getElementById('cpCatMissing');
-  if (!miss.length) { if (el) el.remove(); return; }
+  if (!plan.create.length && !plan.rename.length) { if (el) el.remove(); return; }
   if (!el) {
     var bar = document.getElementById('cpShelfBar');
     if (!bar) return;
@@ -202,21 +233,44 @@ function cpCatNotice(miss) {
     bar.appendChild(el);
     el.addEventListener('click', function (e) { if (e.target.closest('[data-cp-cat-make]')) cpCatMake(); });
   }
-  el.innerHTML = 'В каталоге нет: ' + miss.map(function (r) { return cbEsc(r.def); }).join(', ') + ' <button class="cp-link" data-cp-cat-make="1">Создать</button>';
+  el.innerHTML = cpCatPlanText(plan) + ' <button class="cp-link" data-cp-cat-make="1">Исправить</button>';
 }
 
+/** Создать недостающие папки этапов и переименовать те, что с неверным номером. */
 function cpCatMake() {
   var cat = cpCatalog();
   if (!cat) return;
-  var miss = cpCatMissing();
-  if (!miss.length) return;
-  var made = [];
-  miss.reduce(function (p, r) {
-    return p.then(function () { return CPDisk.ensureDir(cat + '/' + r.def).then(function () { made.push(r.def); }); });
-  }, Promise.resolve()).then(function () {
-    cbToast('Созданы папки: ' + made.join(', '));
+  var plan = cpCatPlan();
+  if (!plan.create.length && !plan.rename.length) return;
+  var lines = plan.rename.map(function (x) { return 'переименовать ' + x.dir.name + ' → ' + x.to; })
+    .concat(plan.create.map(function (c) { return 'создать ' + c.name; }));
+  if (!window.confirm('Папки каталога:\n' + lines.join('\n') + '\n\nВсё, что лежит внутри, остаётся на месте. Продолжить?')) return;
+  var done = [], failed = [];
+  var renames = plan.rename.slice().sort(function (a, b) { return a.to < b.to ? 1 : -1; });   /* с конца — не наступаем друг на друга */
+  var cfg = (CP.settings && CP.settings.stageRoles) || {};
+  cbBusyShow('Привожу папки каталога в порядок...', 0.3);
+  var chain = renames.reduce(function (p, x) {
+    return p.then(function () {
+      return CPDisk.proxyMove([{ from: x.dir.path, path: cat + '/' + x.to }]).then(function (r) {
+        var st = r && r.results && r.results[0];
+        if (st && st.status === 'done') {
+          done.push(x.dir.name + ' → ' + x.to);
+          /* в настройках папка была записана по старому имени — переносим строку */
+          if (cfg[x.dir.name.toLowerCase()]) return cpSaveSetting('этап ' + x.to, x.role.word);
+        } else failed.push(x.dir.name + ': ' + ((st && (st.error || st.status)) || 'не переименована'));
+      });
+    });
+  }, Promise.resolve());
+  chain.then(function () {
+    return plan.create.reduce(function (p, c) {
+      return p.then(function () { return CPDisk.ensureDir(cat + '/' + c.name).then(function () { done.push('создана ' + c.name); }); });
+    }, Promise.resolve());
+  }).then(function () {
+    cbBusyHide();
+    if (window.console) console.info('[CP] папки каталога:', done, failed);
+    cbToast((done.length ? 'Готово: ' + done.join(', ') : '') + (failed.length ? (done.length ? '. ' : '') + 'Не получилось: ' + failed.join(', ') : ''));
     return cpLoadShoots();
-  }).catch(function (e) { cpHandleError(e, 'Не удалось создать папки этапов'); });
+  }).catch(function (e) { cbBusyHide(); cpHandleError(e, 'Не удалось привести папки каталога в порядок'); });
 }
 
 (function cpCatSettingsDom() {

@@ -153,7 +153,14 @@ async function route(r) {
     if (q.a === 'move' && m === 'POST') {
       const b = JSON.parse(req.postData() || '{}');
       return json(200, { results: (b.items || []).map(it => {
-        if (FILES.has(it.path)) return { from: it.from, status: 'exists' };
+        if (FILES.has(it.path) || DIRS.has(it.path)) return { from: it.from, status: 'exists' };
+        if (DIRS.has(it.from)) {   /* папка целиком: всё внутри едет с ней */
+          const pre = it.from + '/';
+          for (const d of [...DIRS]) if (d === it.from || d.indexOf(pre) === 0) { DIRS.delete(d); DIRS.add(it.path + d.slice(it.from.length)); }
+          for (const k of [...FILES.keys()]) if (k.indexOf(pre) === 0) { FILES.set(it.path + k.slice(it.from.length), FILES.get(k)); FILES.delete(k); }
+          MOVED.push(it.from + ' -> ' + it.path);
+          return { from: it.from, status: 'done' };
+        }
         if (!FILES.has(it.from)) return { from: it.from, status: 'gone' };
         const parts = it.path.split('/'); for (let i = 2; i < parts.length; i++) DIRS.add(parts.slice(0, i).join('/'));
         FILES.set(it.path, FILES.get(it.from)); FILES.delete(it.from); MOVED.push(it.from + ' -> ' + it.path);
@@ -1142,7 +1149,8 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   /* один путь — КАТАЛОГ: этапы по папкам, фильтры = папки, 00_АРХИВ не читаем, недостающие — кнопкой */
   {
     const K = 'disk:/КАТАЛОГ';
-    [K + '/01_ИСХОДНИКИ', K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ', K + '/02_ОТБОР', K + '/02_ОТБОР/2026-11-06_SV_КАТ', K + '/03_РЕТУШЬ', K + '/05_САЙТ', K + '/ПРОЧЕЕ'].forEach(d => DIRS.add(d));
+    [K + '/01_ИСХОДНИКИ', K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ', K + '/02_ОТБОР', K + '/02_ОТБОР/2026-11-06_SV_КАТ', K + '/03_РЕТУШЬ', K + '/04_САЙТ', K + '/04_САЙТ/01.11', K + '/ПРОЧЕЕ'].forEach(d => DIRS.add(d));
+    FILES.set(K + '/04_САЙТ/01.11/s.jpg', Buffer.from('S'.repeat(30)));
     FILES.set(K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ/k1.jpg', Buffer.from('K'.repeat(60)));
     FILES.set(K + '/02_ОТБОР/2026-11-06_SV_КАТ/k1.jpg', Buffer.from('K'.repeat(60)));
     await page.fill('#cpShelfSearch', '');
@@ -1154,16 +1162,21 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     check('каталог: служебная папка внутри, съёмки только из исходников (00_АРХИВ не читаем)', st.sd === K + '/_ContentPulse' && st.shoots.includes('2026-11-06_SV_КАТ') && !st.shoots.includes('2026-11-01_SV_ПРЕДМЕТКА') && !st.shoots.includes('02_ОТБОР'), JSON.stringify(st));
     check('что значит папка — по смыслу имени, потом по номеру: 04_САЙТ — сайт', await page.evaluate(() => cpCatRoleOf('04_САЙТ', {}) === 'site' && cpCatRoleOf('04_ОТРЕТУШИРОВАНО', {}) === 'review'
       && cpCatRoleOf('03_РЕТУШЬ', {}) === 'retouch' && cpCatRoleOf('00_АРХИВ', {}) === 'skip' && cpCatRoleOf('02_ОТБОР', {}) === 'approval' && cpCatRoleOf('05_X', {}) === 'site' && cpCatRoleOf('ПРОЧЕЕ', {}) === 'skip'));
-    check('каталог: фильтры = папки (01, 02_ОТБОР, 03, 05), без папки 04 — нет фильтра, внутреннего «Отбора» нет',
-      /^01_ИСХОДНИКИ\s*\d+02_ОТБОР/.test(st.stages.trim()) && !/Отбор в/.test(st.stages) && /02_ОТБОР\s*1/.test(st.stages) && /03_РЕТУШЬ/.test(st.stages) && /05_САЙТ/.test(st.stages) && !/04|Согласование|ПРОЧЕЕ/.test(st.stages)
-      && st.s.approve === K + '/02_ОТБОР' && st.s.retouch === K + '/03_РЕТУШЬ' && st.s.site === K + '/05_САЙТ', st.stages);
+    check('каталог: фильтры = папки (01, 02_ОТБОР, 03, 04_САЙТ — по имени это сайт), нет «отретушировано» — нет фильтра, внутреннего «Отбора» нет',
+      /^01_ИСХОДНИКИ\s*\d+02_ОТБОР/.test(st.stages.trim()) && !/Отбор в/.test(st.stages) && /02_ОТБОР\s*1/.test(st.stages) && /03_РЕТУШЬ/.test(st.stages) && /04_САЙТ/.test(st.stages) && !/ОТРЕТУШ|Согласование|ПРОЧЕЕ/.test(st.stages)
+      && st.s.approve === K + '/02_ОТБОР' && st.s.retouch === K + '/03_РЕТУШЬ' && st.s.site === K + '/04_САЙТ' && !st.s.retouched, st.stages);
     check('каталог: в шестерёнке — папки и что они значат, отдельные поля этапов скрыты', await page.evaluate(() =>
       document.querySelectorAll('#cpCatBox [data-cp-cat]').length === 6 && document.querySelector('[data-cp-cat="ПРОЧЕЕ"]').value === 'не показывать'
       && document.querySelector('[data-cp-cat="00_АРХИВ"]').value === 'не показывать' && getComputedStyle(document.getElementById('cpRetouchInput')).display === 'none' || !document.getElementById('cpRetouchInput').offsetParent));
-    check('каталог: «нет 04_ОТРЕТУШИРОВАНО» — на витрине и в шестерёнке, сама не создаёт', /04_ОТРЕТУШИРОВАНО/.test(await page.textContent('#cpCatMissing')) && !DIRS.has(K + '/04_ОТРЕТУШИРОВАНО'));
+    const miss = await page.textContent('#cpCatMissing');
+    check('каталог: «нет 04_ОТРЕТУШИРОВАНО; 04_САЙТ → 05_САЙТ» — на витрине, сама ничего не делает', /нет: 04_ОТРЕТУШИРОВАНО/.test(miss) && /04_САЙТ → 05_САЙТ/.test(miss) && !DIRS.has(K + '/04_ОТРЕТУШИРОВАНО') && DIRS.has(K + '/04_САЙТ'), miss);
+    page.once('dialog', d => d.accept());
     await page.click('#cpCatBox [data-cp-cat-make]');
     await page.waitForFunction(() => document.querySelector('[data-cp-stage="review"]') && !document.getElementById('cpCatMissing'), null, { timeout: 10000 }).catch(() => {});
-    check('«Создать недостающие» — папка 04 создана, фильтр появился', DIRS.has(K + '/04_ОТРЕТУШИРОВАНО') && /04_ОТРЕТУШИРОВАНО/.test(await page.textContent('#cpStages')));
+    check('«Исправить папки»: 04_ОТРЕТУШИРОВАНО создана, 04_САЙТ → 05_САЙТ со всем, что внутри; фильтры по новым именам',
+      DIRS.has(K + '/04_ОТРЕТУШИРОВАНО') && DIRS.has(K + '/05_САЙТ') && !DIRS.has(K + '/04_САЙТ') && FILES.has(K + '/05_САЙТ/01.11/s.jpg')
+      && /04_ОТРЕТУШИРОВАНО/.test(await page.textContent('#cpStages')) && /05_САЙТ/.test(await page.textContent('#cpStages'))
+      && await page.evaluate(k => CP.settings.site === k + '/05_САЙТ' && CP.settings.retouched === k + '/04_ОТРЕТУШИРОВАНО', K), JSON.stringify([MOVED.slice(-2), await page.textContent('#cpStages')]));
     /* 00_АРХИВ включили как исходники: строка в настройках, его съёмки на витрине */
     await page.selectOption('[data-cp-cat="00_АРХИВ"]', 'исходники');
     await page.waitForFunction(() => CP.shoots && CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА') && CP.shoots.some(s => s.name === '2026-11-06_SV_КАТ'), null, { timeout: 10000 }).catch(() => {});
