@@ -100,13 +100,29 @@ async function waitOp(token, href) {
   return 'timeout';
 }
 
+/* 409 у Диска значит не только «уже есть»: так же отвечают, когда нет
+   родительской папки. Поэтому «уже есть» проверяем отдельным запросом —
+   иначе несозданная папка и нескопированный кадр считались бы готовыми. */
+async function isThere(token, path, type) {
+  const r = await disk(token, 'GET', '/resources', { path, fields: 'type,size' });
+  return r.status === 200 && (!type || r.data.type === type);
+}
+
 async function ensureDir(token, path) {
   const parts = path.replace(/^disk:/, '').split('/').filter(Boolean);
   let cur = 'disk:';
   for (const p of parts) {
     cur += '/' + p;
-    const r = await disk(token, 'PUT', '/resources', { path: cur });
-    if (r.status !== 201 && r.status !== 409) return { ok: false, status: r.status, error: r.data.message || r.data.description };
+    let ok = false, last = null;
+    for (let attempt = 0; attempt < 4 && !ok; attempt++) {
+      if (attempt) await sleep(400 * attempt);
+      const r = await disk(token, 'PUT', '/resources', { path: cur });
+      last = r;
+      if (r.status === 201) ok = true;
+      else if (r.status === 409) ok = await isThere(token, cur, 'dir');
+      else break;
+    }
+    if (!ok) return { ok: false, status: last && last.status, error: (last && (last.data.message || last.data.description)) || 'папка не создалась: ' + cur };
   }
   return { ok: true };
 }
@@ -131,7 +147,19 @@ async function doCopy(token, items, dirs) {
       const d = await dirReady(parent);
       if (!d.ok) { results[i] = { from: it.from, status: 'failed', error: d.error }; return; }
     }
-    const r = await disk(token, 'POST', '/resources/copy', { from: it.from, path: it.path, overwrite: 'false' });
+    let r = await disk(token, 'POST', '/resources/copy', { from: it.from, path: it.path, overwrite: 'false' });
+    if (r.status === 409 && !(await isThere(token, it.path))) {
+      /* не «уже есть», а нет папки — создаём заново (мимо кэша) и пробуем ещё раз */
+      if (parent) {
+        made[parent] = ensureDir(token, parent);
+        await made[parent];
+      }
+      r = await disk(token, 'POST', '/resources/copy', { from: it.from, path: it.path, overwrite: 'false' });
+      if (r.status === 409 && !(await isThere(token, it.path))) {
+        results[i] = { from: it.from, status: 'failed', error: r.data.message || r.data.description || 'не скопировалось (409)' };
+        return;
+      }
+    }
     if (r.status === 201) results[i] = { from: it.from, status: 'done' };
     else if (r.status === 409) results[i] = { from: it.from, status: 'exists' };
     else if (r.status === 202 && r.data.href) {

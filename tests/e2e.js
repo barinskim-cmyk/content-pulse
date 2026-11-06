@@ -163,6 +163,7 @@ async function route(r) {
     }
     if (q.a === 'copy' && m === 'POST') {
       const b = JSON.parse(req.postData() || '{}');
+      if (FAIL_COPY) return json(200, { results: (b.items || []).map(it => FAIL_COPY.test(it.path) ? { from: it.from, status: 'failed', error: 'тест: Диск не ответил' } : (FILES.has(it.path) ? { from: it.from, status: 'exists' } : (FILES.set(it.path, FILES.get(it.from)), { from: it.from, status: 'done' }))) });
       (b.dirs || []).forEach(d => { const parts = d.split('/'); for (let i = 2; i <= parts.length; i++) DIRS.add(parts.slice(0, i).join('/')); });
       const results = (b.items || []).map(it => {
         const parent = it.path.slice(0, it.path.lastIndexOf('/'));
@@ -183,6 +184,8 @@ async function route(r) {
   if (u.host === 'uploader1.disk.yandex.net') { if (!FILES.has(q.p)) FRESH.set(q.p, Date.now()); FILES.set(q.p, req.postDataBuffer()); return r.fulfill({ status: 201, headers: CORS, body: '' }); }
   return r.continue();
 }
+
+let FAIL_COPY = null;   /* копирование этих путей «падает» — проверка «докопировать» */
 
 (async () => {
   const srv = http.createServer((req, res) => {
@@ -525,6 +528,29 @@ async function route(r) {
   const stM = JSON.parse(FILES.get('disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/_contentpulse.json').toString());
   check('у карточки записана папка артикула', stM.cards.some(c => c.cpArticleDir === '1/74595_модель'));
   check('артикул карточки сохранён в отборе', stM.cards.some(c => c.cpArticle === '74595'), JSON.stringify(stM.cards.map(c => [c.title, c.cpArticle])));
+
+  /* ретушь модельки: <папка ретуши>/<съёмка>/<лук>/<артикул>/; кадр из корня лука — в папку артикула своей карточки */
+  const RT = 'disk:/Архив/РЕТУШЬ/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/';
+  await page.evaluate(() => { var c = App.cards[App.cards.length - 1]; cpDoAction('retouch', cpCardPids(c), c.id); });
+  await page.waitForFunction(() => App.projectMeta.cp.events.some(e => e.action === 'to_retouch' && e.card === '74595'), null, { timeout: 8000 });
+  check('на ретушь: папка съёмки, лук и артикул созданы сами; кадр лука — в папке артикула карточки',
+    FILES.has(RT + '1/74595_модель/IMG_0101.jpg') && FILES.has(RT + '1/74595_модель/manekin.jpg') && !FILES.has(RT + '1/IMG_0101.jpg'),
+    [...FILES.keys()].filter(k => k.indexOf(RT) === 0).join(' | '));
+  /* не скопировалось — видно в строке съёмки, «докопировать» дотягивает */
+  FAIL_COPY = /manekin2/;
+  await page.evaluate(() => { var c = App.cards.find(x => x.title === '74596'); c.pids.push(App.photos.find(p => /manekin2/.test(p.disk)).id); cpDoAction('retouch', cpCardPids(c), c.id); });
+  await page.waitForSelector('#cpRetouchMissing', { timeout: 8000 }).catch(() => {});
+  check('не скопировалось на ретушь — в строке съёмки «не скопировано: 1 — докопировать»', /не скопировано на ретушь: 1/.test(await page.textContent('#cpStatusLine')), await page.textContent('#cpStatusLine'));
+  FAIL_COPY = null;
+  await page.click('#cpRetouchMissing');
+  await page.waitForFunction(() => !document.getElementById('cpRetouchMissing'), null, { timeout: 8000 }).catch(() => {});
+  check('«докопировать»: кадр в папке ретуши, предупреждение ушло', FILES.has(RT + '1/74596_модель/manekin2.jpg') && !(await page.$('#cpRetouchMissing')));
+  /* сверка: копию в папке ретуши удалили — «Сверить папку ретуши» кладёт заново, остальное не трогает */
+  FILES.delete(RT + '1/74595_модель/manekin.jpg');
+  await page.evaluate(() => document.getElementById('cpMenuRetouchSync').click());
+  await page.waitForFunction(() => App.projectMeta.cp.events.some(e => e.action === 'retouch_sync' && /скопировано 1, уже было 2/.test(e.note || '')), null, { timeout: 8000 }).catch(() => {});
+  check('«Сверить папку ретуши»: недостающее докопировано, остальное — «уже было»', FILES.has(RT + '1/74595_модель/manekin.jpg'),
+    JSON.stringify(await page.evaluate(() => App.projectMeta.cp.events.filter(e => e.action === 'retouch_sync').map(e => e.note))));
 
   /* все файлы: видео тоже уходит в архив */
   await page.evaluate(() => cpShowShelf());

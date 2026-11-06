@@ -211,6 +211,7 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
     + '<button id="cpMenuDlAllV">Скачать всю съёмку: все файлы (с видео)</button>'
     + '<button id="cpMenuLog">Журнал действий</button>'
     + '<button id="cpMenuVersions">Версии отбора...</button>'
+    + '<button id="cpMenuRetouchSync">Сверить папку ретуши</button>'
     + '<div class="cb-pop-sep"></div>';
   while (block.firstChild) file.insertBefore(block.firstChild, first);
 
@@ -473,6 +474,7 @@ function cpOpenShootNow(path, name) {
     CP.folder = '';
     CP.folderByCard = false;
     CP.activeCard = null;
+    CP.retouchMissing = {};
     /* в этом браузере остались несохранённые правки этой съёмки — возвращаем их */
     var bak = !stateError ? cpBackupGet(path) : null;
     if (bak && bak.data) {
@@ -1085,6 +1087,12 @@ function cpRestoreVersion(file) {
   });
 }
 
+document.getElementById('cpMenuRetouchSync').onclick = function () {
+  cbCloseAllPops();
+  if (!CP.shoot) { cbToast('Сначала откройте съёмку'); return; }
+  cpRetouchResync(true);
+};
+
 document.getElementById('cpMenuVersions').onclick = function () {
   cbCloseAllPops();
   if (!CP.shoot) { cbToast('Сначала откройте съёмку'); return; }
@@ -1158,6 +1166,7 @@ var CP_ACTION_LABEL = {
   changed_after_download: 'изменил(а) карточку после скачивания',
   merged: 'склеены версии отбора', restored: 'восстановлены несохранённые правки',
   collect_cards: 'собрал(а) карточки по папкам', restore_version: 'вернул(а) версию отбора',
+  retouch_sync: 'докопировал(а) на ретушь',
   removed_after_download: 'убрал(а) из отбора уже скачанное',
   added_to_retouch_card: 'добавил(а) кадры в карточку на ретуши',
   card_tag: 'поставил(а) тег карточке', card_untag: 'снял(а) тег с карточки'
@@ -1199,37 +1208,101 @@ function cpDoAction(status, pids, cardId) {
     cbToast(CP_STATUS[status].label + ': ' + pids.length + ' кадр(ов)');
     return;
   }
-  /* ретушь: подстраховка — копии в папку ретуши (настройка на Диске)
-     <папка ретуши>/<съёмка>/<исходные папки и имена>; без настройки —
-     <съёмка>/Ретушь/<исходные папки и имена>. */
-  var files = pids.map(function (pid) { return cbPhotoById(pid); }).filter(function (p) { return p.disk; });
-  var shootPath = CP.shoot.path, shootName = CP.shoot.name;
-  var ready = typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : Promise.resolve();
-  cbBusyShow('Копирую на ретушь: ' + files.length + ' кадр(ов)...', 0.2);
-  var folder = '';
-  ready.then(function () {
-    folder = cpRetouchBase(shootPath, shootName);
-    var items = files.map(function (p) {
-      var rel = p.disk.indexOf(shootPath + '/') === 0 ? p.disk.slice(shootPath.length + 1) : p.name;
-      return { from: p.disk, path: folder + '/' + rel };
-    });
-    return cpCopyOnDisk(items, [folder], 'Копирую на ретушь');
-  }).then(function (r) {
-    cbBusyHide();
-    extra.folder = folder.replace(/^disk:/, '');
+  /* ретушь: копии в папку ретуши — см. cpRetouchCopy */
+  cpRetouchCopy(pids, card, 'Копирую на ретушь').then(function (r) {
+    extra.folder = r.folder.replace(/^disk:/, '');
     extra.copied = r.done;
     if (r.exists) extra.existed = r.exists;
     if (r.failed.length) extra.failed = r.failed;
     cpEvent('to_retouch', cpPhotoNames(pids), extra);
     cpAfterStatus();
     cbToast('На ретушь: ' + r.done + ' скопировано' + (r.exists ? ', уже было ' + r.exists : '')
-      + (r.failed.length ? ', ошибок ' + r.failed.length : '') + ' → ' + extra.folder);
-    if (r.failed.length && window.console) console.error('[CP] retouch copy failed', r.failed);
+      + (r.failed.length ? ', не скопировано ' + r.failed.length + ' — см. строку съёмки' : '') + ' → ' + extra.folder);
   }).catch(function (e) {
     cpEvent('to_retouch', cpPhotoNames(pids), { note: 'статус поставлен, копирование не удалось: ' + e.message });
     cpAfterStatus();
-    cpHandleError(e, 'Копирование на ретушь не удалось (статус поставлен)');
+    cpHandleError(e, 'Копирование на ретушь не удалось (статус поставлен, «докопировать» — в строке съёмки)');
   });
+}
+
+/* ---------- копии на ретушь ----------
+   Куда: <папка ретуши из настроек>/<название съёмки>/<папки как в съёмке>/<имя файла>
+   (без настройки — <съёмка>/Ретушь/...). Папка съёмки и все вложенные
+   (лук или бренд, артикул) создаются сами.
+   Кадр карточки артикула кладётся в папку этого артикула, даже если в
+   съёмке он лежит в корне лука: кадры лука становятся кадрами артикула,
+   как только их положили в его карточку.
+   Что не скопировалось — копится в CP.retouchMissing, в строке съёмки
+   появляется «не скопировано на ретушь: N — докопировать». */
+
+function cpRetouchRel(p, card, shootPath) {
+  var rel = p.disk.indexOf(shootPath + '/') === 0 ? p.disk.slice(shootPath.length + 1) : p.name;
+  var c = card && card.cpArticleDir ? card : App.cards.filter(function (x) {
+    return x.cpArticleDir && cpCardPids(x).indexOf(p.id) !== -1;
+  })[0];
+  if (!c) return rel;
+  var d = c.cpArticleDir;
+  return rel.indexOf(d + '/') === 0 ? rel : d + '/' + p.name;
+}
+
+function cpRetouchCopy(pids, card, label) {
+  var files = pids.map(function (pid) { return cbPhotoById(pid); }).filter(function (p) { return p && p.disk && !p.missing; });
+  var shootPath = CP.shoot.path, shootName = CP.shoot.name;
+  var ready = typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : Promise.resolve();
+  var folder = '', byFrom = {};
+  cbBusyShow(label + ': ' + files.length + ' кадр(ов)...', 0.2);
+  return ready.then(function () {
+    folder = cpRetouchBase(shootPath, shootName);
+    var used = {};
+    var items = files.map(function (p) {
+      var target = folder + '/' + cpRetouchRel(p, card, shootPath);
+      /* два разных файла с одним именем в одну папку — второму суффикс, чтобы не потерялся */
+      if (used[target] && used[target] !== p.disk) {
+        var dot = target.lastIndexOf('.'), n = 2;
+        var stem = dot > target.lastIndexOf('/') ? target.slice(0, dot) : target, ext = stem === target ? '' : target.slice(dot);
+        while (used[stem + '_' + n + ext]) n++;
+        target = stem + '_' + n + ext;
+      }
+      used[target] = p.disk;
+      byFrom[p.disk] = p.id;
+      return { from: p.disk, path: target };
+    });
+    return cpCopyOnDisk(items, [folder], label);
+  }).then(function (r) {
+    cbBusyHide();
+    r.folder = folder;
+    if (CP.shoot && CP.shoot.path === shootPath) {
+      var miss = CP.retouchMissing = CP.retouchMissing || {};
+      files.forEach(function (p) { delete miss[p.id]; });
+      (r.failedFrom || []).forEach(function (f) { if (byFrom[f]) miss[byFrom[f]] = true; });
+      cpUpdateStatusLine();
+    }
+    if (r.failed.length && window.console) console.error('[CP] retouch copy failed', r.failed);
+    return r;
+  }, function (e) {
+    cbBusyHide();
+    if (CP.shoot && CP.shoot.path === shootPath) {
+      var miss = CP.retouchMissing = CP.retouchMissing || {};
+      files.forEach(function (p) { miss[p.id] = true; });
+      cpUpdateStatusLine();
+    }
+    throw e;
+  });
+}
+
+/** Докопировать на ретушь: всё, что не скопировалось, — или (all) все кадры со статусом «на ретуши». */
+function cpRetouchResync(all) {
+  if (!CP.shoot) return;
+  var m = cpMeta().status;
+  var pids = all
+    ? Object.keys(m).filter(function (pid) { return m[pid].s === 'retouch'; })
+    : Object.keys(CP.retouchMissing || {});
+  if (!pids.length) { cbToast(all ? 'В этой съёмке нет кадров на ретуши' : 'Всё скопировано'); return; }
+  cpRetouchCopy(pids, null, all ? 'Сверяю папку ретуши' : 'Докопирую на ретушь').then(function (r) {
+    cpEvent('retouch_sync', [], { note: 'скопировано ' + r.done + ', уже было ' + r.exists + (r.failed.length ? ', не скопировано ' + r.failed.length : '') + ' → ' + r.folder.replace(/^disk:/, '') }, true);
+    cbToast((all ? 'Папка ретуши сверена: ' : 'Докопировано: ') + r.done + ' скопировано, уже было ' + r.exists
+      + (r.failed.length ? ', не скопировано ' + r.failed.length : ''));
+  }).catch(function (e) { cpHandleError(e, 'Не удалось скопировать на ретушь'); });
 }
 
 /** Куда копировать на ретушь для съёмки. */
@@ -1254,7 +1327,7 @@ function cpCopyOnDisk(items, dirs, label) {
         (out.results || []).forEach(function (x) {
           if (x.status === 'done') res.done++;
           else if (x.status === 'exists') res.exists++;
-          else res.failed.push(x.from.split('/').pop() + ': ' + (x.error || 'ошибка'));
+          else { res.failed.push(x.from.split('/').pop() + ': ' + (x.error || 'ошибка')); (res.failedFrom = res.failedFrom || []).push(x.from); }
         });
         cbBusyShow(label + ': ' + Math.min(items.length, (ci + 1) * CH) + ' / ' + items.length, (ci + 1) / chunks.length);
       });
@@ -1285,6 +1358,16 @@ function cpUpdateStatusLine() {
   }
   el.appendChild(document.createTextNode((t ? t.name + (t.cardArticle ? ', артикул карточки по папке' : '') + ' · ' : '')
     + 'ретушь ' + n.retouch + ' · брак ' + n.reshoot + ' · согласование ' + n.approval));
+  var miss = Object.keys(CP.retouchMissing || {}).length;
+  if (miss) {
+    el.appendChild(document.createTextNode(' · '));
+    var a = document.createElement('button');
+    a.className = 'cp-link cp-save-err';
+    a.id = 'cpRetouchMissing';
+    a.textContent = 'не скопировано на ретушь: ' + miss + ' — докопировать';
+    a.onclick = function () { cpRetouchResync(false); };
+    el.appendChild(a);
+  }
 }
 
 /* бейджи статусов и кнопка действий — поверх отрисовки Cardboard */
