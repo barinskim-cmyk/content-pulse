@@ -117,6 +117,11 @@ function cpOutlineDecorate() {
         return '<button data-cp-letter="' + cbEsc(t) + '" title="Поставить отмеченным карточкам букву ' + cbEsc(t) + ' (повторно — снять)">' + cbEsc(t) + '</button>';
       }).join('') + '</div>';
     } else html += '<div class="cp-obar-hint">Букв ретушёров нет в словаре тегов: группа «[Ретушёры: один]» в «Словаре тегов»</div>';
+    html += '<div class="cp-obar-s">'
+      + '<button data-cp-batch="retouch" title="Отправить отмеченные карточки на ретушь (с копиями в папку ретуши)">На ретушь</button>'
+      + '<button data-cp-batch="approval" title="Отправить отмеченные карточки на согласование">На согласование</button>'
+      + '<button data-cp-batch="reshoot" title="Отмеченные карточки — в брак (пересъём)">В брак</button>'
+      + '<button data-cp-batch="" title="Снять статус с отмеченных карточек и их кадров">Снять статус</button></div>';
     html += '<button class="cb-primary" data-cp-o="download">Скачать отмеченные</button>';
   }
   html += '<button data-cp-o="site" title="Прочитать папку «Сайт» и отметить сданные карточки">Проверить сдачу</button>';
@@ -131,11 +136,12 @@ document.getElementById('cbOutline').addEventListener('change', function (e) {
 });
 
 document.getElementById('cbOutline').addEventListener('click', function (e) {
-  var b = e.target.closest('[data-cp-o],[data-cp-letter]');
+  var b = e.target.closest('[data-cp-o],[data-cp-letter],[data-cp-batch]');
   if (!b) return;
   e.preventDefault();
   e.stopPropagation();
   if (b.hasAttribute('data-cp-letter')) { cpSetLetter(b.getAttribute('data-cp-letter')); return; }
+  if (b.hasAttribute('data-cp-batch')) { cpBatchStatus(b.getAttribute('data-cp-batch') || null); return; }
   var act = b.getAttribute('data-cp-o');
   if (act === 'all') {
     var vis = App.cards.filter(cpCardMatchesFolders);
@@ -151,6 +157,60 @@ document.getElementById('cbOutline').addEventListener('click', function (e) {
 
 function cpCheckedCards() {
   return App.cards.filter(function (c) { return CP.checked[c.id]; });
+}
+
+/** Статус пачкой: отмеченным карточкам и их кадрам — ретушь (одним копированием),
+    согласование, брак или снять. По одной — как раньше, на шапке карточки. */
+function cpBatchStatus(status) {
+  var cards = cpCheckedCards();
+  if (!cards.length) return;
+  var all = [], names = [], same = [];
+  var m = cpMeta();
+  cards.forEach(function (c) {
+    var pids = cpCardPids(c).filter(function (pid) { var p = cbPhotoById(pid); return p && (p.kind || 'photo') !== 'ref'; });
+    if (status === 'retouch') {
+      /* уже на ретуши в этом же составе — повторно не отправляем и не перезаписываем;
+         добавили кадры после отправки — уходят только они */
+      var cst = m.cardStatus[c.id];
+      var fresh = pids.filter(function (pid) { return !(m.status[pid] && m.status[pid].s === 'retouch'); });
+      if (cst && cst.s === 'retouch' && !fresh.length) { same.push(c.title || 'карточка'); return; }
+      if (!(cst && cst.s === 'retouch')) cpSetStatus([], 'retouch', c.id);
+      cpSetStatus(fresh, 'retouch', c.id);
+      pids = fresh;
+    } else cpSetStatus(pids, status, c.id);
+    pids.forEach(function (pid) { if (all.indexOf(pid) === -1) all.push(pid); });
+    names.push(c.title || c.category || 'карточка');
+  });
+  if (status === 'retouch' && !names.length) {
+    cbToast('Уже на ретуши в этом составе — повторно не отправляю: ' + same.join(', '));
+    return;
+  }
+  var extra = { card: names.join(', ') };
+  if (same.length) extra.note = 'уже были на ретуши в этом составе, не отправлялись: ' + same.join(', ');
+  if (status !== 'retouch') {
+    cpEvent(status ? 'to_' + status : 'clear_status', cpPhotoNames(all), extra);
+    cpAfterStatus();
+    cbRenderOutline();
+    cbToast((status ? CP_STATUS[status].label : 'Статус снят') + ': карточек ' + cards.length + ', кадров ' + all.length);
+    return;
+  }
+  if (!all.length) { cpEvent('to_retouch', [], extra); cpAfterStatus(); cbRenderOutline(); return; }
+  cpRetouchCopy(all, null, 'Копирую на ретушь: карточек ' + names.length).then(function (r) {
+    extra.folder = CPDisk.showPath(r.folder);
+    extra.copied = r.done;
+    if (r.exists) extra.existed = r.exists;
+    if (r.failed.length) extra.failed = r.failed;
+    cpEvent('to_retouch', cpPhotoNames(all), extra);
+    cpAfterStatus();
+    cbRenderOutline();
+    cbToast('На ретушь: карточек ' + names.length + (same.length ? ' (уже были на ретуши: ' + same.length + ')' : '') + ', скопировано ' + r.done + (r.exists ? ', уже было ' + r.exists : '')
+      + (r.failed.length ? ', не скопировано ' + r.failed.length + ' — см. строку съёмки' : ''));
+  }).catch(function (e) {
+    cpEvent('to_retouch', cpPhotoNames(all), { card: extra.card, note: 'статус поставлен, копирование не удалось: ' + e.message });
+    cpAfterStatus();
+    cbRenderOutline();
+    cpHandleError(e, 'Копирование на ретушь не удалось (статус поставлен, «докопировать» — в строке съёмки)');
+  });
 }
 
 /** Буква ретушёра всем отмеченным; если она уже у всех — снять. */
@@ -482,6 +542,7 @@ function cpPanelHidden() { return cpGet('cp_panel_off', '') === '1'; }
     + '.cp-obar{position:sticky;bottom:0;background:#161615;border-top:1px solid #2a2a28;padding:10px 12px;display:flex;flex-direction:column;gap:8px;margin-top:10px}'
     + '.cp-obar-n{font-size:11px;color:#a3a09a}.cp-obar-hint{font-size:10px;color:#a3a09a}'
     + '.cp-obar-l{display:flex;flex-wrap:wrap;gap:4px}.cp-obar-l button{min-width:28px;padding:3px 6px}'
+    + '.cp-obar-s{display:grid;grid-template-columns:1fr 1fr;gap:4px}.cp-obar-s button{padding:4px 6px;font-size:12px}'
     + '.cp-card-del{font-size:10px;color:#9fc2a3;border:1px solid #3d5a40;border-radius:10px;padding:1px 8px;margin-left:6px}'
     + 'body.cp-panel-off #cpPanel{display:none!important}';
   var st = document.createElement('style');

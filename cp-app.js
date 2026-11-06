@@ -16,7 +16,7 @@
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.42';
+var CP_VERSION = '2.0.43';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1224,7 +1224,16 @@ function cpDoAction(status, pids, cardId) {
     cpAfterStatus();
     return;
   }
-  cpSetStatus(pids, status, cardId);
+  if (status === 'retouch') {
+    /* уже на ретуши — повторно не отправляем и не перезаписываем (Маша, 06.11.2026) */
+    var m0 = cpMeta();
+    var fresh = pids.filter(function (pid) { return !(m0.status[pid] && m0.status[pid].s === 'retouch'); });
+    if (!fresh.length) { cbToast('Уже на ретуши — повторно не отправляю'); return; }
+    if (cardId && m0.cardStatus[cardId] && m0.cardStatus[cardId].s === 'retouch') { cpSetStatus(fresh, 'retouch', null); fresh.forEach(function (pid) { m0.status[pid].card = cardId; }); }
+    else cpSetStatus(fresh, status, cardId);
+    if (cardId && !(m0.cardStatus[cardId])) cpSetStatus([], 'retouch', cardId);
+    pids = fresh;
+  } else cpSetStatus(pids, status, cardId);
   if (status !== 'retouch') {
     cpEvent('to_' + status, cpPhotoNames(pids), extra);
     cpAfterStatus();

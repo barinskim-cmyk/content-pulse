@@ -609,6 +609,29 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   }
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-site.png') });
   await page.click('[data-cp-sr="close"]');
+  /* статус пачкой: отмеченные в списке справа — в брак, на согласование, снять, на ретушь */
+  await page.evaluate(() => { CP.checked = {}; cbRenderOutline(); });
+  const bt = await page.evaluate(() => [App.cards.find(c => c.title === '74596').id, App.cards.find(c => c.title === '74598').id, App.photos.find(p => /manekin2/.test(p.disk)).id]);
+  await page.check('[data-cp-ck="' + bt[0] + '"]');
+  await page.check('[data-cp-ck="' + bt[1] + '"]');
+  await page.click('[data-cp-batch="reshoot"]');
+  check('пачкой «В брак»: обе карточки и их кадры', await page.evaluate(x => { var m = cpMeta(); return m.cardStatus[x[0]].s === 'reshoot' && m.cardStatus[x[1]].s === 'reshoot' && m.status[x[2]].s === 'reshoot'; }, bt));
+  await page.click('[data-cp-batch="approval"]');
+  check('пачкой «На согласование»', await page.evaluate(x => { var m = cpMeta(); return m.cardStatus[x[0]].s === 'approval' && m.status[x[2]].s === 'approval'; }, bt));
+  await page.click('[data-cp-batch=""]');
+  check('пачкой «Снять статус»', await page.evaluate(x => { var m = cpMeta(); return !m.cardStatus[x[0]] && !m.cardStatus[x[1]] && !m.status[x[2]]; }, bt));
+  await page.click('[data-cp-batch="retouch"]');
+  await page.waitForFunction(x => cpMeta().status[x[2]] && cpMeta().status[x[2]].s === 'retouch' && cpMeta().events.some(e => e.action === 'to_retouch' && /74596, 74598/.test(e.card || '')), bt, { timeout: 8000 }).catch(() => {});
+  check('пачкой «На ретушь»: статусы и одна запись в журнале с копированием', await page.evaluate(x => cpMeta().cardStatus[x[0]].s === 'retouch' && cpMeta().events.some(e => e.action === 'to_retouch' && /74596, 74598/.test(e.card || '') && e.folder), bt));
+  /* повторно «На ретушь» в том же составе — не отправляется и не перезаписывается */
+  {
+    const before = await page.evaluate(x => [cpMeta().status[x[2]].ts, cpMeta().events.filter(e => e.action === 'to_retouch').length], bt);
+    await page.waitForTimeout(20);
+    await page.click('[data-cp-batch="retouch"]');
+    await page.waitForTimeout(300);
+    const after = await page.evaluate(x => [cpMeta().status[x[2]].ts, cpMeta().events.filter(e => e.action === 'to_retouch').length], bt);
+    check('повторно «На ретушь» в том же составе — без повторной записи', before[0] === after[0] && before[1] === after[1], JSON.stringify([before, after]));
+  }
   await page.evaluate(() => { CP.checked = {}; cbRenderOutline(); });
 
   /* все файлы: видео тоже уходит в архив */
