@@ -956,7 +956,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.fill('#cpShelfSearch', '');
     await page.evaluate(() => cpRenderShoots());
     await page.waitForFunction(() => document.getElementById('cpStages') && !document.querySelector('.cp-stages-wait') && CP.shoots.length > 3, null, { timeout: 20000 }).catch(() => {});
-    check('сводка съёмок без неё — посчитана в фоне и записана в свойства папок', PROPS.has('disk:/Архив/LM-1043') && /^v2;/.test(PROPS.get('disk:/Архив/LM-1043').cp_sum)
+    check('сводка съёмок без неё — посчитана в фоне и записана в свойства папок', PROPS.has('disk:/Архив/LM-1043') && /^v3;/.test(PROPS.get('disk:/Архив/LM-1043').cp_sum)
       && /rt=1/.test((PROPS.get('disk:/Архив/2026-11-05_ЖДЁТ_РЕТУШИ') || {}).cp_sum || ''), JSON.stringify([...PROPS.entries()]));
     const shownFor = async key => { await page.click('[data-cp-stage="' + key + '"]'); return page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-shoot')].map(b => b.dataset.name)); };
     const rt = await shownFor('retouch');
@@ -968,7 +968,8 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.click('[data-cp-stage=""]');
     check('под съёмкой — что ждёт: «ретушь: 1», «отбора нет»', await page.evaluate(() => {
       var row = n => [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === n);
-      return /ретушь не скачана: 1/.test(row('2026-11-05_ЖДЁТ_РЕТУШИ').textContent) && /отбора нет/.test(row('LM-2001').textContent);
+      return /ретушь не скачана: 1/.test(row('2026-11-05_ЖДЁТ_РЕТУШИ').textContent) && /отбора нет/.test(row('LM-2001').textContent)
+        && /отбор 1/.test((row('2026-09-21_SV_ОПТИКА_N').querySelector('.cp-artbar') || {}).textContent || '');
     }));
     check('счётчики на кнопках фильтра', /Ретушь\s*\d+/.test(await page.textContent('#cpStages')), await page.textContent('#cpStages'));
     const fr = await shownFor('fresh'), wk = await shownFor('work'), dn = await shownFor('done');
@@ -979,7 +980,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
       var row = n => [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === n);
       var a = row('2026-11-04_СДАНА').querySelector('.cp-artbar'), b = row('2026-11-05_ЖДЁТ_РЕТУШИ').querySelector('.cp-artbar'), c = row('2026-11-05_ЖДЁТ_СОГЛАСОВАНИЯ').querySelector('.cp-artbar');
       return a && /артикулов 1/.test(a.textContent) && /загружено 1/.test(a.textContent) && b && /ретушь 1/.test(b.textContent) && c && /согласование 1/.test(c.textContent) && !row('LM-2001').querySelector('.cp-artbar')
-        && /скачано \d/.test(row('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST').querySelector('.cp-artbar').textContent) && /загружено \d/.test(row('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST').querySelector('.cp-artbar').textContent);
+        && /артикулов 3/.test(row('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST').querySelector('.cp-artbar').textContent) && /скачано \d/.test(row('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST').querySelector('.cp-artbar').textContent);
     }), await page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-artbar')].map(x => x.textContent).join(' | ')));
     await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-stages.png') });
     await page.fill('#cpShelfSearch', '1043');

@@ -12,48 +12,89 @@
    без сводки витрина в фоне читает отбор сама, считает и записывает —
    один раз, дальше сводка уже лежит в папке.
 
-   Что нужно сделать (съёмка попадает во все подходящие фильтры):
-     Отбор        — отбора ещё нет (ни одной карточки с кадрами)
-                    или есть пустые карточки товара (артикулы без кадров);
-     Ретушь       — есть кадры на ретуши, которые ещё не скачали;
-     Согласование — есть карточки или кадры «на согласовании».
-   Готовность (второй ряд фильтров и полоски под съёмкой):
-     Не начаты — отбора нет; Сданы — все карточки с кадрами сданы в
-     «Сайт» и нет пустых карточек товара; В работе — всё остальное.
-   Под каждой съёмкой — сколько артикулов на какой стадии (полоска и
-   числа): не отобрано, отобрано, согласование, ретушь (отправлено),
-   скачано (ретушёр забрал все кадры карточки), загружено (готовое лежит
-   в «Сайте»), брак (Маша: «под самими съёмками — сколько артов на какой
-   стадии, и фильтры в шапке: отбор, согласование, ретушь… скачано,
-   загружено»). Артикул = карточка товара;
-   в съёмках без карточек товара (имидж) — карточка с кадрами. Стадия
-   карточки — самая дальняя: брак > загружено > скачано > ретушь >
-   согласование > отобрано > не отобрано.
+   Стадии артикула (Маша, 06.11: «отбор — это когда артикулы в папке есть,
+   а карточки не собраны и на согласование не отправлены; всё, что до
+   согласования, — отбор»; «скачано, загружено»):
+     отбор        — артикул есть в папках съёмки, а карточки нет, или
+                    карточка есть, но не отправлена дальше;
+     согласование — карточка на согласовании;
+     ретушь       — отправлена на ретушь, ретушёр ещё не забрал все кадры;
+     скачано      — ретушёр забрал все кадры карточки;
+     загружено    — готовое нашлось в «Сайте» (проверка сдачи);
+     брак         — карточка в браке (пересъём).
+   Артикулы — папки артикулов по «Структуре съёмок» и карточки товара
+   (по коду); у артикула с несколькими карточками — самая дальняя стадия.
+   В съёмках без папок артикулов (имидж) артикул — карточка с кадрами.
+
+   Фильтры в шапке (съёмка попадает во все подходящие):
+     Отбор — есть артикулы в отборе (или отбора нет совсем);
+     Согласование — есть карточки или кадры на согласовании;
+     Ретушь — есть кадры на ретуши, которые ещё не скачали;
+     Не начаты — ни одной карточки с кадрами; Сданы — все артикулы
+     загружены (или в браке); В работе — остальные.
    ============================================================ */
 
 var CP_SUM_KEY = 'cp_sum';
 CP.sumWritten = {};       /* путь съёмки -> последняя записанная строка сводки */
 CP.stageFilter = cpGet('cp_stage', '') || '';
 
-/** Сводка отбора: {cards, filled, empty, rt, ra, ap, rs, del} */
-function cpShootSummary(data) {
+/** Коды артикулов по папкам съёмки (как у «Собрать карточки по папкам»). */
+function cpArticleCodes(shootPath, shootName, files) {
+  var codes = {};
+  var type = typeof cpShootType === 'function' ? cpShootType(shootName) : null;
+  if (!type || !files || type.roles.indexOf('артикул') === -1) return codes;
+  var root = shootPath.replace(/\/+$/, '') + '/';
+  var rel = function (p) { return p.indexOf(root) === 0 ? p.slice(root.length) : ''; };
+  (files.dirs || []).forEach(function (d) {
+    var r = rel(d);
+    if (!r) return;
+    var f = cpFacets(type, r + '/x');
+    if (f.code && f.articlePath === r) codes[f.code] = true;
+  });
+  files.forEach(function (f) {
+    var x = cpFacets(type, rel(f.path));
+    if (x.code && x.articlePath) codes[x.code] = true;
+  });
+  return codes;
+}
+
+/**
+ * Сводка съёмки. data — отбор (может быть null: отбора нет),
+ * codes — коды артикулов по папкам ({} — неизвестно или их нет).
+ */
+function cpShootSummary(data, codes) {
   data = data || {};
+  codes = codes || {};
   var cp = (data.meta || {}).cp || {};
   var status = cp.status || {}, cardStatus = cp.cardStatus || {}, dl = cp.downloads || {}, del = cp.delivered || {};
-  var s = { cards: 0, filled: 0, empty: 0, rt: 0, ra: 0, ap: 0, rs: 0, del: Object.keys(del).length, rc: 0, k: [0, 0, 0, 0, 0, 0, 0] };
+  var s = { cards: 0, filled: 0, empty: 0, rt: 0, ra: 0, ap: 0, rs: 0, del: Object.keys(del).length, rc: 0, k: [0, 0, 0, 0, 0, 0] };
   var cards = data.cards || [];
-  var hasProduct = cards.some(function (c) { return c.cpArticle || c.cpAuto; });
-  cards.forEach(function (c) {
-    var ps = c.mode === 'auto' ? (c.pids || []) : (c.slots || []).map(function (x) { return x.pid; }).filter(Boolean);
-    if (hasProduct ? !(c.cpArticle || c.cpAuto) : !ps.length) return;
-    var cs = cardStatus[c.id] && cardStatus[c.id].s;
-    var got = ps.length && ps.every(function (pid) { return dl[pid] && dl[pid].n; });
-    var stage = cs === 'reshoot' ? 6 : del[c.id] ? 5 : got ? 4 : cs === 'retouch' ? 3 : cs === 'approval' ? 2 : ps.length ? 1 : 0;
-    s.k[stage]++;
-  });
+  var pidsOf = function (c) { return c.mode === 'auto' ? (c.pids || []) : (c.slots || []).map(function (x) { return x.pid; }).filter(Boolean); };
+  var stageOf = function (c) {
+    var ps = pidsOf(c), cs = cardStatus[c.id] && cardStatus[c.id].s;
+    if (cs === 'reshoot') return 5;
+    if (del[c.id]) return 4;
+    if (ps.length && ps.every(function (pid) { return dl[pid] && dl[pid].n; })) return 3;
+    if (cs === 'retouch') return 2;
+    if (cs === 'approval') return 1;
+    return 0;
+  };
+  /* артикулы: папки + карточки товара по коду; стадия — самая дальняя из его карточек */
+  var art = {};
+  Object.keys(codes).forEach(function (code) { art[code] = 0; });
+  var product = cards.filter(function (c) { return c.cpArticle || c.cpAuto; });
+  if (product.length || Object.keys(codes).length) {
+    product.forEach(function (c) {
+      var code = c.cpArticle || c.title || c.id;
+      art[code] = Math.max(art[code] || 0, stageOf(c));
+    });
+    Object.keys(art).forEach(function (code) { s.k[art[code]]++; });
+  } else {
+    cards.forEach(function (c) { if (pidsOf(c).length) s.k[stageOf(c)]++; });
+  }
   cards.forEach(function (c) {
     s.cards++;
-    var pids = c.mode === 'auto' ? (c.pids || []) : (c.slots || []).map(function (x) { return x.pid; }).filter(Boolean);
+    var pids = pidsOf(c);
     if (pids.length) s.filled++;
     else if (c.cpArticle || c.cpAuto) s.empty++;
     if (cardStatus[c.id] && cardStatus[c.id].s === 'approval') s.ap++;
@@ -70,13 +111,13 @@ function cpShootSummary(data) {
 }
 
 function cpSumEncode(s) {
-  return 'v2;n=' + s.cards + ';f=' + s.filled + ';e=' + s.empty + ';rt=' + s.rt + ';ra=' + s.ra + ';ap=' + s.ap + ';rs=' + s.rs + ';d=' + s.del + ';rc=' + s.rc + ';k=' + s.k.join(',');
+  return 'v3;n=' + s.cards + ';f=' + s.filled + ';e=' + s.empty + ';rt=' + s.rt + ';ra=' + s.ra + ';ap=' + s.ap + ';rs=' + s.rs + ';d=' + s.del + ';rc=' + s.rc + ';k=' + s.k.join(',');
 }
 
-/* v1 (без стадий артикулов) не берём — такие съёмки пересчитываются в фоне */
+/* старые версии сводки (без стадий артикулов по папкам) не берём — пересчитываются в фоне */
 function cpSumDecode(str) {
-  if (!str || !/^v2;/.test(str)) return null;
-  var m = {}, k = [0, 0, 0, 0, 0, 0, 0];
+  if (!str || !/^v3;/.test(str)) return null;
+  var m = {}, k = [0, 0, 0, 0, 0, 0];
   str.split(';').slice(1).forEach(function (kv) {
     var p = kv.split('=');
     if (p[0] === 'k') k = p[1].split(',').map(function (x) { return +x || 0; });
@@ -85,12 +126,13 @@ function cpSumDecode(str) {
   return { cards: m.n || 0, filled: m.f || 0, empty: m.e || 0, rt: m.rt || 0, ra: m.ra || 0, ap: m.ap || 0, rs: m.rs || 0, del: m.d || 0, rc: m.rc || 0, k: k };
 }
 
-/** Что нужно сделать: {select, retouch, approval}; none — отбора ещё нет */
+/** Что нужно сделать со съёмкой (для фильтров). */
 function cpStagesOf(sum) {
   if (!sum) return null;
-  var done = sum.filled > 0 && sum.del >= sum.filled && !sum.empty;
+  var total = sum.k.reduce(function (a, b) { return a + b; }, 0);
+  var done = total > 0 && sum.k[4] > 0 && sum.k[4] + sum.k[5] === total;
   return {
-    select: sum.filled === 0 || sum.empty > 0,
+    select: sum.k[0] > 0 || sum.filled === 0,
     retouch: sum.rt > 0,
     approval: sum.ap > 0,
     fresh: sum.filled === 0,
@@ -101,18 +143,22 @@ function cpStagesOf(sum) {
 
 /* ---------- запись сводки после сохранения отбора ---------- */
 
-function cpWriteSummary(shootPath, data, force) {
+/** Записать сводку; папки съёмки берутся из обхода (он кэшируется на 5 минут). */
+function cpWriteSummary(shootPath, data, force, shootName) {
   if (!CPDisk.hasProxy()) return Promise.resolve();
-  var str = cpSumEncode(cpShootSummary(data));
-  if (!force && CP.sumWritten[shootPath] === str) return Promise.resolve();
-  return CPDisk.proxyProps(shootPath, { cp_sum: str }).then(function () {
-    CP.sumWritten[shootPath] = str;
-    /* витрина уже загружена — обновляем строку этой съёмки */
-    (CP.shoots || []).forEach(function (d) {
-      if (d.path === shootPath) { d.custom_properties = d.custom_properties || {}; d.custom_properties.cp_sum = str; }
+  var name = shootName || shootPath.split('/').pop();
+  return cpWalk(shootPath).then(function (files) { return files; }, function () { return null; }).then(function (files) {
+    var str = cpSumEncode(cpShootSummary(data, cpArticleCodes(shootPath, name, files)));
+    if (!force && CP.sumWritten[shootPath] === str) return;
+    return CPDisk.proxyProps(shootPath, { cp_sum: str }).then(function () {
+      CP.sumWritten[shootPath] = str;
+      /* витрина уже загружена — обновляем строку этой съёмки */
+      (CP.shoots || []).forEach(function (d) {
+        if (d.path === shootPath) { d.custom_properties = d.custom_properties || {}; d.custom_properties.cp_sum = str; }
+      });
+    }, function (e) {
+      if (window.console) console.warn('[CP] сводка съёмки не записалась', shootPath, e && (e.body || e.message));
     });
-  }, function (e) {
-    if (window.console) console.warn('[CP] сводка съёмки не записалась', shootPath, e && (e.body || e.message));
   });
 }
 
@@ -185,8 +231,8 @@ function cpRenderStageBar() {
 }
 
 var CP_ART_STAGES = [
-  { label: 'не отобрано', cls: 'k0' }, { label: 'отобрано', cls: 'k1' }, { label: 'согласование', cls: 'k2' },
-  { label: 'ретушь', cls: 'k3' }, { label: 'скачано', cls: 'k4' }, { label: 'загружено', cls: 'k5' }, { label: 'брак', cls: 'k6' }
+  { label: 'отбор', cls: 'k1' }, { label: 'согласование', cls: 'k2' }, { label: 'ретушь', cls: 'k3' },
+  { label: 'скачано', cls: 'k4' }, { label: 'загружено', cls: 'k5' }, { label: 'брак', cls: 'k6' }
 ];
 
 /** Под съёмкой: сколько артикулов на какой стадии — полоска и подписи с числами. */
@@ -224,7 +270,7 @@ cpRenderShoots = (function (orig) {
       if (!sum) parts.push(d && d.cpSumDone ? '<span class="cp-todo-s">отбора нет</span>' : '<span class="cp-todo-w">считаю…</span>');
       else {
         if (sum.filled === 0) parts.push('<span class="cp-todo-s">отбора нет</span>');
-        else if (sum.empty) parts.push('<span class="cp-todo-s">пустых карточек: ' + sum.empty + '</span>');
+        else if (sum.k[0]) parts.push('<span class="cp-todo-s">в отборе: ' + sum.k[0] + ' арт.</span>');
         if (sum.rt) parts.push('<span class="cp-todo-r">ретушь не скачана: ' + sum.rt + ' кадр.</span>');
         if (sum.ap) parts.push('<span class="cp-todo-a">на согласовании: ' + sum.ap + '</span>');
       }
@@ -247,12 +293,18 @@ function cpFillSummaries() {
   function next() {
     if (run !== _cpFillRun || CP.archive !== archive || i >= todo.length) return Promise.resolve();
     var d = todo[i++];
-    return CPDisk.readState(d.path).then(function (st) {
+    /* отбор + папки съёмки (артикулы по папкам — и там, где отбора ещё нет) */
+    return Promise.all([
+      CPDisk.readState(d.path).catch(function () { return null; }),
+      cpWalk(d.path).catch(function () { return null; })
+    ]).then(function (r) {
+      var data = r[0] && r[0].data;
+      var codes = cpArticleCodes(d.path, d.name, r[1]);
       d.cpSumDone = true;
-      if (!st || !st.data) return;   /* отбора ещё нет */
-      d.cpSum = cpShootSummary(st.data);
-      return cpWriteSummary(d.path, st.data, true);
-    }, function () { d.cpSumDone = true; }).then(function () { redraw(); return next(); });
+      if (!data && !Object.keys(codes).length) return;   /* ни отбора, ни папок артикулов */
+      d.cpSum = cpShootSummary(data, codes);
+      return cpWriteSummary(d.path, data, true, d.name);
+    }).then(function () { redraw(); return next(); });
   }
   return Promise.all([next(), next(), next()]).then(function () { if (run === _cpFillRun) cpRenderShoots(); });
 }
@@ -279,7 +331,7 @@ document.getElementById('cpShelfRefresh').onclick = function () { cpLoadShoots()
     + '.cp-artbar-line i{display:block;min-width:2px}'
     + '.cp-artbar-leg{white-space:normal;line-height:1.7}.cp-artbar-leg span{white-space:nowrap}.cp-artbar-leg b{color:#f2f2f1;font-weight:600}'
     + '.cp-artbar-leg span i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px;vertical-align:0}'
-    + '.cp-k0{background:#4a4a46}.cp-k1{background:#8a7a64}.cp-k2{background:#5b7aa0}.cp-k3{background:#C9956B}.cp-k4{background:#9a8a3c}.cp-k5{background:#5f8a63}.cp-k6{background:#b5533c}'
+    + '.cp-k1{background:#8a7a64}.cp-k2{background:#5b7aa0}.cp-k3{background:#C9956B}.cp-k4{background:#9a8a3c}.cp-k5{background:#5f8a63}.cp-k6{background:#b5533c}'
     + '.cp-todo{display:block;margin-top:3px;white-space:normal}.cp-todo span{white-space:nowrap}.cp-todo-s{color:#cfcac2}.cp-todo-r{color:#e7c9a8}.cp-todo-a{color:#a9c3e0}.cp-todo-d{color:#9fc2a3}.cp-todo-w{color:#6d6d6c}';
   var st = document.createElement('style');
   st.textContent = css;
