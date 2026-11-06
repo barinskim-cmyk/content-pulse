@@ -156,11 +156,18 @@ function cpMirrorMatch(idx, raw, name, letters) {
 }
 
 /** Кадры, чьи карточки сданы на сайт (и нет несданной карточки на ретуши / согласовании с ними). */
+/** Артикул карточки: код артикула или код в названии; у одного артикула бывает две карточки. */
+function cpArtKey(c) {
+  return c.cpArticle || (/(?:^|[^\d])(\d{4,7})(?!\d)/.exec(c.title || '') || [])[1] || c.id;
+}
+
 function cpDonePids() {
-  var m = cpMeta(), del = m.delivered || {}, done = {}, keep = {};
+  var m = cpMeta(), del = m.delivered || {}, done = {}, keep = {}, delArt = {};
+  /* сдан артикул — сданы все его карточки (собранная кнопкой и собранная руками) */
+  App.cards.forEach(function (c) { if (del[c.id]) delArt[cpArtKey(c)] = true; });
   App.cards.forEach(function (c) {
     var pids = cpCardPids(c);
-    if (del[c.id]) pids.forEach(function (pid) { done[pid] = true; });
+    if (del[c.id] || delArt[cpArtKey(c)]) pids.forEach(function (pid) { done[pid] = true; });
     else {
       var cs = m.cardStatus[c.id];
       if (cs && (cs.s === 'retouch' || cs.s === 'approval')) pids.forEach(function (pid) { keep[pid] = true; });
@@ -462,14 +469,14 @@ CP.openedHooks.push(function (path) {
 CP_ACTION_LABEL.retouch_trash = 'сдано на сайт — убрано из ретуши в Корзину';
 CP_ACTION_LABEL.mirror = 'сверка с Диском';
 
-/** После сдачи на сайт: сверить (тихо) — сданное уйдёт из ретуши в Корзину. */
+/** После сдачи на сайт: сразу сверить (тихо) — сданное уйдёт из ретуши в Корзину. */
 function cpRetouchCleanupSoon() {
   var path = CP.shoot && CP.shoot.path;
-  setTimeout(function () {
-    if (!CP.shoot || CP.shoot.path !== path) return;
-    var ready = typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : Promise.resolve();
-    ready.then(function () { return cpMirrorSync(true); });
-  }, 300);
+  var ready = typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : Promise.resolve();
+  return ready.then(function () {
+    if (!CP.shoot || CP.shoot.path !== path) return null;
+    return cpMirrorSync(true);
+  });
 }
 
 (function cpMirrorCss() {

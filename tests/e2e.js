@@ -764,12 +764,18 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     const v1 = await vis();
     check('открыто из 04: видны только карточки на проверке, полоска «только карточки этого этапа»', v1.length === 2 && v1.includes(ids.a) && v1.includes(ids.b)
       && /Открыто из 04_ОТРЕТУШИРОВАНО/.test(await page.textContent('#cpViewBar')), JSON.stringify(v1));
+    /* в ретуши лежит копия 74596 — после «На сайт» она сразу уходит в Корзину */
+    const RT3 = 'disk:/Архив/РЕТУШЬ/' + SN;
+    [RT3, RT3 + '/1', RT3 + '/1/74596_модель'].forEach(d => DIRS.add(d));
+    FILES.set(RT3 + '/1/74596_модель/manekin2.jpg', Buffer.from('Q'.repeat(140)));
     await page.click('[data-cp-rv="' + ids.b + '"] [data-cp-rva="approve"]');
     const siteB = ST + '/' + today + '/' + SN + '/74596/manekin2.tif';
     for (let i = 0; i < 60 && !FILES.has(siteB); i++) await page.waitForTimeout(100);
     await page.waitForFunction(i => cpMeta().rv[i].slice(-1)[0].status === 'approved', ids.b, { timeout: 5000 }).catch(() => {});
     check('«На сайт»: папка артикула переехала в 05/<дата>/<съёмка>/<артикул>, в 04 её больше нет', FILES.has(siteB) && !inRv('manekin2.tif').length
       && await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].status === 'approved' && !!cpMeta().delivered[i], ids.b), JSON.stringify([...FILES.keys()].filter(k => /Этапы/.test(k))));
+    for (let i = 0; i < 60 && FILES.has(RT3 + '/1/74596_модель/manekin2.jpg'); i++) await page.waitForTimeout(100);
+    check('«На сайт» — копия артикула в 03_РЕТУШЬ сразу в Корзине (и при второй карточке того же артикула)', !FILES.has(RT3 + '/1/74596_модель/manekin2.jpg') && TRASHED.some(p => p.indexOf(RT3) === 0), JSON.stringify(TRASHED.slice(-3)));
     const v2 = await vis();
     check('отправили на сайт — карточка сразу пропала из этого вида', v2.length === 1 && v2[0] === ids.a, JSON.stringify(v2));
     page.once('dialog', d => d.accept('тени'));
@@ -1246,6 +1252,22 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.waitForFunction(() => { const b = [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(x => x.dataset.name === '2026-11-06_SV_КАТ'); return b && /03_РЕТУШЬ/.test(b.textContent); }, null, { timeout: 8000 }).catch(() => {});
     const katCard = await page.evaluate(() => { const b = [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(x => x.dataset.name === '2026-11-06_SV_КАТ'); return b ? b.textContent : ''; });
     check('под съёмкой — где сейчас её артикулы, по папкам: 02_ОТБОР есть, 03_РЕТУШЬ 2 (забрали 1)', /02_ОТБОР есть/.test(katCard) && /03_РЕТУШЬ 2 \(забрали 1\)/.test(katCard) && !/ждут ретушёра/.test(katCard), katCard);
+    /* в фильтре этапа панель съёмки показывает, что лежит в папке этапа сейчас */
+    await page.keyboard.press('Escape');
+    await page.click('[data-cp-stage="retouch"]');
+    await page.click('#cpShelfList .cp-shoot[data-name="2026-11-06_SV_КАТ"]');
+    await page.waitForFunction(() => /файлов 2/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
+    const pan = await page.textContent('#cpPanel');
+    check('панель в фильтре 03_РЕТУШЬ: структура папки этапа — Y_74001_модель (забрал Y), 74002_модель, файлов 2; не исходники', /в папке 03_РЕТУШЬ/.test(pan)
+      && /Y_74001_модель/.test(pan) && /забрал Y/.test(pan) && /74002_модель/.test(pan) && /Здесь файлов: 2/.test(pan) && !/k1\.jpg · 1/.test(pan) && /Скачать отсюда/.test(pan), pan.slice(0, 400));
+    await page.click('[data-cp-p="close"]');
+    /* удалили папку съёмки из этапа на Диске — при следующей сверке (сама, раз в 45 с) съёмка из фильтра пропадает */
+    DIRS.delete(K + '/02_ОТБОР/2026-11-06_SV_КАТ'); FILES.delete(K + '/02_ОТБОР/2026-11-06_SV_КАТ/k1.jpg');
+    await page.evaluate(() => cpScanStages());
+    await page.waitForFunction(() => /02_ОТБОР\s*0/.test(document.getElementById('cpStages').textContent), null, { timeout: 5000 }).catch(() => {});
+    check('удалили папку съёмки из 02_ОТБОР на Диске — из фильтра пропала (по папкам, не по отметкам программы)', /02_ОТБОР\s*0/.test(await page.textContent('#cpStages')), await page.textContent('#cpStages'));
+    await page.click('[data-cp-stage=""]');
+    await page.click('#cpGear');
     check('каталог: в шестерёнке — папки и что они значат, отдельные поля этапов скрыты', await page.evaluate(() =>
       document.querySelectorAll('#cpCatBox [data-cp-cat]').length === 6 && document.querySelector('[data-cp-cat="ПРОЧЕЕ"]').value === 'не показывать'
       && document.querySelector('[data-cp-cat="00_АРХИВ"]').value === 'не показывать' && getComputedStyle(document.getElementById('cpRetouchInput')).display === 'none' || !document.getElementById('cpRetouchInput').offsetParent));

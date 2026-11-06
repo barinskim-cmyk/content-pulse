@@ -259,7 +259,10 @@ cpRvApprove = function (ids) {
     m.delivered = m.delivered || {};
     moved.forEach(function (t) {
       t.last.status = 'approved'; t.last.rby = who; t.last.rts = now; t.last.site = CPDisk.showPath(t.to);
-      m.delivered[t.id] = { files: t.last.files.length, letter: t.last.letter, date: cpToday(), at: CPDisk.showPath(t.to), out: t.last.letter + '_' + t.last.n, ts: now };
+      var rec = { files: t.last.files.length, letter: t.last.letter, date: cpToday(), at: CPDisk.showPath(t.to), out: t.last.letter + '_' + t.last.n, ts: now };
+      m.delivered[t.id] = rec;
+      /* у артикула бывает две карточки — сдан артикул целиком */
+      if (t.card && typeof cpArtKey === 'function') App.cards.forEach(function (c) { if (c.id !== t.id && cpArtKey(c) === cpArtKey(t.card) && !m.delivered[c.id]) m.delivered[c.id] = rec; });
       rows.push(cpOutputRow(t.last, shoot.name, t.card, 'принято'));
     });
     cpEvent('rt_approve', [], { card: moved.map(function (t) { return t.card ? t.card.title : t.id; }).join(', '), note: 'на сайт: ' + CPDisk.showPath(cpParentDir(moved[0].to)) });
@@ -372,6 +375,139 @@ cbRenderCards = (function (orig) {
     return r;
   };
 })(cbRenderCards);
+
+/* ---------- панель съёмки в фильтре этапа: что лежит в папке этапа сейчас ----------
+   Маша, 06.11: «в боковой менюшке отображается всё, что есть в исходниках, а не
+   то, что есть в той папке, которую я открыла на этапе сайт или ретушь. Должна
+   отображаться та структура, которая там прямо сейчас лежит, чтобы быстро
+   посмотреть и понять, что там есть». */
+
+cpSelectShoot = (function (orig) {
+  return function (path, name, modified) {
+    var key = CP.stageFilter;
+    var paths = key && typeof CP_STAGE_SETTING !== 'undefined' && CP_STAGE_SETTING[key] && CP.stagePaths && CP.stagePaths[key]
+      ? CP.stagePaths[key][String(name).toLowerCase()] : null;
+    if (!paths || !paths.length) return orig.apply(this, arguments);
+    CP.sel = { path: path, name: name, modified: modified, stage: key, stagePaths: paths.slice(), loading: true, open: {}, folders: {}, files: [], dirs: [] };
+    cpMarkSelected();
+    cpRenderPanel();
+    var sel = CP.sel;
+    Promise.all(sel.stagePaths.map(function (p) {
+      return CPDisk.walkPhotos(p, false, 4, true).then(function (files) { return { root: p, files: files, dirs: files.dirs || [] }; },
+        function (e) { return { root: p, files: [], dirs: [], error: e }; });
+    })).then(function (list) {
+      if (CP.sel !== sel) return;
+      sel.stageFiles = list;
+      sel.loading = false;
+      cpRenderPanel();
+    });
+  };
+})(cpSelectShoot);
+
+/** Дерево папки этапа: {kids: {путь: [дети]}, agg: {путь: {n, bytes}}, files, bytes}. */
+function cpStageTree(sel) {
+  var stageRoot = String((CP.settings || {})[CP_STAGE_SETTING[sel.stage]] || '').replace(/\/+$/, '');
+  var all = {}, agg = {}, nFiles = 0, bytes = 0;
+  var many = sel.stageFiles.length > 1;
+  sel.stageFiles.forEach(function (x) {
+    /* в «Сайте» съёмка лежит в нескольких датах — дата и есть верхний уровень */
+    var pre = '';
+    if (many) {
+      var par = cpParentDir(x.root);
+      pre = par.indexOf(stageRoot + '/') === 0 ? par.slice(stageRoot.length + 1) : par.split('/').pop();
+    }
+    var add = function (rel) {
+      var full = pre ? (rel ? pre + '/' + rel : pre) : rel;
+      if (!full) return '';
+      var parts = full.split('/');
+      for (var i = 1; i <= parts.length; i++) all[parts.slice(0, i).join('/')] = true;
+      return full;
+    };
+    if (pre) add('');
+    x.dirs.forEach(function (d) { if (d.indexOf(x.root + '/') === 0) add(d.slice(x.root.length + 1)); });
+    x.files.forEach(function (f) {
+      if (f.name === CPDisk.STATE_FILE) return;
+      var rel = f.path.indexOf(x.root + '/') === 0 ? f.path.slice(x.root.length + 1) : f.name;
+      var dir = add(cpParentDir(rel)) || '';
+      nFiles++;
+      bytes += f.size || 0;
+      var parts = dir ? dir.split('/') : [];
+      for (var i = 0; i <= parts.length; i++) {
+        var k = parts.slice(0, i).join('/');
+        var a = agg[k] || (agg[k] = { n: 0, bytes: 0 });
+        a.n++; a.bytes += f.size || 0;
+      }
+    });
+  });
+  var kids = {};
+  Object.keys(all).forEach(function (r) {
+    var par = r.indexOf('/') === -1 ? '' : r.slice(0, r.lastIndexOf('/'));
+    (kids[par] = kids[par] || []).push(r);
+  });
+  Object.keys(kids).forEach(function (k) { kids[k].sort(function (a, b) { return a.split('/').pop().localeCompare(b.split('/').pop(), undefined, { numeric: true }); }); });
+  return { kids: kids, agg: agg, files: nFiles, bytes: bytes };
+}
+
+cpRenderPanel = (function (orig) {
+  return function () {
+    var sel = CP.sel;
+    if (!sel || !sel.stage) return orig.apply(this, arguments);
+    var panel = document.getElementById('cpPanel');
+    panel.classList.add('cp-open');
+    var label = cpStageLabel(sel.stage);
+    var head = '<div class="cp-panel-head"><div><b>' + cbEsc(sel.name) + '</b><small>в папке ' + cbEsc(label) + ' — что лежит там сейчас</small></div>'
+      + '<span class="cp-sp"></span><button data-cp-p="close" title="Закрыть панель">×</button></div>';
+    var acts = '<button data-cp-p="open">Открыть</button>' + (sel.stage === 'review' ? '<button data-cp-accept title="Загрузить готовую ретушь">Сдать</button>' : '');
+    if (sel.loading) {
+      panel.innerHTML = head + '<div class="cp-panel-body"><div class="cp-note">Читаю папку ' + cbEsc(label) + '...</div></div><div class="cp-panel-actions"><div class="cp-sum"></div>' + acts + '</div>';
+      return;
+    }
+    var t = cpStageTree(sel);
+    var body = '<div class="cp-fold cp-fold-all"><span class="cp-fold-name">' + cbEsc(label) + ' <small>· файлов ' + t.files + ' · ' + cpMb(t.bytes) + '</small></span></div>';
+    var top = t.kids[''] || [];
+    if (!top.length) body += '<div class="cp-note">' + (t.files ? 'Вложенных папок нет — файлы лежат прямо в папке съёмки.' : 'Папка пустая.') + '</div>';
+    var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+    if (top.length === 1 && sel.open[top[0]] === undefined) sel.open[top[0]] = true;   /* одна папка — сразу раскрыта */
+    var row = function (fp, depth) {
+      var ch = t.kids[fp] || [], open = !!(sel.open && sel.open[fp]);
+      var a = t.agg[fp] || { n: 0, bytes: 0 };
+      var nm = fp.split('/').pop(), marks = '';
+      var lm = /^([A-Za-zА-Яа-яЁё]{1,3})_/.exec(nm);
+      if (lm && letters.indexOf(lm[1]) !== -1) marks += '<span class="cp-state cp-state-retouch">забрал ' + cbEsc(lm[1]) + '</span>';
+      if (/_доработка$/i.test(nm)) marks += '<span class="cp-state cp-state-reshoot">на доработке</span>';
+      body += '<div class="cp-fold' + (depth ? ' cp-fold-sub' : '') + '" style="padding-left:' + (depth * 18) + 'px"><span>' + cbEsc(nm)
+        + ' <small>· ' + a.n + (a.bytes ? ' · ' + cpMb(a.bytes) : '') + '</small></span>'
+        + (ch.length ? '<button class="cp-fold-exp" data-cp-exp="' + cbEsc(fp) + '">' + (open ? 'свернуть' : 'папок: ' + ch.length) + '</button>' : '')
+        + '<span class="cp-fold-props">' + marks + '</span></div>';
+      if (open) ch.forEach(function (c) { row(c, depth + 1); });
+    };
+    top.forEach(function (fp) { row(fp, 0); });
+    var errs = sel.stageFiles.filter(function (x) { return x.error; });
+    if (errs.length) body += '<div class="cp-note cp-warn">Не прочиталось: ' + errs.map(function (x) { return cbEsc(CPDisk.showPath(x.root)); }).join(', ') + '</div>';
+    body += '<div class="cp-note">' + sel.stagePaths.map(function (p) { return cbEsc(CPDisk.showPath(p)); }).join('<br>') + '</div>';
+    panel.setAttribute('data-path', sel.path);
+    panel.innerHTML = head + '<div class="cp-panel-body">' + body + '</div><div class="cp-panel-actions"><div class="cp-sum">Здесь файлов: <b>' + t.files + '</b> · ' + cpMb(t.bytes) + '</div>'
+      + acts + '<button class="cb-primary" data-cp-stdl="1"' + (t.files ? '' : ' disabled') + '>Скачать отсюда</button></div>';
+  };
+})(cpRenderPanel);
+
+/* «Скачать отсюда»: всё, что лежит в папке этапа, одним архивом со структурой */
+document.getElementById('cpPanel').addEventListener('click', function (e) {
+  if (!e.target.closest('[data-cp-stdl]') || !CP.sel || !CP.sel.stage || !CP.sel.stageFiles) return;
+  e.preventDefault();
+  var sel = CP.sel, stageRoot = String((CP.settings || {})[CP_STAGE_SETTING[sel.stage]] || '').replace(/\/+$/, '');
+  var many = sel.stageFiles.length > 1, entries = [];
+  sel.stageFiles.forEach(function (x) {
+    var par = cpParentDir(x.root);
+    var pre = many ? (par.indexOf(stageRoot + '/') === 0 ? par.slice(stageRoot.length + 1) : par.split('/').pop()) + '/' : '';
+    x.files.forEach(function (f) {
+      if (f.name === CPDisk.STATE_FILE) return;
+      entries.push({ from: f.path, size: f.size, name: pre + (f.path.indexOf(x.root + '/') === 0 ? f.path.slice(x.root.length + 1) : f.name) });
+    });
+  });
+  var name = CPDisk.safeName(sel.name) + '_' + CPDisk.safeName(cpStageLabel(sel.stage)) + '_' + cpToday();
+  cpExportBundle(name, entries, cpStageLabel(sel.stage) + ': файлов ' + entries.length + '.').catch(function (err) { cpHandleError(err, 'Скачивание'); });
+});
 
 /* ---------- витрина, фильтр «отретушировано»: перетащить папку как на Диск ---------- */
 

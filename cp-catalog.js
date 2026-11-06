@@ -248,6 +248,33 @@ function cpArtBarPhys(sum, phys) {
   return '<div class="cp-artbar">' + line + '<div class="cp-artbar-leg">' + leg.join(' · ') + '</div></div>';
 }
 
+/* В каталоге фильтр этапа — только то, что лежит в его папке сейчас (не отметки программы):
+   удалили папку с Диска — съёмка из фильтра пропадает. */
+cpStagesFor = (function (orig) {
+  return function (d) {
+    var st = orig.apply(this, arguments);
+    if (!cpCatalog() || !st) return st;
+    var low = d.name.toLowerCase();
+    Object.keys(CP_STAGE_SETTING).forEach(function (key) {
+      st[key] = !!(CP.settings && CP.settings[CP_STAGE_SETTING[key]] && CP.stagePresence[key] && CP.stagePresence[key][low]);
+    });
+    return st;
+  };
+})(cpStagesFor);
+
+/* Витрина сама сверяется с Диском: раз в 45 секунд и когда вернулись на вкладку —
+   что добавили или удалили другие, видно без «Обновить» (Маша, 06.11). */
+CP.stageScanAt = 0;
+cpScanStages = (function (orig) {
+  return function () { CP.stageScanAt = Date.now(); return orig.apply(this, arguments); };
+})(cpScanStages);
+function cpShelfLive() {
+  var shelf = document.getElementById('cpShelf');
+  return cpCatalog() && CP.shoots && shelf && shelf.classList.contains('cp-open') && document.visibilityState !== 'hidden';
+}
+setInterval(function () { if (cpShelfLive() && Date.now() - CP.stageScanAt > 40000) cpScanStages(); }, 15000);
+document.addEventListener('visibilitychange', function () { if (cpShelfLive() && Date.now() - CP.stageScanAt > 8000) cpScanStages(); });
+
 /* ---------- шестерёнка: папки каталога и что они значат ---------- */
 
 function cpCatRender() {
