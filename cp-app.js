@@ -16,7 +16,7 @@
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.40';
+var CP_VERSION = '2.0.41';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -361,7 +361,8 @@ function cpNormArchive(raw) {
   if (!v) return '';
   /* общий диск Яндекс 360: адрес из браузера …/client/aa/d_<метка>/<папки>
      (в документации — …/vd/<метка>/…) или уже готовый путь vd:<метка>:disk:/… */
-  var vd = /\/client\/(?:aa|vd)\/(?:d_)?([A-Za-z0-9_-]+)\/?([^?#]*)/.exec(v) || /^vd:([^:\/]+):disk:\/?(.*)$/.exec(v);
+  var vd = /\/client\/(?:aa|vd)\/(?:d_)?([A-Za-z0-9_-]+)\/?([^?#]*)/.exec(v) || /^vd:([^:\/]+):disk:\/?(.*)$/.exec(v)
+    || /^(?:disk:\/)?vd:([^:\/]+):?(?:disk:)?\/?(.*)$/.exec(v);   /* «vd:<метка>» без «disk:» */
   if (vd) {
     var rest = vd[2];
     try { rest = decodeURIComponent(rest); } catch (e) { }

@@ -21,7 +21,7 @@ function png(w, h) {
 }
 
 /* --- состояние фейкового Диска --- */
-const DIRS = new Set(['disk:/Архив', 'disk:/Архив/LM-1043', 'disk:/Архив/LM-1043/part2', 'disk:/Архив/LM-2001',
+const DIRS = new Set(['disk:', 'disk:/Архив', 'disk:/Архив/LM-1043', 'disk:/Архив/LM-1043/part2', 'disk:/Архив/LM-2001',
   /* съёмки по структуре SK: моделька (лук/артикул) и оптика (бренд/артикул) */
   'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST', 'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1', 'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74595_модель',
   'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/74596_модель', 'disk:/Архив/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/видео',
@@ -77,7 +77,7 @@ async function route(r) {
   log.push(m + ' ' + u.pathname + ' ' + (q.path || q.p || ''));
   if (u.host === 'cloud-api.yandex.net') {
     if (req.headers()['authorization'] !== 'OAuth TESTTOKEN') return json(401, { message: 'no auth' });
-    const p = q.path;
+    const p = /(^|:)disk:\/$/.test(q.path || '') ? q.path.slice(0, -1) : q.path;   /* корень диска: «disk:/» = «disk:» */
     if (u.pathname === '/v1/disk' || u.pathname === '/v1/disk/') return json(200, { user: { login: 'masha', display_name: 'Маша' } });
     /* общий диск: только свои адреса и только пути vd:…; в списках пути — без метки (худший случай) */
     let pn = u.pathname, vdMode = false;
@@ -822,7 +822,17 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('общий диск: запросы — только через /virtual-disks, ни одного пути общего диска в обычный API',
     VD_CALLS.some(c => /^GET /.test(c)) && VD_CALLS.some(c => /upload/.test(c)) && !log.some(l => / \/v1\/disk\/resources(\/\w+)? vd:/.test(l)),
     log.filter(l => / \/v1\/disk\/resources(\/\w+)? vd:/.test(l)).slice(0, 3).join(' | '));
+  /* проверка доступа: метка с «d_» и без, выжимка ответов, без токена */
   await page.evaluate(() => cpShowShelf());
+  await page.click('#cpGear');
+  await page.click('#cpDiag');
+  await page.waitForFunction(() => /готово/.test(document.getElementById('cpDiagText').value), null, { timeout: 10000 });
+  {
+    const t = await page.inputValue('#cpDiagText');
+    check('«Проверить доступ»: общий диск по метке, список папок, нет токена', /общий диск TESTVD, корень: HTTP 200/.test(t) && /dir  01_ИСХОДНИКИ/.test(t) && /d_TESTVD/.test(t) && !/TESTTOKEN/.test(t), t.slice(0, 900).replace(/\n/g, ' ⏎ '));
+  }
+  await page.click('#cpDiagClose');
+  check('«vd:<метка>» без «disk:» понимается', await page.evaluate(() => cpNormArchive('vd:abc123') === 'vd:abc123:disk:/' && cpNormArchive('disk:/vd:abc123') === 'vd:abc123:disk:/'));
   await page.click('#cpGear');
   await page.fill('#cpArchiveInput', 'Архив');
   await page.click('#cpArchiveApply');

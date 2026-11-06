@@ -576,7 +576,7 @@ function cpServiceReset() {
     + '<h5>Папка ретуши</h5><div class="cp-set-line" id="cpSetRetouch"></div>'
     + '<h5>Файлы настроек</h5><div class="cp-set-dir">лежат в <span id="cpSetServiceDir">' + cbEsc(CPDisk.showPath(CP_CONFIG.serviceDir)) + '</span> — рядом с архивом</div><div class="cp-set-line">'
     + CP_SERVICE_FILES.map(function (f, i) { return '<button data-cp-setfile="' + i + '">' + cbEsc(f.label) + '</button>'; }).join('')
-    + '</div>';
+    + '</div><h5>Проверка</h5><div class="cp-set-line"><button id="cpDiag">Проверить доступ к архиву</button></div>';
   document.body.appendChild(box);
 
   /* переносим поля с витрины (обработчики остаются) */
@@ -607,6 +607,7 @@ function cpServiceReset() {
     box.classList.add('cp-open');
     gear.classList.add('cp-on');
   };
+  document.getElementById('cpDiag').onclick = function () { close(); cpDiagnose(); };
   box.addEventListener('click', function (e) {
     var f = e.target.closest('[data-cp-setfile]');
     if (f) { close(); cpFilesOpen(parseInt(f.getAttribute('data-cp-setfile'), 10)); }
@@ -626,3 +627,67 @@ function cpServiceReset() {
   };
   gear.style.display = CPDisk.hasToken() ? '' : 'none';
 })();
+
+/* ---------- проверка доступа к архиву ----------
+   Для разбора, когда архив «не найден» или пуст: несколько запросов к API
+   Диска (личный Диск, общий диск по метке из адреса, в том числе с «d_»
+   и без) — статус и короткая выжимка ответа. Текст можно скопировать и
+   прислать; токена в нём нет. */
+
+function cpDiagnose() {
+  var arch = CP.archive || cpGet('cp_archive', CP_CONFIG.defaultArchive);
+  var m = /^vd:([^:\/]+):disk:(.*)$/.exec(arch);
+  var tries = [['Диск', '', { fields: 'user,total_space' }]];
+  if (m) {
+    var h = m[1], inner = m[2] || '/';
+    var alt = h.indexOf('d_') === 0 ? h.slice(2) : 'd_' + h;
+    [h, alt].forEach(function (x) {
+      tries.push(['общий диск ' + x + ', корень', '/virtual-disks/resources', { path: 'vd:' + x + ':disk:/', limit: 30 }]);
+      if (inner !== '/') tries.push(['общий диск ' + x + ', ' + inner, '/virtual-disks/resources', { path: 'vd:' + x + ':disk:' + inner, limit: 30 }]);
+    });
+  } else {
+    tries.push(['архив', '/resources', { path: arch, limit: 30 }]);
+  }
+  tries.push(['личный Диск, корень', '/resources', { path: 'disk:/', limit: 40 }]);
+  var out = ['Content Pulse ' + CP_VERSION + ' · ' + new Date().toLocaleString('ru-RU'), 'архив: ' + arch, ''];
+  var box = document.getElementById('cpDiagBox');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'cpDiagBox';
+    box.className = 'cp-files';
+    box.innerHTML = '<div class="cp-files-box"><div class="cp-files-head"><b>Проверка доступа к архиву</b>'
+      + '<button id="cpDiagCopy">Скопировать</button><button id="cpDiagClose">Закрыть</button></div>'
+      + '<textarea id="cpDiagText" readonly spellcheck="false"></textarea></div>';
+    document.body.appendChild(box);
+    document.getElementById('cpDiagClose').onclick = function () { box.classList.remove('cp-open'); };
+    document.getElementById('cpDiagCopy').onclick = function () {
+      var t = document.getElementById('cpDiagText');
+      t.select();
+      try { navigator.clipboard.writeText(t.value).then(function () { cbToast('Скопировано — пришлите в чат'); }, function () { document.execCommand('copy'); cbToast('Скопировано'); }); }
+      catch (e) { document.execCommand('copy'); cbToast('Скопировано'); }
+    };
+  }
+  box.classList.add('cp-open');
+  var ta = document.getElementById('cpDiagText');
+  ta.value = out.join('\n') + 'проверяю...';
+  tries.reduce(function (chain, t) {
+    return chain.then(function () {
+      return CPDisk.rawGet(t[1], t[2]).then(function (r) {
+        var line = '— ' + t[0] + ': HTTP ' + r.status;
+        var j = null;
+        try { j = JSON.parse(r.text); } catch (e) { }
+        if (r.status === 200 && j) {
+          if (j.user) line += ' · вход: ' + (j.user.login || '') ;
+          if (j.type) line += ' · ' + j.type + ' «' + (j.name || '') + '» path=' + (j.path || '');
+          var emb = j._embedded;
+          if (emb) {
+            line += ' · внутри: ' + (emb.total !== undefined ? emb.total : (emb.items || []).length);
+            (emb.items || []).slice(0, 30).forEach(function (it) { line += '\n     ' + it.type + '  ' + it.name + '   path=' + it.path; });
+          } else if (j.type === 'dir') line += ' · списка нет (_embedded пуст)';
+        } else line += ' · ' + String(r.text).slice(0, 300);
+        out.push(line);
+        ta.value = out.join('\n');
+      });
+    });
+  }, Promise.resolve()).then(function () { out.push('', 'готово'); ta.value = out.join('\n'); });
+}

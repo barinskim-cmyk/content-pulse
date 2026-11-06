@@ -118,6 +118,13 @@ var CPDisk = (function () {
     if (p.charAt(0) === '/') return root + p;
     return p;
   }
+  /** Сырой запрос к API для проверки доступа: {status, text}; без повторов, токен в ответ не попадает. */
+  function rawGet(endpoint, params) {
+    return fetch(API + endpoint + qs(params), { headers: { Authorization: 'OAuth ' + token } })
+      .then(function (r) { return r.text().then(function (t) { return { status: r.status, text: t }; }); },
+        function (e) { return { status: 0, text: String(e && e.message || e) }; });
+  }
+
   /** Путь для показа человеку: без «disk:», общий диск — «Общий диск/...» */
   function showPath(p) {
     p = String(p || '');
@@ -393,6 +400,6 @@ var CPDisk = (function () {
     previewBlob: previewBlob, downloadHref: downloadHref, downloadBlob: downloadBlob,
     ensureDir: ensureDir, uploadBlob: uploadBlob, copy: copy, waitOperation: waitOperation,
     readState: readState, writeState: writeState, stateRev: stateRev, safeName: safeName,
-    isVd: isVd, rootOf: rootOf, showPath: showPath
+    isVd: isVd, rootOf: rootOf, showPath: showPath, rawGet: rawGet
   };
 })();
