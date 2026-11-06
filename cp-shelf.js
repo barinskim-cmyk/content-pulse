@@ -363,7 +363,7 @@ function cpSaveSetting(name, value) {
   return cpEnsureSettings(true).then(function () {
     var text = CP.settingsText || CP_SETTINGS_TEMPLATE;
     var lines = text.split(/\r?\n/), done = false;
-    var re = new RegExp('^\\s*' + name + '\\s*=', 'i');
+    var re = new RegExp('^\\s*' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') + '\\s*=', 'i');
     lines = lines.map(function (l) { if (!done && re.test(l)) { done = true; return name + ' = ' + value; } return l; });
     if (!done) lines.push(name + ' = ' + value);
     text = lines.join('\n');
