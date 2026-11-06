@@ -6,10 +6,12 @@
      - карточку, из которой уже скачивали, менять можно, но с
        предупреждением: на шапке «изменена после скачивания», тост,
        запись в журнал; отменить — Cmd+Z;
-     - кадр, который скачали на ретушь и потом убрали из отбора
-       (нет ни в одной карточке и доп. контенте), получает статус
-       «Удалено из отбора» — ретушёр видит, что его делать не надо;
-       ещё не скачанный — просто снимается с ретуши;
+     - кадр, убранный из карточки, теряет статус, который получил от
+       неё (ретушь, согласование и т. п.): если кадр остался в другой
+       карточке со своим статусом — тот статус не трогаем. Брак
+       (пересъём) остаётся всегда (06.11.2026);
+     - исключение: кадр уже на ретуши и ретушёр его скачал — статус
+       «Удалено из отбора», чтобы ретушёр видел, что делать не надо;
      - кадр, добавленный в карточку, которая уже на ретуши, сам
        уходит на ретушь (статус, копия в папку ретуши, теги карточки
        действуют на него) и считается «не скачано» — ретушёр заберёт
@@ -76,7 +78,7 @@ function cpGuardCheck() {
   if (!prev || CP.snapShoot !== CP.shoot.path || CP.guardMute) { CP.snapShoot = CP.shoot.path; return; }
   var m = cpMeta();
   var actor = cpActor(), ts = new Date().toISOString();
-  var changed = false, warnCards = [], removedDl = [], unretouched = [], inherit = [];
+  var changed = false, warnCards = [], removedDl = [], unretouched = [], inherit = [], removals = [], additions = [];
   var ids = {};
   Object.keys(prev).forEach(function (k) { ids[k] = true; });
   Object.keys(now).forEach(function (k) { ids[k] = true; });
@@ -94,28 +96,33 @@ function cpGuardCheck() {
       if (card) card.cpChangedAfterDl = { by: actor, ts: ts };
       changed = true;
     }
-    removed.forEach(function (pid) {
-      if (cpInSelection(pid)) return;          /* перенесли в другую карточку */
-      var st = m.status[pid], d = m.downloads[pid];
-      if (!st || st.s !== 'retouch') return;
-      if (d && d.n) {
-        m.status[pid] = { s: 'removed', by: actor, ts: ts, card: cid, was: 'retouch' };
-        removedDl.push(pid);
-      } else {
-        delete m.status[pid];                  /* ещё не забрали — просто снимаем с ретуши */
-        unretouched.push(pid);
-      }
-      changed = true;
-    });
-    /* добавили в карточку, которая уже на ретуши — кадр тоже уходит на ретушь */
-    if (card && cst && cst.s === 'retouch') {
-      var fresh = added.filter(function (pid) {
-        var st = m.status[pid];
-        var p = cbPhotoById(pid);
-        return p && (p.kind || 'photo') !== 'ref' && (!st || st.s === 'removed');
-      });
-      if (fresh.length) inherit.push({ card: card, pids: fresh });
+    removed.forEach(function (pid) { removals.push({ pid: pid, cid: cid }); });
+    if (card && cst && cst.s === 'retouch' && added.length) additions.push({ card: card, pids: added });
+  });
+  /* сначала убранные: теряют статус, полученный от карточки, — кроме брака */
+  removals.forEach(function (r) {
+    var pid = r.pid, st = m.status[pid], d = m.downloads[pid];
+    if (!st || st.s === 'reshoot' || st.s === 'removed') return;
+    var still = cpInSelection(pid);
+    /* кадр остался в отборе, а статус ему ставили не через эту карточку — он не её */
+    if (still && st.card !== r.cid) return;
+    if (st.s === 'retouch' && d && d.n) {
+      m.status[pid] = { s: 'removed', by: actor, ts: ts, card: r.cid, was: 'retouch' };
+      removedDl.push(pid);
+    } else {
+      delete m.status[pid];
+      unretouched.push(pid);
     }
+    changed = true;
+  });
+  /* потом добавленные в карточку, которая уже на ретуши: кадр тоже уходит на ретушь */
+  additions.forEach(function (x) {
+    var fresh = x.pids.filter(function (pid) {
+      var st = m.status[pid];
+      var p = cbPhotoById(pid);
+      return p && (p.kind || 'photo') !== 'ref' && (!st || st.s === 'removed');
+    });
+    if (fresh.length) inherit.push({ card: x.card, pids: fresh });
   });
   if (warnCards.length) {
     warnCards.forEach(function (w) {
@@ -125,7 +132,7 @@ function cpGuardCheck() {
       + ' кадр(ов). Убранные помечены «Удалено из отбора», добавленные уйдут как не скачанные. Отменить — Cmd+Z.');
   }
   if (removedDl.length) cpEvent('removed_after_download', cpPhotoNames(removedDl), {}, true);
-  if (unretouched.length) cpEvent('clear_status', cpPhotoNames(unretouched), { note: 'убраны из карточки до скачивания' }, true);
+  if (unretouched.length) cpEvent('clear_status', cpPhotoNames(unretouched), { note: 'убраны из карточки — статус снят' }, true);
   if (changed) cbMarkDirty();
   inherit.forEach(function (x) {
     /* статус, копия в папку ретуши и запись в журнал — как при отправке */

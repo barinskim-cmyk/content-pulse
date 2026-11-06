@@ -648,6 +648,32 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     var ev = cpMeta().events.map(e => e.action);
     return ev.includes('changed_after_download') && ev.includes('removed_after_download') && ev.includes('added_to_retouch_card');
   }));
+  /* убрали из карточки — статус, полученный от неё, снимается; брак остаётся; в другой карточке на ретуши — ретушь */
+  const gs = await page.evaluate(() => {
+    var tpl = App.templates[0];
+    cbAddCardFromTpl(tpl.id); var A = App.cards[App.cards.length - 1];
+    cbAddCardFromTpl(tpl.id); var B = App.cards[App.cards.length - 1];
+    var b = App.photos.find(p => /\/b\.jpg$/.test(p.disk)), c = App.photos.find(p => /\/c\.jpg$/.test(p.disk));
+    var put = (card, ids) => { if (card.mode === 'auto') card.pids = ids.slice(); else ids.forEach((id, i) => { if (card.slots[i]) card.slots[i].pid = id; }); };
+    var take = (card, id) => { if (card.mode === 'auto') card.pids = card.pids.filter(x => x !== id); else card.slots.forEach(s => { if (s.pid === id) s.pid = null; }); };
+    put(A, [b.id, c.id]); cbMarkDirty(); cbRenderCards();
+    cpDoAction('approval', [b.id], A.id);
+    cpDoAction('reshoot', [c.id], A.id);
+    var before = [cpMeta().status[b.id] && cpMeta().status[b.id].s, cpMeta().status[c.id] && cpMeta().status[c.id].s];
+    take(A, b.id); take(A, c.id); cbMarkDirty(); cbRenderCards();
+    var after = [cpMeta().status[b.id] ? cpMeta().status[b.id].s : '', cpMeta().status[c.id] ? cpMeta().status[c.id].s : ''];
+    /* кадр на согласовании в карточке A переносим в карточку B, которая на ретуши */
+    put(A, [b.id]); cbMarkDirty(); cbRenderCards();
+    cpDoAction('approval', [b.id], A.id);
+    cpSetStatus([], 'retouch', B.id); cbMarkDirty(); cbRenderCards();
+    take(A, b.id); put(B, [b.id]); cbMarkDirty(); cbRenderCards();
+    return { before, after, A: A.id, B: B.id, b: b.id };
+  });
+  check('убрали из карточки: «на согласовании» снято, брак остался', gs.before.join() === 'approval,reshoot' && gs.after.join() === ',reshoot', JSON.stringify(gs));
+  await page.waitForFunction(b => cpMeta().status[b] && cpMeta().status[b].s === 'retouch', gs.b, { timeout: 8000 }).catch(() => {});
+  check('перенесли в карточку на ретуши — статус прежней карточки снят, кадр ушёл на ретушь', await page.evaluate(x => cpMeta().status[x.b].s === 'retouch' && cpMeta().status[x.b].card === x.B, gs));
+  await page.evaluate(x => { App.cards = App.cards.filter(c => c.id !== x.A && c.id !== x.B); delete cpMeta().cardStatus[x.B]; cbMarkDirty(); cbRenderCards(); }, gs);
+
   /* теги словаря прямо на шапке карточки; в группе «один» — один тег */
   await page.evaluate(() => { CP.dict = cpParseDict('[Ретушёры: один]\nY\nU\n[Срочность]\nСрочно\n[Служебные: не в карточке]\nтест'); cbRenderCards(); });
   check('на шапке карточки все теги словаря, кроме групп «не в карточке»', await page.evaluate(() => {
