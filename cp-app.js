@@ -16,7 +16,7 @@
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.41';
+var CP_VERSION = '2.0.42';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -522,6 +522,8 @@ function cpOpenShootNow(path, name) {
         cbToast('Съёмка открыта: ' + name + (added ? ' · новых файлов: ' + added : ''));
       }
       cpStartPoll();
+      /* модули узнают, что съёмка открыта (фильтр по отмеченным папкам — cp-deliver.js) */
+      (CP.openedHooks || []).forEach(function (f) { try { f(path); } catch (e) { if (window.console) console.error('[CP]', e); } });
     }
     /* Съёмку уже открывали: кадры известны из отбора — показываем сразу,
        новые файлы досчитываются в фоне. Новую съёмку ждём целиком. */
@@ -2075,14 +2077,27 @@ function cpDownloadAll(withAll) {
 function cpPad(n) { return (n < 10 ? '0' : '') + n; }
 
 /** Раскладка отбора: [{disk, dir:[папки], file}] по карточкам и доп. контенту. */
-function cpSelectionJobs() {
+/* Папка карточки в выгрузке (06.11.2026, тест в SK): карточка артикула —
+   папка с именем карточки (в модельке — не исходная структура лук/артикул),
+   остальные — «NN название», как раньше. Имя с тегами по шаблону — позже,
+   здесь же. */
+function cpCardExportFolder(card, index) {
+  var title = card.title || card.category || 'Карточка';
+  return card.cpArticle ? CPDisk.safeName(title) : cpPad(index + 1) + ' ' + title;
+}
+
+function cpSelectionJobs(onlyIds) {
   var jobs = [];
   var stype = typeof cpShootType === 'function' && CP.shoot ? cpShootType(CP.shoot.name) : null;
   /* имена: по умолчанию с номером порядка; в структура.txt можно «исходные» */
   var numbered = !(stype && stype.exportNames === 'original');
+  var used = {};
   App.cards.forEach(function (card, ci) {
-    /* карточка артикула — исходная папка артикула (с луком), иначе «NN название» */
-    var folder = card.cpArticleDir ? card.cpArticleDir.split('/') : [cpPad(ci + 1) + ' ' + (card.title || card.category || 'Карточка')];
+    if (onlyIds && !onlyIds[card.id]) return;
+    var name = cpCardExportFolder(card, ci), base = name, k = 2;
+    while (used[name]) name = base + ' (' + (k++) + ')';
+    used[name] = true;
+    var folder = [name];
     var order = 0;
     function add(pid) {
       var p = pid ? cbPhotoById(pid) : null;
@@ -2093,6 +2108,7 @@ function cpSelectionJobs() {
     if (card.mode === 'auto') (card.pids || []).forEach(add);
     else (card.slots || []).forEach(function (s) { add(s.pid); });
   });
+  if (onlyIds) return jobs;
   App.containers.forEach(function (cont, ki) {
     var folder = cpPad(ki + 1) + ' ' + (cont.title || 'Блок');
     cont.photoIds.forEach(function (pid, i) {

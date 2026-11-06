@@ -569,6 +569,48 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('«Сверить папку ретуши»: недостающее докопировано, остальное — «уже было»', FILES.has(RT + '1/74595_модель/manekin.jpg'),
     JSON.stringify(await page.evaluate(() => App.projectMeta.cp.events.filter(e => e.action === 'retouch_sync').map(e => e.note))));
 
+  /* галочки в списке карточек: буква ретушёра отмеченным, «Скачать отмеченные» — архив <съёмка>_<буква>_<N> */
+  await page.evaluate(() => { CP.dict = cpParseDict('[Ретушёры: один]\nY\nU'); cbRenderOutline(); });
+  const ck = await page.evaluate(() => [App.cards.find(c => c.title === '74595').id, App.cards.find(c => c.title === '74596').id]);
+  await page.check('[data-cp-ck="' + ck[0] + '"]');
+  await page.check('[data-cp-ck="' + ck[1] + '"]');
+  check('список карточек: галочки, «Отмечено: 2», буквы ретушёров', /Отмечено: 2/.test(await page.textContent('#cpObar')) && !!(await page.$('[data-cp-letter="Y"]')));
+  await page.click('[data-cp-letter="Y"]');
+  await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-outline.png') });
+  check('буква Y поставлена обеим отмеченным', await page.evaluate(ids => ids.every(id => (cbCardById(id).tags || []).indexOf('Y') !== -1), ck));
+  await page.click('[data-cp-o="download"]');
+  for (let i = 0; i < 40 && ![...ZIPS.keys()].some(k => /МОДЕЛЬ_МУЖ_TEST_Y_1\.zip$/.test(k)); i++) await page.waitForTimeout(100);
+  {
+    const z = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST_Y_1\.zip$/.test(k)).flatMap(([, v]) => v);
+    check('«Скачать отмеченные»: архив <съёмка>_Y_1, папки карточек 74595 и 74596', z.length === 2 && z.some(n => /_Y_1\/74595\/(\d+_)?manekin\.jpg$/.test(n)) && z.some(n => /_Y_1\/74596\/(\d+_)?manekin2\.jpg$/.test(n)), [...ZIPS.keys()].join(' | ') + ' :: ' + z.join(' | '));
+  }
+  await page.waitForFunction(() => cpMeta().events.some(e => e.action === 'download_cards'), null, { timeout: 5000 }).catch(() => {});
+  check('скачанное отмечено (кто, архив), в журнале', await page.evaluate(() => {
+    var p = App.photos.find(x => /manekin2/.test(x.disk));
+    return cpMeta().downloads[p.id] && cpMeta().downloads[p.id].last.export === '2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST_Y_1' && cpMeta().events.some(e => e.action === 'download_cards');
+  }));
+  /* сдача: Сайт / дата / буква_номер / съёмка / артикулы */
+  ['disk:/Сайт', 'disk:/Сайт/06.11.2026', 'disk:/Сайт/06.11.2026/Y_1', 'disk:/Сайт/06.11.2026/Y_1/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST',
+    'disk:/Сайт/06.11.2026/Y_1/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/74595', 'disk:/Сайт/06.11.2026/Y_1/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/99999_чужой'].forEach(d => DIRS.add(d));
+  FILES.set('disk:/Сайт/06.11.2026/Y_1/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/74595/74595_1.jpg', Buffer.from('F'.repeat(90)));
+  FILES.set('disk:/Сайт/06.11.2026/Y_1/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/74595/74595_2.tif', Buffer.from('G'.repeat(90)));
+  FILES.set('disk:/Сайт/06.11.2026/Y_1/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/99999_чужой/x.jpg', Buffer.from('H'.repeat(90)));
+  await page.evaluate(() => { CP.settings = Object.assign(CP.settings || {}, { site: 'disk:/Сайт' }); });
+  await page.click('[data-cp-o="site"]');
+  await page.waitForSelector('#cpSiteRep.cp-open', { timeout: 10000 }).catch(() => {});
+  {
+    const rep = await page.textContent('#cpSiteRep').catch(() => '');
+    check('«Проверить сдачу»: 74595 сдана (Y, 2 файла), 74596 — нет, лишняя папка показана',
+      await page.evaluate(ids => { var d = cpMeta().delivered; return d[ids[0]] && d[ids[0]].letter === 'Y' && d[ids[0]].files === 2 && !d[ids[1]]; }, ck)
+      && /Не сдано \(1\)/.test(rep) && /74596/.test(rep) && /без карточки/.test(rep) && /99999_чужой/.test(rep), rep.slice(0, 400));
+    check('на шапке сданной карточки — «Сдано · Y», в списке — «сдано»', await page.evaluate(id =>
+      /Сдано · Y/.test(document.querySelector('#cbCards .cb-card[data-cid="' + id + '"] .cb-card-head').textContent)
+      && /сдано/.test(document.querySelector('[data-cp-ck="' + id + '"]').parentNode.textContent), ck[0]));
+  }
+  await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-site.png') });
+  await page.click('[data-cp-sr="close"]');
+  await page.evaluate(() => { CP.checked = {}; cbRenderOutline(); });
+
   /* все файлы: видео тоже уходит в архив */
   await page.waitForFunction(() => !App.dirty && !CP.saving, null, { timeout: 8000 });
   await page.evaluate(() => cpShowShelf());
@@ -585,7 +627,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('крупное видео — отдельной ссылкой, перенесено частями и скачивается', MPU_PARTS.length === 3 && DOWNLOADS.some(p => /видео\/clip\.mp4$/.test(p)), MPU_PARTS.join(',') + ' :: ' + DOWNLOADS.slice(-3).join(' | '));
   await page.evaluate(() => { CP.directMin = 200 * 1024 * 1024; CP.directPart = 256 * 1024 * 1024; });
   const zVid = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST_1\.zip$/.test(k)).flatMap(([, v]) => v);
-  check('карточка артикула в выгрузке — исходная папка артикула с луком', zVid.some(n => /_1\/1\/74595_модель\/IMG_0101\.jpg$/.test(n)) && zVid.some(n => /_1\/1\/74595_модель\/manekin\.jpg$/.test(n)), zVid.join(' | '));
+  check('моделька: карточка артикула в выгрузке — папкой с именем карточки, без лука', zVid.some(n => /_1\/74595\/IMG_0101\.jpg$/.test(n)) && zVid.some(n => /_1\/74595\/manekin\.jpg$/.test(n)) && !zVid.some(n => /74595_модель/.test(n)), zVid.join(' | '));
   check('«Все файлы»: кадры в архиве, видео в архив не попало', !zVid.some(n => /clip\.mp4$/.test(n)) && zVid.filter(n => /\.jpg$/.test(n)).length === 3, zVid.join(' | '));
 
   /* дерево папок на панели: раскрыть до последнего уровня, отметить одну вложенную, статусы вложенных */
@@ -609,12 +651,36 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   await page.waitForFunction(n => window.__zipsDone === undefined || true, zipsBefore);
   await page.waitForTimeout(1500);
   const zSub = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST_2\.zip$/.test(k)).flatMap(([, v]) => v);
-  check('«Скачать отмеченные» по вложенной папке: в архиве только её кадры', zSub.length === 2 && zSub.every(n => /74595_модель\//.test(n)), zSub.join(' | '));
+  check('«Скачать отмеченные» по вложенной папке: в архиве только её кадры', zSub.length === 2 && zSub.every(n => /_2\/74595\//.test(n)), zSub.join(' | '));
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-tree-open.png') });
   await page.click('[data-cp-p="expall"]');
   check('«свернуть все» сворачивает дерево', await page.evaluate(() => !document.querySelector('[data-cp-fold="1/74595_модель"]')));
   check('у свёрнутой папки видно, что внутри отмечено', /отмечено 1/.test(await page.textContent('[data-cp-exp="1"]')));
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-tree.png') });
+  /* панель скачивания можно скрыть */
+  await page.click('#cpPanelToggle');
+  check('«Скрыть панель»: панели съёмки нет', await page.evaluate(() => document.body.classList.contains('cp-panel-off') && getComputedStyle(document.getElementById('cpPanel')).display === 'none'));
+  await page.click('#cpPanelToggle');
+  /* отмеченная папка + «Открыть»: галерея и карточки сразу по ней */
+  await page.click('[data-cp-exp="1"]');
+  await page.uncheck('[data-cp-fold="1/74595_модель"]').catch(() => {});
+  await page.check('[data-cp-fold="1/74596_модель"]');
+  await page.click('[data-cp-p="open"]');
+  await page.waitForFunction(() => !document.getElementById('cpShelf').classList.contains('cp-open') && CP.cardFolders, null, { timeout: 10000 }).catch(() => {});
+  check('открыли с отмеченной папкой: галерея и карточки по ней', await page.evaluate(() => {
+    var vis = id => getComputedStyle(document.querySelector('#cbCards .cb-card[data-cid="' + id + '"]')).display !== 'none';
+    var a = App.cards.find(c => c.title === '74595'), b = App.cards.find(c => c.title === '74596');
+    return CP.folder === '1/74596_модель' && vis(b.id) && !vis(a.id);
+  }), await page.evaluate(() => JSON.stringify([CP.folder, CP.cardFolders])));
+  await page.click('[data-cp-o="nofilter"]');
+  check('«все карточки» снимает фильтр', await page.evaluate(() => !CP.cardFolders && [...document.querySelectorAll('#cbCards .cb-card')].every(el => el.style.display !== 'none')));
+  /* «Назад» в браузере — на витрину, «Вперёд» — обратно в съёмку */
+  await page.evaluate(() => history.back());
+  await page.waitForFunction(() => document.getElementById('cpShelf').classList.contains('cp-open'), null, { timeout: 5000 }).catch(() => {});
+  check('«Назад» в браузере из съёмки — витрина', await page.evaluate(() => document.getElementById('cpShelf').classList.contains('cp-open') && !!CP.shoot));
+  await page.evaluate(() => history.forward());
+  await page.waitForFunction(() => !document.getElementById('cpShelf').classList.contains('cp-open'), null, { timeout: 5000 }).catch(() => {});
+  check('«Вперёд» — снова в съёмке', await page.evaluate(() => !document.getElementById('cpShelf').classList.contains('cp-open') && /МОДЕЛЬ/.test(CP.shoot.name)));
 
   /* оптика: выгрузка как в папках */
   await page.evaluate(() => cpShowShelf());

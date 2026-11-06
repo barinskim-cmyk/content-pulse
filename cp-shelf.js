@@ -329,7 +329,7 @@ function cpSelectShoot(path, name, modified) {
 
 /* ---------- настройки на Диске ---------- */
 
-var CP_SETTING_KEYS = { 'ретушь': 'retouch' };
+var CP_SETTING_KEYS = { 'ретушь': 'retouch', 'сайт': 'site' };
 
 function cpParseSettings(text) {
   var out = {};
@@ -339,7 +339,7 @@ function cpParseSettings(text) {
     if (!m) return;
     var key = CP_SETTING_KEYS[m[1].toLowerCase()];
     if (!key || !m[2]) return;
-    out[key] = key === 'retouch' ? cpNormArchive(m[2]) : m[2];
+    out[key] = key === 'retouch' || key === 'site' ? cpNormArchive(m[2]) : m[2];
   });
   return out;
 }
@@ -790,7 +790,7 @@ function cpShelfDownload() {
     if (x.cards.length && !asFolders) {
       var c = cards[x.cards[0]];
       /* карточка артикула — исходная папка артикула (с луком), иначе «NN название» */
-      parts = c.cpArticleDir ? c.cpArticleDir.split('/') : [cpPad(x.cards[0] + 1) + ' ' + (c.title || c.category || 'Карточка')];
+      parts = [cpCardExportFolder(c, x.cards[0])];
     } else {
       parts = x.dir ? x.dir.split('/') : [];
     }
