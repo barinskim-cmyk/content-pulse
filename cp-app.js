@@ -14,9 +14,14 @@
    Префикс: cp*. Без эмодзи и иконок.
    ============================================================ */
 
+/* «Скачано» временно нигде не показываем (Маша, 06.11.2026): вместо него —
+   «забрали» (у карточки появилась буква ретушёра). Отметки о скачивании
+   по-прежнему пишутся — вернуть показ: true. */
+var CP_SHOW_DL = false;
+
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.48';
+var CP_VERSION = '2.0.49';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1413,7 +1418,7 @@ function cpBadgeHTML(pid) {
     html += '<span class="cp-badge cp-' + st.s + '" title="' + cbEsc(CP_STATUS[st.s].label + ' · ' + st.by + ' · ' + cpFmtDate(st.ts)) + '">'
       + CP_STATUS[st.s].short + '</span>';
   }
-  if (dl && dl.n) {
+  if (CP_SHOW_DL && dl && dl.n) {
     html += '<span class="cp-badge cp-dl" title="' + cbEsc('Скачано ' + dl.n + ' раз · последний: ' + dl.last.by + ' · ' + cpFmtDate(dl.last.ts) + ' · ' + dl.last.export) + '">'
       + 'СКАЧАНО' + (dl.n > 1 ? ' ×' + dl.n : '') + '</span>';
   }

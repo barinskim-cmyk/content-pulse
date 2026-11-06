@@ -19,7 +19,8 @@
                     карточка есть, но не отправлена дальше;
      согласование — карточка на согласовании;
      ретушь       — отправлена на ретушь, ретушёр ещё не забрал все кадры;
-     скачано      — ретушёр забрал все кадры карточки;
+     забрали      — у карточки появился ретушёр (буква); вместо
+                    «скачано», которое временно не показываем;
      проверка     — ретушь сдана на приёмку, ждёт согласования
                     (на доработке — снова «ретушь»);
      загружено    — согласовано и лежит в «Сайте» (или нашлось там при
@@ -32,7 +33,7 @@
    Фильтры в шапке (съёмка попадает во все подходящие):
      Отбор — есть артикулы в отборе (или отбора нет совсем);
      Согласование — есть карточки или кадры на согласовании;
-     Ретушь — есть кадры на ретуши, которые ещё не скачали;
+     Ретушь — есть карточки на ретуши, которые ещё никто не забрал;
      Проверка — есть сданная ретушь, которую ещё не согласовали;
      Не начаты — ни одной карточки с кадрами; Сданы — все артикулы
      загружены (или в браке); В работе — остальные.
@@ -69,6 +70,8 @@ function cpArticleCodes(shootPath, shootName, files) {
 function cpShootSummary(data, codes) {
   data = data || {};
   codes = codes || {};
+  var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  var hasLetter = function (c) { return (c.tags || []).some(function (t) { return letters.indexOf(t) !== -1; }); };
   var cp = (data.meta || {}).cp || {};
   var status = cp.status || {}, cardStatus = cp.cardStatus || {}, dl = cp.downloads || {}, del = cp.delivered || {}, rv = cp.rv || {};
   var s = { cards: 0, filled: 0, empty: 0, rt: 0, ra: 0, ap: 0, rs: 0, del: Object.keys(del).length, rc: 0, rv: 0, k: [0, 0, 0, 0, 0, 0, 0] };
@@ -82,7 +85,7 @@ function cpShootSummary(data, codes) {
     if (del[c.id]) return 5;
     if (last && last.status === 'review') return 4;
     if (last && last.status === 'rework') return 2;
-    if (ps.length && ps.every(function (pid) { return dl[pid] && dl[pid].n; })) return 3;
+    if (hasLetter(c)) return 3;
     if (cs === 'retouch') return 2;
     if (cs === 'approval') return 1;
     return 0;
@@ -119,12 +122,12 @@ function cpShootSummary(data, codes) {
 }
 
 function cpSumEncode(s) {
-  return 'v4;n=' + s.cards + ';f=' + s.filled + ';e=' + s.empty + ';rt=' + s.rt + ';ra=' + s.ra + ';ap=' + s.ap + ';rs=' + s.rs + ';d=' + s.del + ';rc=' + s.rc + ';rv=' + s.rv + ';k=' + s.k.join(',');
+  return 'v5;n=' + s.cards + ';f=' + s.filled + ';e=' + s.empty + ';rt=' + s.rt + ';ra=' + s.ra + ';ap=' + s.ap + ';rs=' + s.rs + ';d=' + s.del + ';rc=' + s.rc + ';rv=' + s.rv + ';k=' + s.k.join(',');
 }
 
 /* старые версии сводки (без стадий артикулов по папкам) не берём — пересчитываются в фоне */
 function cpSumDecode(str) {
-  if (!str || !/^v4;/.test(str)) return null;
+  if (!str || !/^v5;/.test(str)) return null;
   var m = {}, k = [0, 0, 0, 0, 0, 0, 0];
   str.split(';').slice(1).forEach(function (kv) {
     var p = kv.split('=');
@@ -141,7 +144,7 @@ function cpStagesOf(sum) {
   var done = total > 0 && sum.k[5] > 0 && sum.k[5] + sum.k[6] === total;
   return {
     select: sum.k[0] > 0 || sum.filled === 0,
-    retouch: sum.rt > 0,
+    retouch: sum.k[2] > 0,
     review: sum.rv > 0,
     approval: sum.ap > 0,
     fresh: sum.filled === 0,
@@ -242,7 +245,7 @@ function cpRenderStageBar() {
 
 var CP_ART_STAGES = [
   { label: 'отбор', cls: 'k1' }, { label: 'согласование', cls: 'k2' }, { label: 'ретушь', cls: 'k3' },
-  { label: 'скачано', cls: 'k4' }, { label: 'проверка', cls: 'k7' }, { label: 'загружено', cls: 'k5' }, { label: 'брак', cls: 'k6' }
+  { label: 'забрали', cls: 'k4' }, { label: 'проверка', cls: 'k7' }, { label: 'загружено', cls: 'k5' }, { label: 'брак', cls: 'k6' }
 ];
 
 /** Под съёмкой: сколько артикулов на какой стадии — полоска и подписи с числами. */
@@ -281,7 +284,7 @@ cpRenderShoots = (function (orig) {
       else {
         if (sum.filled === 0) parts.push('<span class="cp-todo-s">отбора нет</span>');
         else if (sum.k[0]) parts.push('<span class="cp-todo-s">в отборе: ' + sum.k[0] + ' арт.</span>');
-        if (sum.rt) parts.push('<span class="cp-todo-r">ретушь не скачана: ' + sum.rt + ' кадр.</span>');
+        if (sum.k[2]) parts.push('<span class="cp-todo-r">ждут ретушёра: ' + sum.k[2] + ' арт.</span>');
         if (sum.ap) parts.push('<span class="cp-todo-a">на согласовании: ' + sum.ap + '</span>');
         if (sum.rv) parts.push('<span class="cp-todo-r">ретушь на проверке: ' + sum.rv + '</span>');
       }
@@ -317,7 +320,9 @@ function cpFillSummaries() {
       return cpWriteSummary(d.path, data, true, d.name);
     }).then(function () { redraw(); return next(); });
   }
-  return Promise.all([next(), next(), next()]).then(function () { if (run === _cpFillRun) cpRenderShoots(); });
+  /* «забрали» считается по буквам ретушёров из словаря — сначала словарь */
+  var dictReady = typeof cpLoadDict === 'function' ? Promise.resolve(cpLoadDict()).catch(function () { return null; }) : Promise.resolve();
+  return dictReady.then(function () { return Promise.all([next(), next(), next()]); }).then(function () { if (run === _cpFillRun) cpRenderShoots(); });
 }
 
 cpLoadShoots = (function (orig) {

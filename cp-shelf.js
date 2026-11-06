@@ -545,6 +545,7 @@ function cpFolderState(idx, fp) {
 function cpStateChips(st) {
   var out = '';
   [['retouch', 'на ретуши'], ['dl', 'скачано'], ['approval', 'на согласовании'], ['reshoot', 'брак'], ['removed', 'удалено']].forEach(function (c) {
+    if (c[0] === 'dl' && !CP_SHOW_DL) return;
     if (st[c[0]]) out += '<span class="cp-state cp-state-' + c[0] + '">' + c[1] + ' ' + st[c[0]] + '</span>';
   });
   return out;
@@ -650,10 +651,11 @@ function cpRenderPanel() {
     + [['', 'Все'], ['retouch', 'Ретушь'], ['approval', 'Согласование'], ['reshoot', 'Брак (пересъём)'], ['removed', 'Удалено из отбора'], ['none', 'Без статуса']]
       .map(function (o) { return '<option value="' + o[0] + '"' + (sel.status === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('')
     + '</select></div>';
-  body += '<div class="cp-row"><span>Скачано</span><select id="cpFDl">'
+  if (CP_SHOW_DL) body += '<div class="cp-row"><span>Скачано</span><select id="cpFDl">'
     + [['', 'Все'], ['no', 'Не скачано'], ['yes', 'Скачано']]
       .map(function (o) { return '<option value="' + o[0] + '"' + (sel.dl === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('')
     + '</select></div>';
+  else sel.dl = '';
   body += '<div class="cp-row"><span>Файлы</span><select id="cpFAll">'
     + '<option value=""' + (sel.allFiles ? '' : ' selected') + '>Только фото</option>'
     + '<option value="all"' + (sel.allFiles ? ' selected' : '') + '>Все файлы (с видео)</option></select></div>';
@@ -672,7 +674,7 @@ function cpRenderPanel() {
     + (nChecked ? ' · из отмеченных папок: ' + nChecked : '')
     + (inCards ? ' · в карточках ' + inCards : '')
     + (others.length ? '<br>и других файлов: <b>' + others.length + '</b> · ' + cpMb(othersBytes) : '')
-    + (again ? '<br><span class="cp-warn">уже скачивали: ' + again + '</span>' : '');
+    + (again && CP_SHOW_DL ? '<br><span class="cp-warn">уже скачивали: ' + again + '</span>' : '');
 
   /* перерисовка не должна прыгать наверх, когда раскрываешь папку внизу списка */
   var oldBody = panel.querySelector('.cp-panel-body');

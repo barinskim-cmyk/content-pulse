@@ -90,7 +90,7 @@ function cpOutlineDecorate() {
     var letter = cpCardLetter(card);
     if (letter) marks += '<b class="cp-oi-l">' + cbEsc(letter) + '</b>';
     if (del[id]) marks += '<span class="cp-oi-ok" title="Сдано: ' + cbEsc(del[id].at || '') + '">сдано</span>';
-    else if (pids.length && pids.every(function (pid) { return dl[pid] && dl[pid].n; })) marks += '<span class="cp-oi-dl">скач.</span>';
+    else if (CP_SHOW_DL && pids.length && pids.every(function (pid) { return dl[pid] && dl[pid].n; })) marks += '<span class="cp-oi-dl">скач.</span>';
     if (marks) btn.insertAdjacentHTML('beforeend', '<span class="cp-oi-m">' + marks + '</span>');
   });
   var title = host.querySelector('.cb-outline-title');

@@ -404,9 +404,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   }));
   check('после скачивания — отметка «скачано», статус не поменялся', await page.evaluate(() => {
     const m = CP.sel.data.meta.cp; return Object.values(m.downloads).every(d => d.n === 1) && Object.values(m.status).every(s => s.s === 'retouch'); }));
-  await page.selectOption('#cpFDl', 'no');
-  check('фильтр «не скачано» исключает скачанное', await page.evaluate(() => cpFiltered(CP.sel).length === 0));
-  await page.selectOption('#cpFDl', '');
+  check('«скачано» временно нигде не показывается: нет фильтра, чипа и значка', !(await page.$('#cpFDl')) && !(await page.$('.cp-state-dl')) && !(await page.$('.cp-badge.cp-dl')));
   await page.click('[data-cp-p="download"]');
   await page.waitForFunction(() => Object.values(CP.sel.data.meta.cp.downloads).every(d => d.n === 2), null, { timeout: 10000 });
   check('повторное скачивание разрешено: _2 и счётчик ×2', ZIPS.has('disk:/_ContentPulse/выгрузки/LM-1043_Ретушь_2.zip'));
@@ -984,23 +982,28 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
 
   /* витрина: что нужно сделать — Отбор / Ретушь / Согласование (сводка в свойствах папки съёмки) */
   {
-    const mk = (name, status, cardStatus, delivered) => {
+    const mk = (name, status, cardStatus, delivered, tags) => {
       const dir = 'disk:/Архив/' + name;
       DIRS.add(dir);
       FILES.set(dir + '/x.jpg', Buffer.from('X'.repeat(50)));
       FILES.set(dir + '/_contentpulse.json', Buffer.from(JSON.stringify({ app: 'cardboard', version: 3, name, nextId: 5,
-        photos: [{ id: 'p1', name: 'x.jpg', disk: dir + '/x.jpg' }], cards: [{ id: 'c1', title: 'K', mode: 'auto', pids: ['p1'] }], containers: [], templates: [],
+        photos: [{ id: 'p1', name: 'x.jpg', disk: dir + '/x.jpg' }], cards: [{ id: 'c1', title: 'K', mode: 'auto', pids: ['p1'], tags: tags || [] }], containers: [], templates: [],
         meta: { cp: { status: status ? { p1: { s: status, by: 't', ts: '2026-11-06T10:00:00Z', card: 'c1' } } : {}, cardStatus: cardStatus ? { c1: { s: cardStatus, by: 't', ts: '2026-11-06T10:00:00Z' } } : {}, downloads: {}, likes: {}, folderTags: {}, events: [], delivered: delivered ? { c1: { files: 1, letter: 'Y', date: '06.11.2026' } } : {} } } })));
     };
     mk('2026-11-04_СДАНА', 'retouch', 'retouch', true);
+    mk('2026-11-03_ЗАБРАЛИ', 'retouch', 'retouch', false, ['Y']);
     mk('2026-11-05_ЖДЁТ_РЕТУШИ', 'retouch', 'retouch');
     mk('2026-11-05_ЖДЁТ_СОГЛАСОВАНИЯ', 'approval', 'approval');
     PROPS.delete('disk:/Архив/LM-1043');
-    await page.evaluate(() => cpShowShelf());
+    await page.evaluate(() => { CP.dict = cpParseDict('[Ретушёры: один]\nY\nU'); cpShowShelf(); });
     await page.fill('#cpShelfSearch', '');
     await page.evaluate(() => cpRenderShoots());
     await page.waitForFunction(() => document.getElementById('cpStages') && !document.querySelector('.cp-stages-wait') && CP.shoots.length > 3, null, { timeout: 20000 }).catch(() => {});
-    check('сводка съёмок без неё — посчитана в фоне и записана в свойства папок', PROPS.has('disk:/Архив/LM-1043') && /^v4;/.test(PROPS.get('disk:/Архив/LM-1043').cp_sum)
+    /* «забрали» зависит от словаря (буквы ретушёров): пересчитать с ним */
+    PROPS.delete('disk:/Архив/2026-11-03_ЗАБРАЛИ');
+    await page.evaluate(() => { CP.dict = cpParseDict('[Ретушёры: один]\nY\nU'); return cpLoadShoots(); });
+    await page.waitForFunction(() => !document.querySelector('.cp-stages-wait') && CP.shoots.some(d => d.name === '2026-11-03_ЗАБРАЛИ' && (d.cpSum || (d.custom_properties || {}).cp_sum)), null, { timeout: 20000 }).catch(() => {});
+    check('сводка съёмок без неё — посчитана в фоне и записана в свойства папок', PROPS.has('disk:/Архив/LM-1043') && /^v5;/.test(PROPS.get('disk:/Архив/LM-1043').cp_sum)
       && /rt=1/.test((PROPS.get('disk:/Архив/2026-11-05_ЖДЁТ_РЕТУШИ') || {}).cp_sum || ''), JSON.stringify([...PROPS.entries()]));
     const shownFor = async key => { await page.click('[data-cp-stage="' + key + '"]'); return page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-shoot')].map(b => b.dataset.name)); };
     const rt = await shownFor('retouch');
@@ -1012,7 +1015,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.click('[data-cp-stage=""]');
     check('под съёмкой — что ждёт: «ретушь: 1», «отбора нет»', await page.evaluate(() => {
       var row = n => [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === n);
-      return /ретушь не скачана: 1/.test(row('2026-11-05_ЖДЁТ_РЕТУШИ').textContent) && /отбора нет/.test(row('LM-2001').textContent)
+      return /ждут ретушёра: 1/.test(row('2026-11-05_ЖДЁТ_РЕТУШИ').textContent) && /отбора нет/.test(row('LM-2001').textContent)
         && /отбор 1/.test((row('2026-09-21_SV_ОПТИКА_N').querySelector('.cp-artbar') || {}).textContent || '');
     }));
     check('счётчики на кнопках фильтра', /Ретушь\s*\d+/.test(await page.textContent('#cpStages')), await page.textContent('#cpStages'));
@@ -1024,7 +1027,8 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
       var row = n => [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === n);
       var a = row('2026-11-04_СДАНА').querySelector('.cp-artbar'), b = row('2026-11-05_ЖДЁТ_РЕТУШИ').querySelector('.cp-artbar'), c = row('2026-11-05_ЖДЁТ_СОГЛАСОВАНИЯ').querySelector('.cp-artbar');
       return a && /артикулов 1/.test(a.textContent) && /загружено 1/.test(a.textContent) && b && /ретушь 1/.test(b.textContent) && c && /согласование 1/.test(c.textContent) && !row('LM-2001').querySelector('.cp-artbar')
-        && /артикулов 3/.test(row('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST').querySelector('.cp-artbar').textContent) && /загружено 1/.test(row('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST').querySelector('.cp-artbar').textContent);
+        && /артикулов 3/.test(row('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST').querySelector('.cp-artbar').textContent) && /загружено 1/.test(row('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST').querySelector('.cp-artbar').textContent)
+        && /забрали 1/.test(row('2026-11-03_ЗАБРАЛИ').querySelector('.cp-artbar').textContent) && !/скачано/.test(document.getElementById('cpShelfList').textContent);
     }), await page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-artbar')].map(x => x.textContent).join(' | ')));
     await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-stages.png') });
     await page.fill('#cpShelfSearch', '1043');
