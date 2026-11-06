@@ -1139,7 +1139,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.evaluate(() => cpRenderShoots());
   }
 
-  /* один путь — КАТАЛОГ: этапы по номерам папок, фильтры = папки, 00_АРХИВ пока как исходники, недостающие — кнопкой */
+  /* один путь — КАТАЛОГ: этапы по папкам, фильтры = папки, 00_АРХИВ не читаем, недостающие — кнопкой */
   {
     const K = 'disk:/КАТАЛОГ';
     [K + '/01_ИСХОДНИКИ', K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ', K + '/02_ОТБОР', K + '/02_ОТБОР/2026-11-06_SV_КАТ', K + '/03_РЕТУШЬ', K + '/05_САЙТ', K + '/ПРОЧЕЕ'].forEach(d => DIRS.add(d));
@@ -1151,26 +1151,28 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.click('#cpArchiveApply');
     await page.waitForFunction(() => CP.catalogList && CP.shoots && CP.shoots.some(s => s.name === '2026-11-06_SV_КАТ') && /02_ОТБОР\s*1/.test(document.getElementById('cpStages').textContent), null, { timeout: 10000 }).catch(() => {});
     const st = await page.evaluate(() => ({ sd: CP_CONFIG.serviceDir, shoots: CP.shoots.map(s => s.name), stages: document.getElementById('cpStages').textContent, s: CP.settings }));
-    check('каталог: служебная папка внутри, съёмки из 01 и (пока) из 00_АРХИВ', st.sd === K + '/_ContentPulse' && st.shoots.includes('2026-11-06_SV_КАТ') && st.shoots.includes('2026-11-01_SV_ПРЕДМЕТКА') && !st.shoots.includes('02_ОТБОР'), JSON.stringify(st));
+    check('каталог: служебная папка внутри, съёмки только из исходников (00_АРХИВ не читаем)', st.sd === K + '/_ContentPulse' && st.shoots.includes('2026-11-06_SV_КАТ') && !st.shoots.includes('2026-11-01_SV_ПРЕДМЕТКА') && !st.shoots.includes('02_ОТБОР'), JSON.stringify(st));
+    check('что значит папка — по смыслу имени, потом по номеру: 04_САЙТ — сайт', await page.evaluate(() => cpCatRoleOf('04_САЙТ', {}) === 'site' && cpCatRoleOf('04_ОТРЕТУШИРОВАНО', {}) === 'review'
+      && cpCatRoleOf('03_РЕТУШЬ', {}) === 'retouch' && cpCatRoleOf('00_АРХИВ', {}) === 'skip' && cpCatRoleOf('02_ОТБОР', {}) === 'approval' && cpCatRoleOf('05_X', {}) === 'site' && cpCatRoleOf('ПРОЧЕЕ', {}) === 'skip'));
     check('каталог: фильтры = папки (01, 02_ОТБОР, 03, 05), без папки 04 — нет фильтра, «Отбор в исходниках»',
       /^01_ИСХОДНИКИ\s*\d+Отбор в исходниках/.test(st.stages.trim()) && /02_ОТБОР\s*1/.test(st.stages) && /03_РЕТУШЬ/.test(st.stages) && /05_САЙТ/.test(st.stages) && !/04|Согласование|ПРОЧЕЕ/.test(st.stages)
       && st.s.approve === K + '/02_ОТБОР' && st.s.retouch === K + '/03_РЕТУШЬ' && st.s.site === K + '/05_САЙТ', st.stages);
     check('каталог: в шестерёнке — папки и что они значат, отдельные поля этапов скрыты', await page.evaluate(() =>
       document.querySelectorAll('#cpCatBox [data-cp-cat]').length === 6 && document.querySelector('[data-cp-cat="ПРОЧЕЕ"]').value === 'не показывать'
-      && document.querySelector('[data-cp-cat="00_АРХИВ"]').value === 'исходники' && getComputedStyle(document.getElementById('cpRetouchInput')).display === 'none' || !document.getElementById('cpRetouchInput').offsetParent));
+      && document.querySelector('[data-cp-cat="00_АРХИВ"]').value === 'не показывать' && getComputedStyle(document.getElementById('cpRetouchInput')).display === 'none' || !document.getElementById('cpRetouchInput').offsetParent));
     check('каталог: «нет 04_ОТРЕТУШИРОВАНО» — на витрине и в шестерёнке, сама не создаёт', /04_ОТРЕТУШИРОВАНО/.test(await page.textContent('#cpCatMissing')) && !DIRS.has(K + '/04_ОТРЕТУШИРОВАНО'));
     await page.click('#cpCatBox [data-cp-cat-make]');
     await page.waitForFunction(() => document.querySelector('[data-cp-stage="review"]') && !document.getElementById('cpCatMissing'), null, { timeout: 10000 }).catch(() => {});
     check('«Создать недостающие» — папка 04 создана, фильтр появился', DIRS.has(K + '/04_ОТРЕТУШИРОВАНО') && /04_ОТРЕТУШИРОВАНО/.test(await page.textContent('#cpStages')));
-    /* 00_АРХИВ — «не показывать»: строка в настройках, съёмки из него пропали */
-    await page.selectOption('[data-cp-cat="00_АРХИВ"]', 'не показывать');
-    await page.waitForFunction(() => CP.shoots && !CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА') && CP.shoots.some(s => s.name === '2026-11-06_SV_КАТ'), null, { timeout: 10000 }).catch(() => {});
-    const setTxt = (FILES.get(K + '/_ContentPulse/настройки.txt') || '').toString();
-    check('«не показывать» 00_АРХИВ: строка «этап 00_АРХИВ = не показывать», съёмок из него нет', /^этап 00_АРХИВ = не показывать$/m.test(setTxt)
-      && await page.evaluate(() => !CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА')), setTxt.slice(-120));
+    /* 00_АРХИВ включили как исходники: строка в настройках, его съёмки на витрине */
     await page.selectOption('[data-cp-cat="00_АРХИВ"]', 'исходники');
-    await page.waitForFunction(() => CP.shoots && CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА'), null, { timeout: 10000 }).catch(() => {});
-    check('вернули «исходники» — съёмки 00_АРХИВ снова на витрине', await page.evaluate(() => CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА')));
+    await page.waitForFunction(() => CP.shoots && CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА') && CP.shoots.some(s => s.name === '2026-11-06_SV_КАТ'), null, { timeout: 10000 }).catch(() => {});
+    const setTxt = (FILES.get(K + '/_ContentPulse/настройки.txt') || '').toString();
+    check('00_АРХИВ = «исходники»: строка в настройках, его съёмки на витрине', /^этап 00_АРХИВ = исходники$/m.test(setTxt)
+      && await page.evaluate(() => CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА')), setTxt.slice(-120));
+    await page.selectOption('[data-cp-cat="00_АРХИВ"]', 'не показывать');
+    await page.waitForFunction(() => CP.shoots && !CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА'), null, { timeout: 10000 }).catch(() => {});
+    check('снова «не показывать» — съёмок архива нет', await page.evaluate(() => !CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА')));
     await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-catalog.png') });
     await page.fill('#cpArchiveInput', 'Архив');
     await page.click('#cpArchiveApply');

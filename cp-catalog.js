@@ -9,8 +9,9 @@
    - В шестерёнке «Папка съёмок» — КАТАЛОГ. Если внутри есть папки с
      номером этапа (01_…, 02_…), это каталог: служебная папка —
      КАТАЛОГ/_ContentPulse, съёмки — из папок-исходников.
-   - Что значит папка — по номеру в начале имени:
-       00, 01 — исходники (00_АРХИВ временно, пока его не разнесли);
+   - Что значит папка — по смыслу имени (АРХИВ, ИСХОДНИКИ, ОТБОР, РЕТУШЬ,
+     ОТРЕТУШИРОВАНО, САЙТ), иначе по номеру в начале имени:
+       00 — архив, не читаем; 01 — исходники;
        02 — согласование (у SK это 02_ОТБОР: что ушло на согласование);
        03 — ретушь; 04 — отретушировано (проверка ретуши); 05 — сайт.
      Поменять — в шестерёнке, пишется в настройки.txt строкой
@@ -28,7 +29,14 @@ var CP_CAT_ROLES = [
   { role: 'site', word: 'сайт', setting: 'site', def: '05_САЙТ' }
 ];
 var CP_CAT_SKIP_WORD = 'не показывать';
-var CP_CAT_NUM = { '00': 'source', '01': 'source', '02': 'approval', '03': 'retouch', '04': 'review', '05': 'site' };
+var CP_CAT_NUM = { '00': 'skip', '01': 'source', '02': 'approval', '03': 'retouch', '04': 'review', '05': 'site' };
+/* по смыслу имени — раньше номера: у SK «04_САЙТ» — это сайт, а не 04-й этап по умолчанию.
+   Маша, 06.11: «в исходниках показывает всё, что лежит в архиве, а должен только исходники» —
+   архив (00_АРХИВ) не читаем; включить можно в шестерёнке. */
+var CP_CAT_WORDS = [
+  [/архив/i, 'skip'], [/исходн/i, 'source'], [/отретуш|проверк/i, 'review'], [/ретуш/i, 'retouch'],
+  [/сайт|site/i, 'site'], [/отбор|соглас/i, 'approval']
+];
 var CP_CAT_RE = /^(\d{2})[_ .\-]/;
 CP.catalogList = null;   /* папки открытого каталога: [{name, path}] */
 
@@ -43,6 +51,7 @@ function cpCatRoleOf(name, settings) {
   var cfg = ((settings || CP.settings || {}).stageRoles) || {};
   var r = cfg[String(name).toLowerCase()];
   if (r) return r;
+  for (var i = 0; i < CP_CAT_WORDS.length; i++) if (CP_CAT_WORDS[i][0].test(name)) return CP_CAT_WORDS[i][1];
   var m = CP_CAT_RE.exec(name);
   return (m && CP_CAT_NUM[m[1]]) || 'skip';
 }
@@ -248,7 +257,7 @@ function cpCatMake() {
     if (!v) return;
     btn.disabled = true;
     CPDisk.listDir(v).then(function (items) {
-      var isCat = items.some(function (x) { var m = x.type === 'dir' && CP_CAT_RE.exec(x.name); return m && CP_CAT_NUM[m[1]]; });
+      var isCat = items.some(function (x) { var m = x.type === 'dir' && CP_CAT_RE.exec(x.name); return m && /^0[1-5]$/.test(m[1]); });
       cpSet('cp_catalog', isCat ? v.replace(/\/+$/, '') : '');
     }, function () { cpSet('cp_catalog', ''); }).then(function () {
       btn.disabled = false;
