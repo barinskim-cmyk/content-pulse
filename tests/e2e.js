@@ -1297,6 +1297,17 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.keyboard.press('Escape');
   }
 
+  /* вышла новая версия: плашка «Обновить» — страница с ?v=<версия>, мимо кэша Safari */
+  {
+    const real = await page.evaluate(() => CP_VERSION);
+    const got = await page.evaluate(() => { CP_VERSION = '2.0.1'; return cpCheckUpdate(); });
+    const txt = await page.textContent('#cpUpdate').catch(() => '');
+    check('новая версия на сервере — плашка «Вышла версия … Обновить»', got === real && /Вышла версия/.test(txt) && txt.indexOf(real) !== -1, txt);
+    await page.click('[data-cp-upd="later"]');
+    await page.evaluate(v => { CP_VERSION = v; }, real);
+    check('та же версия — плашки нет', await page.evaluate(() => cpCheckUpdate().then(v => v === null && !document.getElementById('cpUpdate'))));
+  }
+
   check('загрузки архивов уходят без Referer', DOWNLOADS_REFERER.length === 0, DOWNLOADS_REFERER.join(' | '));
   check('без ошибок JS на странице', errors.length === 0, errors.join(' | '));
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-shoot.png') });

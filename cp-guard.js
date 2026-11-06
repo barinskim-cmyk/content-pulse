@@ -433,3 +433,58 @@ cbRenderTray = (function (orig) {
     return r;
   };
 })(cbRenderTray);
+
+/* ---------- новая версия: сказать и обновить в один клик ----------
+   Маша, 06.11: «как в этом Safari нормально сбросить кэш — он хранит
+   артефакты старых версий». Страницу (index.html) GitHub отдаёт с кэшем
+   на 10 минут, а Safari по Cmd+R берёт её из кэша — и старые скрипты.
+   Раз в 5 минут и при возврате на вкладку спрашиваем свежую страницу
+   мимо кэша; вышла новее — плашка «Обновить». Клик открывает адрес с
+   номером версии (?v=…): для браузера это другая страница, её он берёт
+   с сервера, а скрипты уже с новыми номерами. */
+CP.updateAt = 0;
+function cpCheckUpdate() {
+  CP.updateAt = Date.now();
+  var url = location.pathname + '?check=' + Date.now();
+  return fetch(url, { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : ''; }).then(function (html) {
+    var m = /cp-app\.js\?v=([0-9.]+)/.exec(html || '');
+    if (!m || m[1] === CP_VERSION) return null;
+    var cur = CP_VERSION.split('.').map(Number), nv = m[1].split('.').map(Number);
+    for (var i = 0; i < Math.max(cur.length, nv.length); i++) {
+      if ((nv[i] || 0) > (cur[i] || 0)) break;
+      if ((nv[i] || 0) < (cur[i] || 0)) return null;
+    }
+    cpShowUpdate(m[1]);
+    return m[1];
+  }).catch(function () { return null; });
+}
+
+function cpShowUpdate(ver) {
+  var el = document.getElementById('cpUpdate');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'cpUpdate';
+    el.className = 'cp-update';
+    document.body.appendChild(el);
+    el.addEventListener('click', function (e) {
+      if (e.target.closest('[data-cp-upd="go"]')) {
+        if (typeof App !== 'undefined' && App.dirty) { cbToast('Сохраняю правки на Диск — нажмите «Обновить» ещё раз через пару секунд'); return; }
+        location.replace(location.pathname + '?v=' + encodeURIComponent(el.getAttribute('data-ver')) + location.hash);
+      } else if (e.target.closest('[data-cp-upd="later"]')) el.remove();
+    });
+  }
+  el.setAttribute('data-ver', ver);
+  el.innerHTML = 'Вышла версия <b>' + cbEsc(ver) + '</b> (у вас ' + cbEsc(CP_VERSION) + ') <button class="cb-primary" data-cp-upd="go">Обновить</button><button data-cp-upd="later">Позже</button>';
+}
+
+setInterval(function () { if (document.visibilityState !== 'hidden') cpCheckUpdate(); }, 5 * 60 * 1000);
+document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible' && Date.now() - CP.updateAt > 60000) cpCheckUpdate(); });
+setTimeout(cpCheckUpdate, 3000);
+
+(function cpUpdateCss() {
+  var st = document.createElement('style');
+  st.textContent = '.cp-update{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:5000;display:flex;gap:10px;align-items:center;'
+    + 'background:#1d1a17;border:1px solid #C9956B;color:#f2f2f1;border-radius:6px;padding:8px 12px;font-size:13px;box-shadow:0 6px 24px #000a}'
+    + '.cp-update b{color:#e7c9a8}';
+  document.head.appendChild(st);
+})();
