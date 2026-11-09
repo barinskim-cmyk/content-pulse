@@ -214,7 +214,7 @@ function cpScanStages() {
   return Promise.all(Object.keys(CP_STAGE_SETTING).map(function (key) {
     var root = s[CP_STAGE_SETTING[key]];
     if (!root) return Promise.resolve([key, null]);
-    var names = {}, where = {};
+    var names = {}, where = {}, info = {};
     var level = function (paths, depth) {
       if (!paths.length || depth > 3) return Promise.resolve();
       return cpPool(paths, 4, function (p) { return cpListDirs(p); }).then(function (lists) {
@@ -225,6 +225,7 @@ function cpScanStages() {
             if (known[bare.toLowerCase()] || shootLike.test(bare)) {
               names[bare.toLowerCase()] = true;
               (where[bare.toLowerCase()] = where[bare.toLowerCase()] || []).push(x.path);
+              info[x.path] = { props: x.custom_properties || {}, modified: x.modified || '' };   /* метки папки (скачано из «Сайта» и т. п.) */
             }
             else if (x.name.charAt(0) !== '_') next.push(x.path);
           });
@@ -232,12 +233,13 @@ function cpScanStages() {
         return level(next, depth + 1);
       });
     };
-    return level([root], 1).then(function () { return [key, names, where]; }, function () { return [key, null, null]; });
+    return level([root], 1).then(function () { return [key, names, where, info]; }, function () { return [key, null, null, null]; });
   })).then(function (pairs) {
     if (CP.archive !== archive) return;
     CP.stagePresence = {};
     CP.stagePaths = {};
-    pairs.forEach(function (kv) { if (kv[1]) { CP.stagePresence[kv[0]] = kv[1]; CP.stagePaths[kv[0]] = kv[2]; } });
+    CP.stageInfo = {};
+    pairs.forEach(function (kv) { if (kv[1]) { CP.stagePresence[kv[0]] = kv[1]; CP.stagePaths[kv[0]] = kv[2]; CP.stageInfo[kv[0]] = kv[3] || {}; } });
     cpRenderShoots();
     if (typeof cpCountStageArts === 'function') cpCountStageArts();
   });

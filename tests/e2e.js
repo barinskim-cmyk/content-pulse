@@ -1461,6 +1461,43 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.selectOption('[data-cp-cat="00_АРХИВ"]', 'не показывать');
     await page.waitForFunction(() => CP.shoots && !CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА'), null, { timeout: 10000 }).catch(() => {});
     check('снова «не показывать» — съёмок архива нет', await page.evaluate(() => !CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА')));
+    /* «Сайт» (Маша, 09.11): «Не скачано» — что ни разу не скачивали из «Сайта»; «Ближайшие даты»; свежие даты сверху */
+    {
+      const today = await page.evaluate(() => cpToday());
+      const S5 = K + '/05_САЙТ', A = '2026-11-06_SV_КАТ', B = '2026-11-07_SV_КАТ2';
+      [K + '/01_ИСХОДНИКИ/' + B, S5 + '/' + today, S5 + '/' + today + '/' + A, S5 + '/' + today + '/' + A + '/74001', S5 + '/2026-10-20', S5 + '/2026-10-20/' + B, S5 + '/2026-10-20/' + B + '/75001'].forEach(d => DIRS.add(d));
+      FILES.set(K + '/01_ИСХОДНИКИ/' + B + '/b1.jpg', Buffer.from('B'.repeat(40)));
+      FILES.set(S5 + '/' + today + '/' + A + '/74001/k1.jpg', Buffer.from('R'.repeat(50)));
+      FILES.set(S5 + '/2026-10-20/' + B + '/75001/b1.jpg', Buffer.from('R'.repeat(45)));
+      await page.click('#cpShelfRefresh');
+      await page.waitForFunction(b => CP.shoots && CP.shoots.some(s => s.name === b) && CP.stagePaths && CP.stagePaths.site && Object.keys(CP.stagePaths.site).length >= 2, B, { timeout: 10000 }).catch(() => {});
+      await page.click('[data-cp-stage="site"]');
+      const rowsTxt = () => page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-shoot')].filter(b => b.style.display !== 'none').map(b => b.dataset.name));
+      const chips = () => page.evaluate(() => [...document.querySelectorAll('[data-cp-site-sub]')].map(b => b.textContent.replace(/\s+/g, ' ').trim()).join(' | '));
+      const r0 = await rowsTxt(), c0 = await chips();
+      check('«Сайт»: чипы «Все 2 · Не скачано 2 · Ближайшие даты 1», свежая дата сверху, под съёмкой — дата и «не скачано»', r0[0] === A && r0[1] === B
+        && /Все 2/.test(c0) && /Не скачано 2/.test(c0) && /Ближайшие даты \(7 дней\) 1/.test(c0)
+        && /не скачано/.test(await page.textContent('#cpShelfList .cp-shoot[data-name="' + B + '"]')), JSON.stringify([r0, c0]));
+      await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-site.png') });
+      await page.click('[data-cp-site-sub="recent"]');
+      check('«Ближайшие даты» — только то, что пришло в «Сайт» за 7 дней', JSON.stringify(await rowsTxt()) === JSON.stringify([A]), JSON.stringify(await rowsTxt()));
+      await page.click('[data-cp-site-sub=""]');
+      await page.click('#cpShelfList .cp-shoot[data-name="' + B + '"]');
+      await page.waitForFunction(() => /Скачать всё из 05_САЙТ · 1/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
+      await page.click('[data-cp-stdl]');
+      for (let i = 0; i < 80 && !((PROPS.get(S5 + '/2026-10-20/' + B) || {}).cp_dl); i++) await page.waitForTimeout(100);
+      await page.click('[data-cp-p="close"]').catch(() => {});
+      const c1 = await chips();
+      check('скачали из «Сайта» — у папки даты метка на Диске (cp_dl, кто), «Не скачано 1», под съёмкой «скачано»', !!(PROPS.get(S5 + '/2026-10-20/' + B) || {}).cp_dl
+        && (PROPS.get(S5 + '/2026-10-20/' + B) || {}).cp_dl_by === 'Маша' && /Не скачано 1/.test(c1) && /скачано \d/.test(await page.textContent('#cpShelfList .cp-shoot[data-name="' + B + '"]')), JSON.stringify([c1, PROPS.get(S5 + '/2026-10-20/' + B)]));
+      await page.evaluate(() => cpScanStages());
+      await page.waitForTimeout(300);
+      await page.click('[data-cp-site-sub="new"]');
+      check('«Не скачано» — метка читается с Диска (после сверки), скачанная съёмка скрыта', JSON.stringify(await rowsTxt()) === JSON.stringify([A]), JSON.stringify([await rowsTxt(), await chips()]));
+      await page.click('[data-cp-site-sub=""]');
+      await page.click('[data-cp-stage=""]');
+      if (!(await page.isVisible('#cpArchiveInput'))) await page.click('#cpGear');
+    }
     await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-catalog.png') });
     await page.fill('#cpArchiveInput', 'Архив');
     await page.click('#cpArchiveApply');

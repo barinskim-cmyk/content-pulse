@@ -280,6 +280,11 @@ cpRvApprove = function (ids) {
     cbRenderCards();
     cbRenderOutline();
     cbToast('На сайт: карточек ' + moved.length + ' → ' + CPDisk.showPath(cpParentDir(moved[0].to)));
+    /* в «Сайте» новое: съёмка сразу в его фильтре, у папки даты — снова «не скачано» */
+    var siteDirs = [];
+    moved.forEach(function (t) { var d = cpParentDir(t.to); if (siteDirs.indexOf(d) === -1) siteDirs.push(d); });
+    siteDirs.forEach(function (d) { cpReviewPresentStage('site', shoot.name, d); });
+    if (typeof cpSiteMarkNew === 'function') cpSiteMarkNew(siteDirs);
     if (typeof cpRetouchCleanupSoon === 'function') cpRetouchCleanupSoon();
     return Promise.all([cpOutputAppend(rows)].concat(moved.map(function (t) { return cpTrashEmptyUp(cpParentDir(t.from), cpParentDir(base)); })));
   }).catch(function (e) {
@@ -703,18 +708,23 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
   if (!e.target.closest('[data-cp-stdl]') || !CP.sel || !CP.sel.stage || !CP.sel.stageFiles) return;
   e.preventDefault();
   var sel = CP.sel, stageRoot = String((CP.settings || {})[CP_STAGE_SETTING[sel.stage]] || '').replace(/\/+$/, '');
-  var many = sel.stageFiles.length > 1, entries = [];
+  var many = sel.stageFiles.length > 1, entries = [], whole = [];
   sel.stageFiles.forEach(function (x) {
-    var par = cpParentDir(x.root);
+    var par = cpParentDir(x.root), all = true;
     var pre = many ? (par.indexOf(stageRoot + '/') === 0 ? par.slice(stageRoot.length + 1) : par.split('/').pop()) + '/' : '';
     x.files.forEach(function (f) {
-      if (f.name === CPDisk.STATE_FILE || !cpStageTagOk(sel, f)) return;
+      if (f.name === CPDisk.STATE_FILE) return;
+      if (!cpStageTagOk(sel, f)) { all = false; return; }
       entries.push({ from: f.path, size: f.size, name: pre + (f.path.indexOf(x.root + '/') === 0 ? f.path.slice(x.root.length + 1) : f.name) });
     });
+    if (all && x.files.length && !x.error) whole.push(x.root);
   });
   var on = Object.keys(sel.stageTags || {}).filter(function (k) { return sel.stageTags[k]; }).map(function (t) { return t === CP_NO_RT ? 'без ретушёра' : t; });
   var name = CPDisk.safeName(sel.name) + '_' + CPDisk.safeName(cpStageLabel(sel.stage)) + (on.length ? '_' + CPDisk.safeName(on.join('+')) : '') + '_' + cpToday();
-  cpExportBundle(name, entries, cpStageLabel(sel.stage) + ': файлов ' + entries.length + '.').catch(function (err) { cpHandleError(err, 'Скачивание'); });
+  cpExportBundle(name, entries, cpStageLabel(sel.stage) + ': файлов ' + entries.length + '.').then(function () {
+    /* из «Сайта» скачали — папки дат помечены «скачано» (фильтр «Не скачано») */
+    if (sel.stage === 'site' && typeof cpSiteMarkDownloaded === 'function') return cpSiteMarkDownloaded(whole);
+  }).catch(function (err) { cpHandleError(err, 'Скачивание'); });
 });
 
 /* ---------- витрина, фильтр «отретушировано»: перетащить папку как на Диск ---------- */
