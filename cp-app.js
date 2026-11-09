@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.80';
+var CP_VERSION = '2.0.81';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -920,7 +920,7 @@ function cpMerge3(base, local, remote) {
   var bm = (base.meta || {}).cp || {}, lm = (local.meta || {}).cp || {}, rm = (remote.meta || {}).cp || {};
   out.meta = out.meta || {};
   var cp = out.meta.cp = cpClone(rm) || {};
-  ['status', 'cardStatus', 'downloads', 'likes', 'folderTags', 'delivered', 'rv', 'ap2'].forEach(function (k) { cp[k] = cpMergeMap(bm[k], lm[k], rm[k]); });
+  ['status', 'cardStatus', 'downloads', 'likes', 'folderTags', 'delivered', 'rv', 'ap2', 'q'].forEach(function (k) { cp[k] = cpMergeMap(bm[k], lm[k], rm[k]); });
   var seen = {}, ev = [];
   (rm.events || []).concat(lm.events || []).forEach(function (e) {
     var key = e.ts + '|' + e.action + '|' + e.actor + '|' + JSON.stringify(e.items || []);
@@ -1190,7 +1190,7 @@ var CP_ACTION_LABEL = {
   collect_cards: 'собрал(а) карточки по папкам', restore_version: 'вернул(а) версию отбора',
   retouch_sync: 'докопировал(а) на ретушь',
   added_to_approval_card: 'добавлено в карточку на согласовании — тоже на согласовании',
-  rt_upload: 'сдал(а) ретушь на приёмку', rt_approve: 'согласовал(а) ретушь — в «Сайт»', rt_rework: 'вернул(а) ретушь на доработку',
+  rt_upload: 'сдал(а) ретушь на приёмку', rt_approve: 'отправил(а) на сайт', rt_rework: 'вернул(а) ретушь на доработку',
   removed_after_download: 'убрал(а) из отбора уже скачанное',
   added_to_retouch_card: 'добавил(а) кадры в карточку на ретуши',
   card_tag: 'поставил(а) тег карточке', card_untag: 'снял(а) тег с карточки'
@@ -1253,7 +1253,7 @@ function cpDoAction(status, pids, cardId) {
     cpEvent('to_retouch', cpPhotoNames(pids), extra);
     cpAfterStatus();
     cbToast('На ретушь: ' + r.done + ' скопировано' + (r.exists ? ', уже было ' + r.exists : '')
-      + (r.failed.length ? ', не скопировано ' + r.failed.length + ' — см. строку съёмки' : '') + ' → ' + extra.folder);
+      + (r.queued ? '. Не скопировалось сразу: ' + r.queued + ' — копирую повторно, не закрывайте страницу' : '') + ' → ' + extra.folder);
   }).catch(function (e) {
     cpEvent('to_retouch', cpPhotoNames(pids), { note: 'статус поставлен, копирование не удалось: ' + e.message });
     cpAfterStatus();
@@ -1285,12 +1285,12 @@ function cpRetouchCopy(pids, card, label) {
   var files = pids.map(function (pid) { return cbPhotoById(pid); }).filter(function (p) { return p && p.disk && !p.missing; });
   var shootPath = CP.shoot.path, shootName = CP.shoot.name;
   var ready = typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : Promise.resolve();
-  var folder = '', byFrom = {};
+  var folder = '', byFrom = {}, items = null;
   cbBusyShow(label + ': ' + files.length + ' кадр(ов)...', 0.2);
   return ready.then(function () {
     folder = cpRetouchBase(shootPath, shootName);
     var used = {};
-    var items = files.map(function (p) {
+    items = files.map(function (p) {
       var target = folder + '/' + cpRetouchRel(p, card, shootPath);
       /* два разных файла с одним именем в одну папку — второму суффикс, чтобы не потерялся */
       if (used[target] && used[target] !== p.disk) {
@@ -1314,9 +1314,22 @@ function cpRetouchCopy(pids, card, label) {
       cpUpdateStatusLine();
     }
     if (r.failed.length && window.console) console.error('[CP] retouch copy failed', r.failed);
+    /* не скопированное — в очередь: переносим, пока не перенесём (cp-queue.js) */
+    var left = (r.failedFrom || []).map(function (f) { return items.filter(function (it) { return it.from === f; })[0]; }).filter(Boolean);
+    if (left.length && typeof CPQ !== 'undefined') {
+      CPQ.add({ path: shootPath, name: shootName }, { kind: 'copy', label: 'На ретушь: ' + left.length + ' кадр(ов)', items: left, dirs: [folder] });
+      r.queued = left.length;
+      /* за ними следит очередь — «докопировать» в строке съёмки не нужно */
+      left.forEach(function (it) { if (CP.retouchMissing) delete CP.retouchMissing[byFrom[it.from]]; });
+      cpUpdateStatusLine();
+    }
     return r;
   }, function (e) {
     cbBusyHide();
+    if (items && items.length && typeof CPQ !== 'undefined') {
+      CPQ.add({ path: shootPath, name: shootName }, { kind: 'copy', label: 'На ретушь: ' + items.length + ' кадр(ов)', items: items, dirs: [folder], err: (e && e.message) || '' });
+      return { done: 0, exists: 0, failed: [], folder: folder, queued: items.length };
+    }
     if (CP.shoot && CP.shoot.path === shootPath) {
       var miss = CP.retouchMissing = CP.retouchMissing || {};
       files.forEach(function (p) { miss[p.id] = true; });

@@ -10,7 +10,7 @@
 у последней версии его ещё нет в таблице — это коммит с «(2.0.N)» в конце заголовка
 (`git log -F --grep "(2.0.N)"`). Метки git на GitHub отсюда не отправляются.
 
-    git checkout <коммит версии> -- cp-disk.js cp-app.js cp-shelf.js cp-rules.js cp-guard.js index.html tests/e2e.js
+    git checkout <коммит версии> -- 'cp-*.js' index.html tests/e2e.js
     git add -A cp-*.js index.html tests/e2e.js
     python3 tools/release.py "Откат к 2.0.N: <почему>" msg.txt
 

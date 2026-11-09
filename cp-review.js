@@ -172,7 +172,7 @@ cpAcceptUpload = function () {
     cbToast(msg);
     if (failed.length && window.console) console.error('[CP] не загрузилось', failed);
     var planEl = document.getElementById('cpAccPlan');
-    if (planEl) planEl.innerHTML = '<div class="cp-acc-done">' + cbEsc(msg) + '. Старший ретушёр увидит её в съёмке: фильтр ' + cbEsc(label) + ', галочка «Ретушь готова».</div>';
+    if (planEl) planEl.innerHTML = '<div class="cp-acc-done">' + cbEsc(msg) + '. Старший ретушёр увидит её в съёмке: фильтр ' + cbEsc(label) + ', галочка «Ретушь на проверке».</div>';
     if (CP.accept) CP.accept.files = [];
     cpReviewPresent(st.name, base);
   }).catch(function (e) {
@@ -229,12 +229,28 @@ function cpTrashEmptyUp(dir, stop) {
   }, function () { });
 }
 
+/* Перенести папку и убедиться, что она на новом месте (Маша, 09.11: «статус должен
+   свидетельствовать, что всё в нужное место переехало»). Статус ставит вызывающий —
+   только после того, как эта функция вернула путь. Диск переносит большие папки в
+   фоне: если прослойка не дождалась (timeout), ждём сами до 90 с и проверяем. */
 function cpMoveFolder(from, to, tries) {
   return CPDisk.proxyMove([{ from: from, path: to }]).then(function (r) {
     var st = r && r.results && r.results[0];
-    if (st && st.status === 'done') return to;
     if (st && st.status === 'exists' && (tries || 0) < 5) return cpMoveFolder(from, to.replace(/_\d+$/, '') + '_' + ((tries || 0) + 2), (tries || 0) + 1);
-    throw { message: CPDisk.showPath(from) + ': ' + ((st && (st.error || st.status)) || 'не перенеслось'), plain: true };
+    var why = (st && (st.error || st.status)) || 'не перенеслось';
+    var done = st && st.status === 'done';
+    return cpWaitThere(to, done ? 1 : (why === 'timeout' ? 18 : 2)).then(function (ok) {
+      if (ok) return to;
+      throw { message: CPDisk.showPath(from) + ': ' + (done ? 'Диск ответил «перенесено», но на новом месте папки нет' : why) + ' — статус не поставлен, повторите', plain: true };
+    });
+  });
+}
+
+/** Есть ли путь на Диске; tries > 1 — повторять раз в 5 с. */
+function cpWaitThere(path, tries) {
+  return CPDisk.meta(path).then(function () { return true; }, function (e) {
+    if ((e && e.status !== 404) || tries <= 1) return false;
+    return new Promise(function (res) { setTimeout(res, CP.waitThereMs || 5000); }).then(function () { return cpWaitThere(path, tries - 1); });
   });
 }
 
@@ -243,43 +259,53 @@ cpRvApprove = function (ids) {
   var root = cpReviewRoot(), site = typeof cpSiteRoot === 'function' ? cpSiteRoot() : '';
   if (!root) { if (cpCatStageMissing('retouched')) return; return cpRvApproveLegacy(ids); }
   if (!site) { cbToast('Нет папки сайта в каталоге: шестерёнка на витрине'); return; }
-  var rv = cpRv(), shoot = CP.shoot, todo = [];
+  var rv = cpRv(), shoot = CP.shoot, todo = [], skip = [];
   ids.forEach(function (id) {
     var last = cpLastRv(rv[id]);
-    if (!last || last.status !== 'review' || !cpRvDirOf(last)) return;
+    if (!last || last.status !== 'review' || !cpRvDirOf(last)) {
+      /* раньше — молча; теперь говорим, почему карточка не уехала */
+      var c0 = cbCardById(id);
+      skip.push((c0 && (c0.title || c0.category) || 'карточка') + ' — ' + (!last ? 'ретушь не сдана'
+        : last.status === 'approved' ? 'уже на сайте' : last.status === 'rework' ? 'на доработке, ждёт новой версии' : 'нет папки версии в 04'));
+      return;
+    }
     var card = cbCardById(id), idx = App.cards.indexOf(card);
     var to = site.replace(/\/+$/, '') + '/' + cpToday() + '/' + CPDisk.safeName(shoot.name) + '/' + CPDisk.safeName(cpCardExportFolder(card || { title: id }, idx < 0 ? 0 : idx));
     todo.push({ id: id, last: last, from: cpRvDirOf(last), to: to, card: card });
   });
+  if (skip.length) cbToast('Не отправлено на сайт: ' + skip.join('; '));
   if (!todo.length) return;
   var base = root.replace(/\/+$/, '') + '/' + CPDisk.safeName(shoot.name);
-  var who = cpActor(), now = new Date().toISOString(), rows = [], moved = [];
+  var who = cpActor(), now = new Date().toISOString(), rows = [], moved = [], queued = [];
   cbBusyShow('Отправляю на сайт...', 0.3);
+  /* каждая карточка — отдельно: одна не перенеслась — остальные всё равно получают статус,
+     а она уходит в очередь (cp-queue.js) и переносится, пока не перенесётся */
   todo.reduce(function (p, t) {
     return p.then(function () {
       return cpMoveFolder(t.from, t.to).then(function (to) {
         t.to = to;
         moved.push(t);
-        t.last.files.forEach(function (f) { if (f.path.indexOf(t.from + '/') === 0) f.path = to + f.path.slice(t.from.length); });
-        t.last.dir = to;
+      }, function (e) {
+        queued.push(t);
+        CPQ.add(shoot, { kind: 'move', label: 'На сайт: ' + (t.card ? t.card.title || t.card.category || 'карточка' : t.id), items: [{ from: t.from, path: t.to }],
+          after: { type: 'rv-approve', id: t.id, from: t.from, to: t.to, who: who, date: cpToday(), base: base }, err: (e && e.message) || '' });
       });
     });
   }, Promise.resolve()).then(function () {
     cbBusyHide();
     var m = cpMeta();
-    m.delivered = m.delivered || {};
     moved.forEach(function (t) {
-      t.last.status = 'approved'; t.last.rby = who; t.last.rts = now; t.last.site = CPDisk.showPath(t.to);
-      var rec = { files: t.last.files.length, letter: t.last.letter, date: cpToday(), at: CPDisk.showPath(t.to), out: t.last.letter + '_' + t.last.n, ts: now };
-      m.delivered[t.id] = rec;
-      /* у артикула бывает две карточки — сдан артикул целиком */
-      if (t.card && typeof cpArtKey === 'function') App.cards.forEach(function (c) { if (c.id !== t.id && cpArtKey(c) === cpArtKey(t.card) && !m.delivered[c.id]) m.delivered[c.id] = rec; });
+      cpRvApplyApproved(m, t.id, t.from, t.to, who, now, cpToday());
       rows.push(cpOutputRow(t.last, shoot.name, t.card, 'принято'));
     });
-    cpEvent('rt_approve', [], { card: moved.map(function (t) { return t.card ? t.card.title : t.id; }).join(', '), note: 'на сайт: ' + CPDisk.showPath(cpParentDir(moved[0].to)) });
+    if (moved.length) {
+      cpEvent('rt_approve', [], { card: moved.map(function (t) { return t.card ? t.card.title : t.id; }).join(', '), note: 'на сайт: ' + CPDisk.showPath(cpParentDir(moved[0].to)) });
+      cbToast('На сайт: карточек ' + moved.length + ' → ' + CPDisk.showPath(cpParentDir(moved[0].to))
+        + (queued.length ? '. Не перенеслись сразу: ' + queued.length + ' — переношу повторно (плашка сверху)' : ''));
+    } else if (queued.length) cbToast('Не перенеслось сразу: ' + queued.length + ' — переношу повторно, не закрывайте страницу (плашка сверху)');
     cbRenderCards();
     cbRenderOutline();
-    cbToast('На сайт: карточек ' + moved.length + ' → ' + CPDisk.showPath(cpParentDir(moved[0].to)));
+    if (!moved.length) return;
     /* в «Сайте» новое: съёмка сразу в его фильтре, у папки даты — снова «не скачано» */
     var siteDirs = [];
     moved.forEach(function (t) { var d = cpParentDir(t.to); if (siteDirs.indexOf(d) === -1) siteDirs.push(d); });
@@ -289,10 +315,36 @@ cpRvApprove = function (ids) {
     return Promise.all([cpOutputAppend(rows)].concat(moved.map(function (t) { return cpTrashEmptyUp(cpParentDir(t.from), cpParentDir(base)); })));
   }).catch(function (e) {
     cbBusyHide();
-    if (moved.length) cbRenderCards();
-    if (e && e.plain) { cbToast('На сайт: ' + e.message); return; }
+    cbRenderCards();
     cpHandleError(e, 'Отправка на сайт');
   });
+};
+
+/** Записать в отбор: версия ретуши карточки на сайте (to — папка в 05). Общая для сразу и для очереди. */
+function cpRvApplyApproved(m, id, from, to, who, ts, date) {
+  var last = cpLastRv((m.rv || {})[id]);
+  if (!last) return;
+  (last.files || []).forEach(function (f) { if (f.path.indexOf(from + '/') === 0) f.path = to + f.path.slice(from.length); });
+  last.dir = to;
+  last.status = 'approved'; last.rby = who; last.rts = ts; last.site = CPDisk.showPath(to);
+  var rec = { files: (last.files || []).length, letter: last.letter, date: date, at: CPDisk.showPath(to), out: last.letter + '_' + last.n, ts: ts };
+  m.delivered = m.delivered || {};
+  m.delivered[id] = rec;
+  /* у артикула бывает две карточки — сдан артикул целиком (только в открытой съёмке: нужны карточки) */
+  var card = CP.shoot && typeof cbCardById === 'function' ? cbCardById(id) : null;
+  if (card && typeof cpArtKey === 'function') App.cards.forEach(function (c) { if (c.id !== id && cpArtKey(c) === cpArtKey(card) && !m.delivered[c.id]) m.delivered[c.id] = rec; });
+}
+
+CPQ.after['rv-approve'] = function (op, m, shoot) {
+  var a = op.after;
+  cpRvApplyApproved(m, a.id, a.from, a.to, a.who, new Date().toISOString(), a.date);
+  var last = cpLastRv((m.rv || {})[a.id]), card = CP.shoot && CP.shoot.path === shoot.path ? cbCardById(a.id) : null;
+  if (last) cpOutputAppend([cpOutputRow(last, shoot.name, card || { title: a.id }, 'принято')]);
+  if (a.base) cpTrashEmptyUp(cpParentDir(a.from), cpParentDir(a.base));
+  if (CP.shoot && CP.shoot.path === shoot.path) {
+    if (typeof cpSiteMarkNew === 'function') cpSiteMarkNew([cpParentDir(a.to)]);
+    if (typeof cpRetouchCleanupSoon === 'function') cpRetouchCleanupSoon();
+  }
 };
 
 /* ---------- на доработку: остаётся в 04 с припиской «_доработка» ---------- */
@@ -314,14 +366,30 @@ cpRvRework = function (id) {
       last.dir = dir;
     }
     last.status = 'rework'; last.rby = cpActor(); last.rts = new Date().toISOString(); last.note = note.trim();
+    cpRvReworkDone(card, id, last);
+  }, function (e) {
+    /* папка не переименовалась — решение записываем, переименование — в очередь */
+    last.status = 'rework'; last.rby = cpActor(); last.rts = new Date().toISOString(); last.note = note.trim();
+    CPQ.add(CP.shoot, { kind: 'move', label: 'На доработку: ' + (card ? card.title || 'карточка' : id), items: [{ from: from, path: to }],
+      after: { type: 'rv-rework', id: id, from: from, to: to }, err: (e && e.message) || '' });
+    cpRvReworkDone(card, id, last);
+  }).catch(function (e) {
+    cpHandleError(e, 'На доработку');
+  });
+};
+
+function cpRvReworkDone(card, id, last) {
     cpEvent('rt_rework', [], { card: card ? card.title : id, note: last.note || '' });
     cbRenderCards();
     cbRenderOutline();
     return cpOutputAppend([cpOutputRow(last, CP.shoot.name, card, 'доработка' + (last.note ? ': ' + last.note : ''))]);
-  }).catch(function (e) {
-    if (e && e.plain) { cbToast('На доработку: ' + e.message); return; }
-    cpHandleError(e, 'На доработку');
-  });
+}
+
+CPQ.after['rv-rework'] = function (op, m) {
+  var a = op.after, last = cpLastRv((m.rv || {})[a.id]);
+  if (!last) return;
+  (last.files || []).forEach(function (f) { if (f.path.indexOf(a.from + '/') === 0) f.path = a.to + f.path.slice(a.from.length); });
+  last.dir = a.to;
 };
 
 /* на карточке: «Согласовать ретушь» → «На сайт» (в каталоге с папкой отретушированного) */
@@ -361,7 +429,8 @@ function cpApprovalSync() {
   var shootPath = CP.shoot.path.replace(/\/+$/, ''), shootName = CP.shoot.name;
   var base = root.replace(/\/+$/, '') + '/' + CPDisk.safeName(shootName);
   var want = Object.keys(m.status).filter(function (pid) { return m.status[pid].s === 'approval'; });
-  var copy = want.filter(function (pid) { return !ap2[pid]; }).map(function (pid) {
+  var inQueue = CPQ.pendingFrom();
+  var copy = want.filter(function (pid) { var p0 = cbPhotoById(pid); return !ap2[pid] && !(p0 && inQueue[p0.disk]); }).map(function (pid) {
     var p = cbPhotoById(pid);
     if (!p || !p.disk || p.missing || (p.kind || 'photo') === 'ref') return null;
     var card = m.status[pid].card ? cbCardById(m.status[pid].card) : null;
@@ -376,6 +445,13 @@ function cpApprovalSync() {
     var failed = {};
     (r.failedFrom || []).forEach(function (f) { failed[f] = true; });
     copy.forEach(function (x) { if (!failed[x.from] && CP.shoot && CP.shoot.path === path) cpMeta().ap2[x.pid] = x.path; });
+    /* не скопированное — в очередь: копирует, пока не скопирует, потом отмечает в ap2 */
+    var left = copy.filter(function (x) { return failed[x.from]; });
+    if (left.length) {
+      var map = {};
+      left.forEach(function (x) { map[x.from] = [x.pid, x.path]; });
+      CPQ.add(CP.shoot, { kind: 'copy', label: 'На согласование: ' + left.length + ' кадр(ов)', items: left.map(function (x) { return { from: x.from, path: x.path }; }), dirs: [base], after: { type: 'ap2', map: map } });
+    }
     msgs.push('на согласование в ' + label + ': ' + (r.done + r.exists) + (r.failed.length ? ', не скопировано ' + r.failed.length : ''));
     if (typeof cpReviewPresentStage === 'function') cpReviewPresentStage('approval', shootName, base);
   }) : Promise.resolve();
@@ -384,6 +460,8 @@ function cpApprovalSync() {
     var paths = drop.map(function (pid) { return ap2[pid]; });
     return CPDisk.trash(paths).then(function (res) {
       var ok = res.filter(function (x) { return x.status === 'done' || x.status === 'gone'; }).map(function (x) { return x.path; });
+      var bad = res.filter(function (x) { return x.status !== 'done' && x.status !== 'gone'; }).map(function (x) { return x.path; });
+      if (bad.length) CPQ.add(CP.shoot, { kind: 'trash', label: 'Снять с согласования (в Корзину): ' + bad.length, paths: bad, after: { type: 'ap2-drop', paths: bad } });
       if (CP.shoot && CP.shoot.path === path) drop.forEach(function (pid) { if (ok.indexOf(ap2[pid]) !== -1) delete cpMeta().ap2[pid]; });
       msgs.push('из ' + label + ' в Корзину: ' + ok.length);
       /* опустевшие папки в 02 — тоже в Корзину (до папки 02 включительно не трогаем) */
@@ -404,6 +482,15 @@ function cpApprovalSync() {
     cpHandleError(e, 'Копия на согласование');
   });
 }
+
+CPQ.after['ap2'] = function (op, m) {
+  m.ap2 = m.ap2 || {};
+  Object.keys(op.after.map || {}).forEach(function (from) { var v = op.after.map[from]; m.ap2[v[0]] = v[1]; });
+};
+CPQ.after['ap2-drop'] = function (op, m) {
+  m.ap2 = m.ap2 || {};
+  Object.keys(m.ap2).forEach(function (pid) { if ((op.after.paths || []).indexOf(m.ap2[pid]) !== -1) delete m.ap2[pid]; });
+};
 
 /* открыли съёмку — то, что уже было на согласовании до этой версии, тоже ляжет в 02 */
 CP.openedHooks = CP.openedHooks || [];

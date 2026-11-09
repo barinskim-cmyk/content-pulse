@@ -222,6 +222,7 @@ function cpRetouchTrash(paths, quiet) {
       cbToast('Сданное убрано из ретуши в Корзину Диска: ' + ok.length + (bad.length ? ', не получилось: ' + bad.length : ''));
     } else if (bad.length && !quiet) cbToast('Не получилось убрать сданное из ретуши: ' + (bad[0].error || ''));
     if (bad.length && window.console) console.warn('[CP] в Корзину не ушло', bad);
+    if (bad.length && CP.shoot) CPQ.add(CP.shoot, { kind: 'trash', label: 'Убрать сданное из ретуши: ' + bad.length, paths: bad.map(function (x) { return x.path; }) });
     return ok.length;
   }, function (e) {
     if (window.console) console.warn('[CP] в Корзину', e && (e.body || e.message || e));

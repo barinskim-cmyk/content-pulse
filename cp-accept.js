@@ -5,7 +5,7 @@
    которую скачал и отретушировал… После этого нужно согласование старшего
    ретушёра: всё согласованное копируется в папку «Сайт» на сдачу, а всё,
    что нет, ждёт повторной загрузки. Таскать любой кусок — картинками
-   отдельными или полной папкой… Галочка «Ретушь готова» показывает только
+   отдельными или полной папкой… Галочка «Ретушь на проверке» (было «Ретушь готова») показывает только
    карточки, для которых загружена версия ретуши, и кнопка «Согласовать
    ретушь» появляется только после того, как ретушь загружена».
 
@@ -16,7 +16,7 @@
          <съёмка>/_приёмка/<дата>_<буква>_<номер>/<папка карточки>/<файл>
       Буква и номер — из имени скачанного архива («…_Y_1»), иначе выбрать.
       У карточки появляется версия ретуши (1, 2, …) «на проверке».
-   2. В съёмке: галочка «Ретушь готова» — только карточки с загруженной
+   2. В съёмке: галочка «Ретушь на проверке» — только карточки с загруженной
       ретушью; на карточке — картинки версии и «Согласовать ретушь» /
       «На доработку».
    3. Согласовано — файлы версии копируются в
@@ -253,7 +253,7 @@ function cpAcceptPlan() {
     var last = cpLastRv(rv[id]);
     var miss = c ? cpRvMissing(cpRvExpected(c, photosById, meta.status), plan.groups[id]) : null;
     return '<div><b>' + cbEsc(c ? c.title || 'карточка' : id) + '</b> · файлов ' + plan.groups[id].length
-      + (last ? ' <small>сейчас версия ' + last.v + ' · ' + (last.status === 'approved' ? 'согласована' : last.status === 'rework' ? 'на доработке' : 'на проверке') + '</small>' : '')
+      + (last ? ' <small>сейчас версия ' + last.v + ' · ' + (last.status === 'approved' ? 'на сайте' : last.status === 'rework' ? 'на доработке' : 'на проверке') + '</small>' : '')
       + (miss && miss.count ? ' <span class="cp-acc-warn">' + cbEsc(cpRvMissingText(miss)) + '</span>' : '') + '</div>';
   }).join('') + '</div>';
   if (plan.unmatched.length) {
@@ -339,7 +339,7 @@ function cpAcceptUpload() {
     var msg = 'Загружено на приёмку: ' + ok.length + ' файл(ов)' + (failed.length ? ', не загрузилось ' + failed.length : '') + ' — сдача ' + batch;
     cbToast(msg);
     if (failed.length && window.console) console.error('[CP] не загрузилось на приёмку', failed);
-    document.getElementById('cpAccPlan').innerHTML = '<div class="cp-acc-done">' + cbEsc(msg) + '. Старший ретушёр увидит её в съёмке по галочке «Ретушь готова».</div>';
+    document.getElementById('cpAccPlan').innerHTML = '<div class="cp-acc-done">' + cbEsc(msg) + '. Старший ретушёр увидит её в съёмке по галочке «Ретушь на проверке».</div>';
     CP.accept.files = [];
   }).catch(function (e) {
     cbBusyHide();
@@ -367,7 +367,9 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
   cpAcceptOpen(CP.sel.path, CP.sel.name);
 });
 
-/* ---------- в съёмке: «Ретушь готова», версии на карточке, согласование ---------- */
+/* ---------- в съёмке: «Ретушь на проверке», версии на карточке, «На сайт» ----------
+   Слова (09.11): «согласование» — только папка 02 (руководитель смотрит отбор до ретуши);
+   приёмка ретуши — «На сайт» / «на сайте», чтобы два смысла не путались. */
 
 cbRenderCards = (function (orig) {
   return function () {
@@ -375,7 +377,7 @@ cbRenderCards = (function (orig) {
     if (!CP.shoot) return r;
     var root = document.getElementById('cbCards');
     var rv = cpRv();
-    /* галочка «Ретушь готова» над карточками (рядом со списком, не внутри него) */
+    /* галочка «Ретушь на проверке» над карточками (рядом со списком, не внутри него) */
     var bar = document.getElementById('cpRvBar');
     if (!bar && root) {
       bar = document.createElement('div');
@@ -396,19 +398,19 @@ cbRenderCards = (function (orig) {
     if (bar) {
       var nRv = Object.keys(rv).filter(function (k) { return (rv[k] || []).length; }).length;
       bar.innerHTML = '<label class="cp-rvbar"><input type="checkbox" id="cpRvOnly"' + (CP.rvOnly ? ' checked' : '')
-        + '> Ретушь готова — только карточки с загруженной ретушью <small>(' + nRv + ')</small></label>'
+        + '> Ретушь на проверке — только карточки со сданной ретушью <small>(' + nRv + ')</small></label>'
         + '<button class="cp-rvup" data-cp-o="accept">Сдать ретушь</button>';
     }
     Array.prototype.forEach.call(root.querySelectorAll('.cb-card'), function (el) {
       var id = el.getAttribute('data-cid');
       var list = rv[id];
-      /* «Ретушь готова» — то, что ждёт проверки или доработки; принятое на сайт уже не показываем */
+      /* «Ретушь на проверке» — то, что ждёт проверки или доработки; принятое на сайт уже не показываем */
       var lastS = list && list.length ? list[list.length - 1].status : '';
       if (CP.rvOnly && lastS !== 'review' && lastS !== 'rework') el.style.display = 'none';
       var last = cpLastRv(list);
       if (!last || el.querySelector('.cp-rv')) return;
       var head = el.querySelector('.cb-card-head');
-      var state = last.status === 'approved' ? '<span class="cp-rv-ok">согласовано · ' + cbEsc(last.rby || '') + '</span>'
+      var state = last.status === 'approved' ? '<span class="cp-rv-ok">на сайте · ' + cbEsc(last.rby || '') + '</span>'
         : last.status === 'rework' ? '<span class="cp-rv-bad">на доработке' + (last.note ? ': ' + cbEsc(last.note) : '') + ' — ждёт новой версии</span>'
           : '<span class="cp-rv-wait">на проверке</span>';
       var open = last.status === 'review' || last.status === 'rework';
@@ -417,7 +419,7 @@ cbRenderCards = (function (orig) {
       var canUp = open && typeof cpReviewRoot === 'function' && !!cpReviewRoot();
       var html = '<div class="cp-rv" data-cp-rv="' + id + '"><div class="cp-rv-head"><b>Ретушь v' + last.v + '</b> · ' + cbEsc(last.letter + '_' + last.n)
         + ' · ' + cbEsc(cpFmtDate(last.ts)) + ' · файлов ' + last.files.length + ' · ' + state + '<span class="cp-sp"></span>'
-        + (last.status === 'review' ? '<button class="cb-primary" data-cp-rva="approve">Согласовать ретушь</button><button data-cp-rva="rework">На доработку</button>' : '')
+        + (last.status === 'review' ? '<button class="cb-primary" data-cp-rva="approve">На сайт</button><button data-cp-rva="rework">На доработку</button>' : '')
         + '</div>'
         + (miss && miss.count ? '<div class="cp-rv-miss">' + cbEsc(cpRvMissingText(miss)) + ' — потеряли по дороге?' + (canUp ? ' Перетащите недостающие файлы прямо на карточку.' : '') + '</div>' : '')
         + '<div class="cp-rv-thumbs">' + last.files.map(function (f, i) {
@@ -493,7 +495,7 @@ function cpRvApprove(ids) {
     todo.push({ id: id, last: last, dir: dir });
   });
   if (!todo.length) return;
-  cbBusyShow('Согласовано — копирую в «Сайт»...', 0.3);
+  cbBusyShow('Принято — копирую в «Сайт»...', 0.3);
   CPDisk.proxyCopy(items, Object.keys(dirs)).then(function (r) {
     cbBusyHide();
     var res = (r && r.results) || [], bad = res.filter(function (x) { return x.status !== 'done' && x.status !== 'exists'; });
@@ -507,12 +509,12 @@ function cpRvApprove(ids) {
     cpEvent('rt_approve', [], { card: todo.map(function (t) { var c = cbCardById(t.id); return c ? c.title : t.id; }).join(', '), note: 'в «Сайт»: ' + CPDisk.showPath(todo[0].dir) });
     cbRenderCards();
     cbRenderOutline();
-    cbToast('Ретушь согласована, файлы в «Сайте»: карточек ' + todo.length);
+    cbToast('На сайт: карточек ' + todo.length);
     if (typeof cpRetouchCleanupSoon === 'function') cpRetouchCleanupSoon();
   }).catch(function (e) {
     cbBusyHide();
-    if (e && e.plain) { cbToast('Согласование: ' + e.message); return; }
-    cpHandleError(e, 'Согласование ретуши');
+    if (e && e.plain) { cbToast('На сайт: ' + e.message); return; }
+    cpHandleError(e, 'На сайт');
   });
 }
 

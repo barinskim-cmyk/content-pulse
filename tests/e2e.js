@@ -167,6 +167,7 @@ async function route(r) {
     if (q.a === 'move' && m === 'POST') {
       const b = JSON.parse(req.postData() || '{}');
       return json(200, { results: (b.items || []).map(it => {
+        if (FAIL_MOVE && FAIL_MOVE.test(it.from)) return { from: it.from, status: 'failed', error: 'тест: Диск не ответил' };
         if (FILES.has(it.path) || DIRS.has(it.path)) return { from: it.from, status: 'exists' };
         if (DIRS.has(it.from)) {   /* папка целиком: всё внутри едет с ней */
           const pre = it.from + '/';
@@ -342,7 +343,8 @@ async function route(r) {
   return r.continue();
 }
 
-let FAIL_COPY = null;   /* копирование этих путей «падает» — проверка «докопировать» */
+let FAIL_COPY = null;   /* копирование этих путей «падает» — проверка очереди переносов */
+let FAIL_MOVE = null;   /* перенос этих путей «падает» */
 
 (async () => {
   const srv = http.createServer((req, res) => {
@@ -759,15 +761,26 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('на ретушь: папка съёмки, лук и артикул созданы сами; кадр лука — в папке артикула карточки',
     FILES.has(RT + '1/74595_модель/IMG_0101.jpg') && FILES.has(RT + '1/74595_модель/manekin.jpg') && !FILES.has(RT + '1/IMG_0101.jpg'),
     [...FILES.keys()].filter(k => k.indexOf(RT) === 0).join(' | '));
-  /* не скопировалось — видно в строке съёмки, «докопировать» дотягивает */
+  /* не скопировалось — очередь переносов: повторяет сама, после 3 неудач — тревога, закрыть страницу молча нельзя */
+  await page.evaluate(() => { CPQ.delays = [150, 150, 150, 150]; CP.waitThereMs = 50; });
   FAIL_COPY = /manekin2/;
   await page.evaluate(() => { var c = App.cards.find(x => x.title === '74596'); c.pids.push(App.photos.find(p => /manekin2/.test(p.disk)).id); cpDoAction('retouch', cpCardPids(c), c.id); });
-  await page.waitForSelector('#cpRetouchMissing', { timeout: 8000 }).catch(() => {});
-  check('не скопировалось на ретушь — в строке съёмки «не скопировано: 1 — докопировать»', /не скопировано на ретушь: 1/.test(await page.textContent('#cpStatusLine')), await page.textContent('#cpStatusLine'));
+  await page.waitForFunction(() => /На ретушь: 1/.test((document.getElementById('cpQueue') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
+  check('не скопировалось на ретушь — очередь: плашка «Переношу на Диске», статус остаётся, «докопировать» не нужно', await page.evaluate(() => {
+    var p = App.photos.find(x => /manekin2/.test(x.disk));
+    return document.getElementById('cpQueue').classList.contains('cp-on') && cpMeta().status[p.id].s === 'retouch' && !document.getElementById('cpRetouchMissing')
+      && Object.keys(cpMeta().q || {}).length === 1;
+  }), await page.textContent('#cpQueue').catch(() => ''));
+  await page.waitForFunction(() => document.getElementById('cpQueue').classList.contains('cp-alarm'), null, { timeout: 8000 }).catch(() => {});
+  check('3 неудачи подряд — красная плашка «Перенос не проходит», повторы идут', await page.evaluate(() => document.getElementById('cpQueue').classList.contains('cp-alarm')
+    && /Перенос не проходит/.test(document.getElementById('cpQueue').textContent) && Object.values(CPQ.ops)[0].op.tries >= 3));
+  check('пока переносится — закрыть страницу молча нельзя (beforeunload)', await page.evaluate(() => { var e = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(e); return e.defaultPrevented; }));
   FAIL_COPY = null;
-  await page.click('#cpRetouchMissing');
-  await page.waitForFunction(() => !document.getElementById('cpRetouchMissing'), null, { timeout: 8000 }).catch(() => {});
-  check('«докопировать»: кадр в папке ретуши, предупреждение ушло', FILES.has(RT + '1/74596_модель/manekin2.jpg') && !(await page.$('#cpRetouchMissing')));
+  await page.waitForFunction(() => !cpqCount() && !document.getElementById('cpQueue').classList.contains('cp-on'), null, { timeout: 8000 }).catch(() => {});
+  await page.waitForFunction(() => !App.dirty, null, { timeout: 8000 }).catch(() => {});
+  check('Диск ожил — очередь докопировала сама, плашка ушла, в журнале «с N-й попытки»', FILES.has(RT + '1/74596_модель/manekin2.jpg') && await page.evaluate(() => !cpqCount()
+    && !Object.keys(cpMeta().q || {}).length && cpMeta().events.some(e => e.action === 'queue_done' && /попытки/.test(e.note || ''))));
+  check('всё перенесено и сохранено — страницу можно закрыть', await page.evaluate(() => { var e = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(e); return !e.defaultPrevented; }));
   /* сверка: копию в папке ретуши удалили — «Сверить папку ретуши» кладёт заново, остальное не трогает */
   FILES.delete(RT + '1/74595_модель/manekin.jpg');
   await page.evaluate(() => document.getElementById('cpMenuRetouchSync').click());
@@ -1047,8 +1060,15 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     for (let i = 0; i < 60 && !TRASHED.some(p => /_доработка$/.test(p)); i++) await page.waitForTimeout(100);
     check('новая версия после доработки — рядом, папка с доработкой ушла в Корзину', inRv('manekin.tif').length === 1 && !/_доработка/.test(inRv('manekin.tif')[0]) && TRASHED.some(p => /_доработка$/.test(p))
       && await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].status === 'review', ids.a), JSON.stringify([inRv('manekin.tif'), TRASHED.slice(-3)]));
+    /* «На сайт», а Диск не перенёс — раньше статус терялся; теперь — очередь, статус ставится, когда папка на месте */
+    FAIL_MOVE = /74595/;
     await page.click('[data-cp-rv="' + ids.a + '"] [data-cp-rva="approve"]');
+    await page.waitForFunction(() => /На сайт:/.test((document.getElementById('cpQueue') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
+    check('«На сайт» не перенеслось — в очереди, статус «на сайте» пока не поставлен', await page.evaluate(i => /На сайт:/.test(document.getElementById('cpQueue').textContent)
+      && cpMeta().rv[i].slice(-1)[0].status === 'review', ids.a), await page.evaluate(i => JSON.stringify(cpMeta().rv[i].slice(-1)[0].status), ids.a));
+    FAIL_MOVE = null;
     for (let i = 0; i < 80 && !TRASHED.includes(RV + '/' + SN); i++) await page.waitForTimeout(100);
+    check('очередь перенесла — теперь «на сайте» и сдано', await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].status === 'approved' && !!cpMeta().delivered[i] && !cpqCount(), ids.a));
     check('всё на сайте — папка съёмки в 04 опустела и ушла в Корзину', FILES.has(ST + '/' + today + '/' + SN + '/74595/manekin.tif') && TRASHED.includes(RV + '/' + SN), JSON.stringify(TRASHED.slice(-4)));
     for (let i = 0; i < 40 && !/принято[\s\S]*принято/.test((FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString()); i++) await page.waitForTimeout(100);
     const out = (FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString();
