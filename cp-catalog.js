@@ -43,6 +43,11 @@ var CP_CAT_RE = /^(\d{2})[_ .\-]/;
 CP.catalogList = null;   /* папки открытого каталога: [{name, path}] */
 
 /** Путь каталога, если открыт каталог; иначе ''. */
+/** Папка похожа на каталог: внутри есть папки этапов с номерами 01–05. */
+function cpCatLike(items) {
+  return (items || []).some(function (x) { var m = x.type === 'dir' && CP_CAT_RE.exec(x.name); return m && /^0[1-5]$/.test(m[1]); });
+}
+
 function cpCatalog() {
   var c = cpGet('cp_catalog', '');
   return c && c === String(CP.archive || '').replace(/\/+$/, '') ? c : '';
@@ -111,7 +116,24 @@ cpParseSettings = (function (orig) {
   var listOrig = CPDisk.listShoots;
   CPDisk.listShoots = function (archive) {
     var cat = String(archive || '').replace(/\/+$/, '');
-    if (!cat || cat !== cpGet('cp_catalog', '')) { CP.catalogList = null; cpCatRender(); return listOrig(archive); }
+    if (cat && cat !== cpGet('cp_catalog', '')) {
+      /* каталог ли это — смотрим всегда, а не только по «Сохранить» в шестерёнке (Маша, 09.11: открыла
+         в другом браузере — фильтры снова «Архив / Отбор / Согласование…», как в старой версии) */
+      return CPDisk.listDir(cat).then(function (items) {
+        if (cpCatLike(items)) {
+          cpSet('cp_catalog', cat);
+          var sd = cpServiceDirFor(cat);
+          if (sd !== CP_CONFIG.serviceDir) { CP_CONFIG.serviceDir = sd; if (typeof cpServiceReset === 'function') cpServiceReset(); }
+          return CPDisk.listShoots(archive);
+        }
+        CP.catalogList = null;
+        cpCatRender();
+        /* обычный архив: те же папки, что дал бы listOrig, без второго запроса */
+        return items.filter(function (r) { return r.type === 'dir' && r.name.charAt(0) !== '_'; })
+          .sort(function (a, b) { return a.modified < b.modified ? 1 : -1; });
+      });
+    }
+    if (!cat) { CP.catalogList = null; cpCatRender(); return listOrig(archive); }
     var ready = typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : Promise.resolve();
     return ready.then(function () { return CPDisk.listDir(cat); }).then(function (items) {
       CP.catalogList = items.filter(function (x) { return x.type === 'dir' && x.name.charAt(0) !== '_'; })
@@ -432,8 +454,7 @@ function cpCatMake() {
     if (!v) return;
     btn.disabled = true;
     CPDisk.listDir(v).then(function (items) {
-      var isCat = items.some(function (x) { var m = x.type === 'dir' && CP_CAT_RE.exec(x.name); return m && /^0[1-5]$/.test(m[1]); });
-      cpSet('cp_catalog', isCat ? v.replace(/\/+$/, '') : '');
+      cpSet('cp_catalog', cpCatLike(items) ? v.replace(/\/+$/, '') : '');
     }, function () { cpSet('cp_catalog', ''); }).then(function () {
       btn.disabled = false;
       applyOrig.call(self);

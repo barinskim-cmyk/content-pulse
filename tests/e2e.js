@@ -1444,6 +1444,11 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.waitForFunction(() => CP.catalogList && CP.shoots && CP.shoots.some(s => s.name === '2026-11-06_SV_КАТ') && /02_ОТБОР\s*1/.test(document.getElementById('cpStages').textContent), null, { timeout: 10000 }).catch(() => {});
     const st = await page.evaluate(() => ({ sd: CP_CONFIG.serviceDir, shoots: CP.shoots.map(s => s.name), stages: document.getElementById('cpStages').textContent, s: CP.settings }));
     check('каталог: служебная папка внутри, съёмки только из исходников (00_АРХИВ не читаем)', st.sd === K + '/_ContentPulse' && st.shoots.includes('2026-11-06_SV_КАТ') && !st.shoots.includes('2026-11-01_SV_ПРЕДМЕТКА') && !st.shoots.includes('02_ОТБОР'), JSON.stringify(st));
+    /* другой браузер (или Windows): «каталог» в нём ещё не запомнен — витрина узнаёт его сама */
+    await page.evaluate(() => { cpSet('cp_catalog', ''); CP_CONFIG.serviceDir = 'disk:/_ContentPulse'; return cpLoadShoots(); });
+    await page.waitForFunction(() => /^01_ИСХОДНИКИ/.test(document.getElementById('cpStages').textContent.trim()), null, { timeout: 8000 }).catch(() => {});
+    check('каталог не запомнен в браузере — узнаётся сам: фильтры по папкам, служебная папка внутри каталога', await page.evaluate(k => cpGet('cp_catalog', '') === k
+      && CP_CONFIG.serviceDir === k + '/_ContentPulse' && /^01_ИСХОДНИКИ/.test(document.getElementById('cpStages').textContent.trim()), K), await page.textContent('#cpStages'));
     check('что значит папка — по смыслу имени, потом по номеру: 04_САЙТ — сайт', await page.evaluate(() => cpCatRoleOf('04_САЙТ', {}) === 'site' && cpCatRoleOf('04_ОТРЕТУШИРОВАНО', {}) === 'review'
       && cpCatRoleOf('03_РЕТУШЬ', {}) === 'retouch' && cpCatRoleOf('00_АРХИВ', {}) === 'skip' && cpCatRoleOf('02_ОТБОР', {}) === 'approval' && cpCatRoleOf('05_X', {}) === 'site' && cpCatRoleOf('ПРОЧЕЕ', {}) === 'skip'));
     check('каталог: фильтры = папки (01, 02_ОТБОР, 03, 04_САЙТ — по имени это сайт), нет «отретушировано» — нет фильтра, внутреннего «Отбора» нет',
