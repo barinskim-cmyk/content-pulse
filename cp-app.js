@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.69';
+var CP_VERSION = '2.0.70';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1864,6 +1864,7 @@ function cpZipExport(name, entries, note) {
   /* один архив любого размера: больше 4 ГБ прослойка пишет ZIP64 (Маша, 08.11: «скачать всё — пилит
      на 30 частей, а нужно одним архивом на пачку») */
   if (CPDisk.hasProxy() && entries.length < 60000) {
+    if (total > CP.zipSplitAt) return cpZipSplit(name, entries, note);
     return cpZipOne(name, entries, note).catch(function (e) {
       if (e && e.status === 501) return cpZipParts(name, entries, note);   /* облако не настроено */
       throw e;
@@ -1904,8 +1905,74 @@ function cpCrcCombine(crc1, crc2, len2) {
   return (crc1 ^ crc2) >>> 0;
 }
 
-/** Один архив, собранный за несколько вызовов прослойки. */
-function cpZipOne(name, entries, note) {
+/* Большая выборка — несколько архивов по ~3 ГБ, папками целиком (Маша, 08.11: архив на 8,4 ГБ
+   собрался целым, но одним файлом не скачивается — оборвалось; «хотя бы 2 архива», «чтобы
+   разбивал по папкам целиком»). Внутри у всех частей одна и та же корневая папка — распакованные
+   рядом, они складываются в одну съёмку. */
+CP.zipSplitAt = 3.2 * 1024 * 1024 * 1024;
+CP.zipPartSize = 3 * 1024 * 1024 * 1024;
+
+/** Разложить файлы по частям: папки верхнего уровня целиком; папка больше части — по вложенным, потом по файлам. */
+function cpZipGroups(entries, limit) {
+  var size = function (list) { return list.reduce(function (a, e) { return a + e.size; }, 0); };
+  var split = function (list, depth) {
+    /* группы по папке на уровне depth (порядок как в выборке) */
+    var order = [], by = {};
+    list.forEach(function (e) {
+      var segs = e.name.split('/'), key = segs.length - 1 > depth ? segs.slice(0, depth + 1).join('/') : '\u0000файлы:' + segs.slice(0, depth).join('/');
+      if (!by[key]) { by[key] = []; order.push(key); }
+      by[key].push(e);
+    });
+    var out = [];
+    order.forEach(function (k) {
+      var g = by[k];
+      if (size(g) <= limit || g.length === 1) out.push(g);
+      else if (k.indexOf('\u0000') === 0) {
+        /* файлы одной папки — подряд кусками по limit */
+        var cur = [], cs = 0;
+        g.forEach(function (e) { if (cur.length && cs + e.size > limit) { out.push(cur); cur = []; cs = 0; } cur.push(e); cs += e.size; });
+        if (cur.length) out.push(cur);
+      } else out = out.concat(split(g, depth + 1));
+    });
+    return out;
+  };
+  var groups = split(entries, 0), parts = [], cur = [], cs = 0;
+  groups.forEach(function (g) {
+    var gs = size(g);
+    if (cur.length && cs + gs > limit) { parts.push(cur); cur = []; cs = 0; }
+    cur = cur.concat(g); cs += gs;
+  });
+  if (cur.length) parts.push(cur);
+  return parts;
+}
+
+function cpZipSplit(name, entries, note) {
+  var groups = cpZipGroups(entries, CP.zipPartSize);
+  if (groups.length < 2) return cpZipOne(name, entries, note);
+  var all = { parts: [], files: 0, bytes: 0, skipped: [] };
+  var head = (note ? note + ' ' : '') + 'Выборка большая — ' + groups.length + ' архива(ов) по папкам целиком; распакуйте их рядом — сложатся в одну папку.';
+  return groups.reduce(function (chain, g, k) {
+    return chain.then(function () {
+      return cpZipOne(name + '_ч' + (k + 1), g, head, { root: name, prev: all.parts, multi: true, label: 'Часть ' + (k + 1) + ' из ' + groups.length });
+    }).then(function (r) {
+      all.parts = all.parts.concat(r.parts);
+      all.files += r.files; all.bytes += r.bytes;
+      all.skipped = all.skipped.concat(r.skipped || []);
+      /* готовая часть сразу качается, пока собирается следующая */
+      if (r.parts[0]) cpStartDownload(r.parts[0].href);
+      cpDlCard(name, head, all.parts, k + 1 < groups.length ? 'Собираю часть ' + (k + 2) + ' из ' + groups.length + '...' : '');
+    });
+  }, Promise.resolve()).then(function () {
+    cpDlCard(name, head + (all.skipped.length ? ' Не попали — Яндекс не отдаёт файл (проверьте его на Диске): '
+      + all.skipped.map(function (x) { return x.name.split('/').pop(); }).slice(0, 10).join(', ') + (all.skipped.length > 10 ? '…' : '') + '.' : ''), all.parts, '');
+    return all;
+  });
+}
+
+/** Один архив, собранный за несколько вызовов прослойки. opts: {root, prev, multi, label} — для частей. */
+function cpZipOne(name, entries, note, opts) {
+  opts = opts || {};
+  var root = opts.root || name, prevParts = opts.prev || [];
   var total = entries.reduce(function (a, e) { return a + e.size; }, 0);
   var target = cpExportsDir() + '/' + name + '.zip';
   var res = { parts: [], files: 0, bytes: 0 };
@@ -1924,7 +1991,7 @@ function cpZipOne(name, entries, note) {
   };
   cut();
   var lenOf = function (p) { return p.whole ? p.e.size : p.end - p.start + 1; };
-  cpDlCard(name, note, [], 'Собираю архив...');
+  cpDlCard(name, note, prevParts, 'Собираю архив' + (opts.label ? ' (' + opts.label.toLowerCase() + ')' : '') + '...');
 
   /* контрольные суммы больших файлов — по кускам */
   function crcBig() {
@@ -1937,7 +2004,7 @@ function cpZipOne(name, entries, note) {
         var show = function () {
           var msg = 'Считаю контрольную сумму видео: ' + cpMb(seen) + ' из ' + cpMb(all);
           cbBusyShow(msg, Math.max(0.02, 0.3 * seen / all));
-          cpDlCard(name, note, [], msg);
+          cpDlCard(name, note, prevParts, msg);
         };
         show();
         /* куски одного файла — по три сразу, суммы складываются по порядку */
@@ -1971,15 +2038,15 @@ function cpZipOne(name, entries, note) {
     var final = pi >= pieces.length;
     n++;
     var nFiles = function (list) { return list.filter(function (p) { return p.last; }).length; };
-    var msg = 'Собираю архив ' + name + ': ' + cpMb(res.bytes + bytes) + ' из ' + cpMb(total) + ' · файлов ' + (res.files + nFiles(chunk)) + ' из ' + entries.length;
+    var msg = 'Собираю ' + (opts.label ? opts.label.toLowerCase() : 'архив') + ' ' + name + ': ' + cpMb(res.bytes + bytes) + ' из ' + cpMb(total) + ' · файлов ' + (res.files + nFiles(chunk)) + ' из ' + entries.length;
     cbBusyShow(msg, Math.max(0.03, res.bytes / Math.max(1, total)));
-    cpDlCard(name, note, [], msg);
+    cpDlCard(name, note, prevParts, msg);
     var t0 = Date.now();
     var tick = setInterval(function () {
       cbBusyShow(msg + ' · ' + Math.round((Date.now() - t0) / 1000) + ' с', Math.max(0.03, res.bytes / Math.max(1, total)));
     }, 1000);
     var asEntry = function (p) {
-      var x = { from: p.e.from, name: name + '/' + p.e.name, size: p.e.size };
+      var x = { from: p.e.from, name: root + '/' + p.e.name, size: p.e.size };
       if (!p.whole) { x.start = p.start; x.end = p.end; x.head = p.head; x.crc = p.e.crc; }
       return x;
     };
@@ -2012,7 +2079,7 @@ function cpZipOne(name, entries, note) {
         if (tries >= 2 || /размер изменился|изменился во время|больше 4 ГБ|65 тысяч/.test(txt)) throw e;
         tries++;
         msg = 'Сеть оборвалась, повторяю кусок ' + n + ' (' + tries + ' из 2)... · ' + cpMb(res.bytes) + ' из ' + cpMb(total);
-        cpDlCard(name, note, [], msg);
+        cpDlCard(name, note, prevParts, msg);
         return new Promise(function (r) { setTimeout(r, 1500 * tries); }).then(call);
       });
     };
@@ -2038,9 +2105,10 @@ function cpZipOne(name, entries, note) {
     return CPDisk.proxyMpu({ op: 'done', key: up.key, uploadId: up.uploadId, parts: parts, filename: name + '.zip' });
   }).then(function (out) {
     if (res.files + skipped.length !== entries.length) throw new Error('в архив попало ' + res.files + ' файлов из ' + entries.length);
-    res.parts.push({ path: target, href: out.url, files: res.files, bytes: res.bytes, label: 'Скачать ZIP', cloud: true });
+    res.parts.push({ path: target, href: out.url, files: res.files, bytes: res.bytes, label: opts.label || 'Скачать ZIP', cloud: true });
     res.skipped = skipped;
     cbBusyHide();
+    if (opts.multi) return res;   /* части: карточку и загрузку покажет cpZipSplit */
     cpStartDownload(out.url);
     cpDlCard(name, note + (skipped.length ? ' Не попали — Яндекс не отдаёт файл (проверьте его на Диске): '
       + skipped.map(function (x) { return x.name.split('/').pop(); }).slice(0, 10).join(', ') + (skipped.length > 10 ? '…' : '') + '.' : ''), res.parts, '');
@@ -2050,7 +2118,7 @@ function cpZipOne(name, entries, note) {
     if (up) CPDisk.proxyMpu({ op: 'abort', key: up.key, uploadId: up.uploadId }).catch(function () { });
     var why = (e && (e.body || e.message)) || e;
     try { var j = JSON.parse(why); if (j && j.error) why = j.error; } catch (x) { }
-    if (!(e && e.status === 501 && !up)) cpDlCard(name, note, [], '', 'Не удалось собрать архив: ' + why + '. Нажмите «Скачать» ещё раз — если повторится, напишите, на каком файле.');
+    if (!(e && e.status === 501 && !up)) cpDlCard(name, note, prevParts, '', 'Не удалось собрать архив: ' + why + '. Нажмите «Скачать» ещё раз — если повторится, напишите, на каком файле.');
     throw e;
   });
 }

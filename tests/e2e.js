@@ -425,6 +425,20 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('файл, который Яндекс не отдаёт, — архив без него, в карточке «Не попали: c.jpg»', zBad.length === 3 && !zBad.some(n => /c\.jpg$/.test(n))
     && /Не попали[^.]*c\.jpg/.test(await page.textContent('#cpDlCard')), JSON.stringify(zBad) + ' ' + await page.textContent('#cpDlCard'));
   ZIPPART_BAD = null;
+  /* выборка больше порога — несколько архивов по папкам целиком (Маша, 08.11: 8,4 ГБ одним архивом
+     не скачивается; «по папкам целиком»), внутри у всех частей одна корневая папка */
+  const dlBefore = DOWNLOADS.length;
+  await page.evaluate(() => { CP.zipTarget = 250; CP.zipPartMin = 100; CP.zipSplitAt = 400; CP.zipPartSize = 360; document.getElementById('cpMenuDlAll').click(); });
+  await page.waitForFunction(() => /Часть 2 из/.test((document.getElementById('cpDlCard') || {}).textContent || '') && !/Собираю/.test(document.getElementById('cpDlCard').textContent), null, { timeout: 15000 }).catch(() => {});
+  const spl = [...ZIPS.entries()].filter(([k]) => /LM-1043_вся съёмка_3_ч\d+\.zip$/.test(k));
+  const splAll = spl.flatMap(([, v]) => v);
+  const withA = (spl.find(([, v]) => v.some(n => /\/a\.jpg$/.test(n))) || [, []])[1];
+  check('большая выборка: несколько архивов _ч1, _ч2…, папки целиком, одна корневая папка внутри',
+    spl.length >= 2 && splAll.length === 4 && splAll.every(n => n.indexOf('LM-1043_вся съёмка_3/') === 0)
+    && !withA.some(n => /part2\//.test(n)), JSON.stringify(spl));
+  check('карточка: кнопки «Часть 1 из N», каждая часть скачивается', await page.evaluate(() => document.querySelectorAll('#cpDlCard a.cp-dlcard-btn').length >= 2
+    && /Часть 1 из/.test(document.getElementById('cpDlCard').textContent)) && DOWNLOADS.length - dlBefore === spl.length, DOWNLOADS.slice(dlBefore).join(' | '));
+  await page.evaluate(() => { CP.zipSplitAt = 3.2 * 1024 * 1024 * 1024; CP.zipPartSize = 3 * 1024 * 1024 * 1024; });
   await page.evaluate(() => { CP.zipTarget = 400 * 1024 * 1024; CP.zipPartMin = 6 * 1024 * 1024; });
   await page.evaluate(() => { CP.zipTarget = 400 * 1024 * 1024; CP.zipPartMin = 6 * 1024 * 1024; CP.directMin = 48 * 1024 * 1024; });
 
