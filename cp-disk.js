@@ -342,6 +342,16 @@ var CPDisk = (function () {
     }, Promise.resolve([]));
   }
 
+  /** Ссылки на загрузку пробных файлов в Облако (проверка скорости). */
+  function proxySpeedUrls(n) {
+    return proxyReq({ a: 'speedurls', n: String(n) }, { as: 'json' });
+  }
+
+  /** Адрес, куда PUT-ом заливать файл на Диск (для своей загрузки с отменой). */
+  function uploadHref(path, overwrite) {
+    return api(ep(path, '/upload'), { path: path, overwrite: overwrite === false ? 'false' : 'true' }).then(function (d) { return d.href; });
+  }
+
   /** CRC куска файла Диска (для больших файлов в архиве). */
   function proxyCrc(body) {
     return proxyReq({ a: 'crc' }, { method: 'POST', body: body, as: 'json' });
@@ -477,6 +487,6 @@ var CPDisk = (function () {
     ensureDir: ensureDir, uploadBlob: uploadBlob, copy: copy, waitOperation: waitOperation,
     readState: readState, writeState: writeState, stateRev: stateRev, safeName: safeName,
     isVd: isVd, rootOf: rootOf, showPath: showPath, rawGet: rawGet,
-    trash: trash, proxyMove: proxyMove, proxyZipPart: proxyZipPart, proxyCrc: proxyCrc, meta: meta
+    trash: trash, proxyMove: proxyMove, proxyZipPart: proxyZipPart, proxyCrc: proxyCrc, meta: meta, proxySpeedUrls: proxySpeedUrls, uploadHref: uploadHref
   };
 })();

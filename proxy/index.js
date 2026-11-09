@@ -305,6 +305,31 @@ function s3Presign(key, ttl, filename, contentType) {
   return 'https://' + S3.host + s3Path(key) + '?' + qs + '&X-Amz-Signature=' + sig;
 }
 
+/** Ссылка на загрузку объекта из браузера (PUT): действует ttl секунд. */
+function s3PresignPut(key, ttl) {
+  const ad = amzDate(new Date()), date = ad.slice(0, 8);
+  const scope = date + '/' + S3.region + '/s3/aws4_request';
+  const q = { 'X-Amz-Algorithm': 'AWS4-HMAC-SHA256', 'X-Amz-Credential': S3.key + '/' + scope, 'X-Amz-Date': ad, 'X-Amz-Expires': String(ttl), 'X-Amz-SignedHeaders': 'host' };
+  const qs = s3Query(q);
+  const canon = ['PUT', s3Path(key), qs, 'host:' + S3.host + '\n', 'host', 'UNSIGNED-PAYLOAD'].join('\n');
+  const sts = ['AWS4-HMAC-SHA256', ad, scope, sha256hex(canon)].join('\n');
+  const sig = crypto.createHmac('sha256', s3SigningKey(date)).update(sts, 'utf8').digest('hex');
+  return 'https://' + S3.host + s3Path(key) + '?' + qs + '&X-Amz-Signature=' + sig;
+}
+
+/* Проверка скорости (Маша, 09.11: «куда быстрее зальются 15 ГБ — на Диск или в Облако»):
+   ссылки на загрузку пробных файлов прямо из браузера в бакет. Только настоящему
+   пользователю Диска; ключи в exports/ — бакет сам удалит их через 3 дня. */
+async function doSpeedUrls(token, n) {
+  if (!s3Ready()) return { status: 501, result: { error: 'Хранилище не настроено' } };
+  const me = await disk(token, 'GET', '', { fields: 'user' });
+  if (me.status !== 200) return { status: me.status, result: { error: me.data.message || 'Нет доступа к Диску' } };
+  const dir = 'exports/speed_' + crypto.randomBytes(8).toString('hex') + '/';
+  const urls = [];
+  for (let i = 0; i < Math.min(Math.max(+n || 1, 1), 200); i++) urls.push(s3PresignPut(dir + i + '.bin', 1800));
+  return { status: 200, result: { urls } };
+}
+
 /** PUT в бакет потоком с известной длиной. Интерфейс как у openUpload. */
 function openS3Upload(key, length, query, contentType) {
   const https = require('https');
@@ -1085,6 +1110,10 @@ module.exports.handler = async function (event) {
 
     /* Замер: как быстро Диск отдаёт кадры этой функции и принимает загрузку.
        POST {files:[до 4 путей]} -> {reads:[...], parallel:{...}, upload:{...}} */
+    if (a === 'speedurls') {
+      const r = await doSpeedUrls(token, q.n);
+      return json(r.status, r.result, h);
+    }
     if (a === 'bench') {
       if (event.httpMethod !== 'POST') return json(405, { error: 'Нужен POST' }, h);
       let body = event.body || '';
@@ -1200,5 +1229,5 @@ module.exports.handler = async function (event) {
 };
 
 /* для скриптов настройки и проверки (proxy/s3setup.js) */
-module.exports._s3 = { S3, s3Sign, s3Presign, openS3Upload, s3Ready, s3Call };
+module.exports._s3 = { S3, s3Sign, s3Presign, openS3Upload, s3Ready, s3Call, s3PresignPut };
 module.exports._zip = { doZipPart, doMultipart, doCrc };
