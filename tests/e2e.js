@@ -749,6 +749,42 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.uncheck('#cpRvOnly');
   }
 
+  /* на согласование — копия в 02 (Маша, 08.11: «отправила на согласование — в папке „Отбор“ ничего не появилось»);
+     сняли статус — копия в Корзину; на ретушь — из 02 в Корзину, в 03 — копия из исходников */
+  {
+    const AP = 'disk:/Этапы/02_ОТБОР', SN = '2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST';
+    ['disk:/Этапы', AP].forEach(d => DIRS.add(d));
+    const NEWF = 'disk:/Архив/' + SN + '/1/IMG_0105.jpg';
+    FILES.set(NEWF, Buffer.from('W'.repeat(110)));
+    await page.evaluate(() => cpSyncPhotos(false));
+    await page.waitForFunction(() => App.photos.some(p => p.name === 'IMG_0105.jpg'), null, { timeout: 8000 }).catch(() => {});
+    const ph = await page.evaluate(ap => {
+      CP.settings.approve = ap;
+      const inCard = {}; App.cards.forEach(c => cpCardPids(c).forEach(pid => { inCard[pid] = true; }));
+      const p = App.photos.find(x => x.disk && !x.missing && /\.jpg$/i.test(x.name) && !cpMeta().status[x.id] && !inCard[x.id]);
+      return p ? { id: p.id, rel: p.disk.slice(CP.shoot.path.length + 1) } : null;
+    }, AP);
+    check('есть кадр без статуса и карточки для проверки согласования', !!ph, '');
+    const ap2 = AP + '/' + SN + '/' + ph.rel;
+    await page.evaluate(id => cpDoAction('approval', [id], null), ph.id);
+    for (let i = 0; i < 60 && !FILES.has(ap2); i++) await page.waitForTimeout(100);
+    await page.waitForFunction(id => (cpMeta().ap2 || {})[id], ph.id, { timeout: 5000 }).catch(() => {});
+    check('«на согласование» — копия в 02_ОТБОР/<съёмка>/<как в исходниках>, путь запомнен', FILES.has(ap2) && await page.evaluate(id => !!cpMeta().ap2[id], ph.id), ap2);
+    await page.evaluate(id => cpDoAction('', [id], null), ph.id);
+    for (let i = 0; i < 60 && FILES.has(ap2); i++) await page.waitForTimeout(100);
+    check('сняли статус — копия из 02 в Корзине', !FILES.has(ap2) && TRASHED.includes(ap2), JSON.stringify(TRASHED.slice(-3)));
+    await page.evaluate(id => cpDoAction('approval', [id], null), ph.id);
+    for (let i = 0; i < 60 && !FILES.has(ap2); i++) await page.waitForTimeout(100);
+    await page.waitForFunction(id => (cpMeta().ap2 || {})[id], ph.id, { timeout: 5000 }).catch(() => {});
+    await page.evaluate(id => cpDoAction('retouch', [id], null), ph.id);
+    const rt3 = 'disk:/Архив/РЕТУШЬ/' + SN + '/' + ph.rel;
+    for (let i = 0; i < 60 && (FILES.has(ap2) || !FILES.has(rt3)); i++) await page.waitForTimeout(100);
+    check('с согласования на ретушь: из 02 — в Корзину, в 03 — копия (перенос)', !FILES.has(ap2) && FILES.has(rt3), JSON.stringify([FILES.has(ap2), FILES.has(rt3)]));
+    await page.evaluate(id => { delete CP.settings.approve; cpSetStatus([id], null, null); cbMarkDirty(); }, ph.id);
+    FILES.delete(rt3); FILES.delete(NEWF);
+    await page.evaluate(() => cpSyncPhotos(false));
+  }
+
   /* 04_ОТРЕТУШИРОВАНО (Маша, 06.11): сдача в папку этапа как в исходниках, «На сайт» — перенос в 05/<дата>/<съёмка>/<артикул>,
      «На доработку» — «_доработка» в 04, новая версия — рядом, старая папка в Корзину; выработка — таблица в служебной папке */
   {

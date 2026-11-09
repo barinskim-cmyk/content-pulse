@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.67';
+var CP_VERSION = '2.0.68';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -926,7 +926,7 @@ function cpMerge3(base, local, remote) {
   var bm = (base.meta || {}).cp || {}, lm = (local.meta || {}).cp || {}, rm = (remote.meta || {}).cp || {};
   out.meta = out.meta || {};
   var cp = out.meta.cp = cpClone(rm) || {};
-  ['status', 'cardStatus', 'downloads', 'likes', 'folderTags', 'delivered', 'rv'].forEach(function (k) { cp[k] = cpMergeMap(bm[k], lm[k], rm[k]); });
+  ['status', 'cardStatus', 'downloads', 'likes', 'folderTags', 'delivered', 'rv', 'ap2'].forEach(function (k) { cp[k] = cpMergeMap(bm[k], lm[k], rm[k]); });
   var seen = {}, ev = [];
   (rm.events || []).concat(lm.events || []).forEach(function (e) {
     var key = e.ts + '|' + e.action + '|' + e.actor + '|' + JSON.stringify(e.items || []);

@@ -318,6 +318,103 @@ cbRenderCards = (function (orig) {
   };
 })(cbRenderCards);
 
+/* ---------- на согласование: копия в 02 ----------
+   Маша, 08.11: «отобрала тестовую съёмку, отправила на согласование — в папке
+   „Отбор“ ничего не появилось». Шаг 2 отражения сервера: статус «на согласовании»
+   — это копия кадра в папке согласования (02_ОТБОР), структура как в исходниках,
+   кадр карточки артикула — в папке артикула. Сняли статус (руками, убрали кадр
+   из карточки, отправили на ретушь) — копия из 02 уходит в Корзину; на ретушь
+   кадр копируется из исходников в 03, так что 02 → 03 получается переносом.
+   Сверка идёт после каждой правки отбора: какие кадры на согласовании и какие
+   копии лежат в 02 (meta.cp.ap2: кадр → путь копии). */
+
+function cpApproveRoot() { return (CP.settings && CP.settings.approve) || ''; }
+
+var _cpApTimer = null, _cpApBusy = false;
+function cpApprovalSoon() {
+  if (!cpApproveRoot() || !CP.shoot || CP.readOnly) return;
+  clearTimeout(_cpApTimer);
+  _cpApTimer = setTimeout(cpApprovalSync, 400);
+}
+
+function cpApprovalSync() {
+  var root = cpApproveRoot();
+  if (!root || !CP.shoot || CP.readOnly) return Promise.resolve();
+  if (_cpApBusy) { cpApprovalSoon(); return Promise.resolve(); }
+  var m = cpMeta(), ap2 = m.ap2 = m.ap2 || {};
+  var shootPath = CP.shoot.path.replace(/\/+$/, ''), shootName = CP.shoot.name;
+  var base = root.replace(/\/+$/, '') + '/' + CPDisk.safeName(shootName);
+  var want = Object.keys(m.status).filter(function (pid) { return m.status[pid].s === 'approval'; });
+  var copy = want.filter(function (pid) { return !ap2[pid]; }).map(function (pid) {
+    var p = cbPhotoById(pid);
+    if (!p || !p.disk || p.missing || (p.kind || 'photo') === 'ref') return null;
+    var card = m.status[pid].card ? cbCardById(m.status[pid].card) : null;
+    return { pid: pid, from: p.disk, path: base + '/' + cpRetouchRel(p, card, shootPath) };
+  }).filter(Boolean);
+  var drop = Object.keys(ap2).filter(function (pid) { return !(m.status[pid] && m.status[pid].s === 'approval'); });
+  if (!copy.length && !drop.length) return Promise.resolve();
+  _cpApBusy = true;
+  var label = cpFolderBase(root), path = CP.shoot.path, msgs = [];
+  var step = copy.length ? cpCopyOnDisk(copy.map(function (x) { return { from: x.from, path: x.path }; }), [base], 'Копирую на согласование').then(function (r) {
+    cbBusyHide();
+    var failed = {};
+    (r.failedFrom || []).forEach(function (f) { failed[f] = true; });
+    copy.forEach(function (x) { if (!failed[x.from] && CP.shoot && CP.shoot.path === path) cpMeta().ap2[x.pid] = x.path; });
+    msgs.push('на согласование в ' + label + ': ' + (r.done + r.exists) + (r.failed.length ? ', не скопировано ' + r.failed.length : ''));
+    if (typeof cpReviewPresentStage === 'function') cpReviewPresentStage('approval', shootName, base);
+  }) : Promise.resolve();
+  return step.then(function () {
+    if (!drop.length) return;
+    var paths = drop.map(function (pid) { return ap2[pid]; });
+    return CPDisk.trash(paths).then(function (res) {
+      var ok = res.filter(function (x) { return x.status === 'done' || x.status === 'gone'; }).map(function (x) { return x.path; });
+      if (CP.shoot && CP.shoot.path === path) drop.forEach(function (pid) { if (ok.indexOf(ap2[pid]) !== -1) delete cpMeta().ap2[pid]; });
+      msgs.push('из ' + label + ' в Корзину: ' + ok.length);
+      /* опустевшие папки в 02 — тоже в Корзину (до папки 02 включительно не трогаем) */
+      var dirs = {};
+      ok.forEach(function (pth) { dirs[cpParentDir(pth)] = true; });
+      return Object.keys(dirs).reduce(function (pr, d) { return pr.then(function () { return cpTrashEmptyUp(d, root.replace(/\/+$/, '')); }); }, Promise.resolve());
+    });
+  }).then(function () {
+    _cpApBusy = false;
+    if (msgs.length && CP.shoot && CP.shoot.path === path) {
+      cpEvent('approval_sync', [], { note: msgs.join('; ') }, true);
+      cbToast(msgs.join(' · '));
+      cbMarkDirty();
+    }
+  }, function (e) {
+    _cpApBusy = false;
+    cbBusyHide();
+    cpHandleError(e, 'Копия на согласование');
+  });
+}
+
+/* открыли съёмку — то, что уже было на согласовании до этой версии, тоже ляжет в 02 */
+CP.openedHooks = CP.openedHooks || [];
+CP.openedHooks.push(function () {
+  var ready = typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : Promise.resolve();
+  ready.then(function () { setTimeout(cpApprovalSoon, 1500); });
+});
+
+/* после любой правки отбора — сверить согласование с папкой 02 */
+cbMarkDirty = (function (orig) {
+  return function () {
+    var r = orig.apply(this, arguments);
+    if (!_cpApBusy) cpApprovalSoon();
+    return r;
+  };
+})(cbMarkDirty);
+
+/** Съёмка появилась в папке этапа — сразу в фильтре, потом сверка с Диском. */
+function cpReviewPresentStage(key, shootName, dir) {
+  var low = String(shootName).toLowerCase();
+  CP.stagePresence = CP.stagePresence || {};
+  CP.stagePaths = CP.stagePaths || {};
+  (CP.stagePresence[key] = CP.stagePresence[key] || {})[low] = true;
+  var w = CP.stagePaths[key] = CP.stagePaths[key] || {};
+  if (!(w[low] || []).some(function (p) { return p === dir; })) w[low] = (w[low] || []).concat([dir]);
+}
+
 /* ---------- съёмка, открытая из фильтра этапа: только карточки этого этапа ----------
    Маша, 06.11: «отправила на сайт — карточка должна сразу испариться из этой
    презентации, её уже не нужно просматривать. В исходниках — не исчезает,
