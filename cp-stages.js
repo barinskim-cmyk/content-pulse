@@ -323,7 +323,8 @@ function cpArtBar(sum) {
     return x ? '<i class="cp-' + CP_ART_STAGES[i].cls + '" style="flex:' + x + '" title="' + cbEsc(cpArtLabel(i)) + ': ' + x + '"></i>' : '';
   }).join('') + '</div><div class="cp-artbar-leg">артикулов ' + n + k.map(function (x, i) {
     return x ? ' · <span><i class="cp-' + CP_ART_STAGES[i].cls + '"></i>' + cbEsc(cpArtLabel(i)) + ' <b>' + x + '</b></span>' : '';
-  }).join('') + '</div></div>';
+  }).join('') + (sum.empty ? ' · <span class="cp-warn" title="Карточка заведена по папке артикула, но кадров JPG в папке нет. Откройте съёмку — такая карточка помечена «нет кадров».">пустых карточек <b>' + sum.empty + '</b></span>' : '')
+    + '</div></div>';
 }
 
 cpRenderShoots = (function (orig) {

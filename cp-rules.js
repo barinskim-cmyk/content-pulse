@@ -256,6 +256,19 @@ function cpDecorateArticles() {
     var del = el.querySelector('.cb-card-head [data-act="del"]');
     if (del && cpCardDeleteBlocked(c)) del.style.display = 'none';
   });
+  /* Маша, 08.11: «пишет отобрано 19, а карточек 20 — почему?» — карточка товара, заведённая
+     по папке артикула, в которой нет кадров (пустая, только видео или не JPG), остаётся пустой.
+     Помечаем её, чтобы было видно, какая и почему. */
+  Array.prototype.forEach.call(document.querySelectorAll('#cbCards .cb-card'), function (el) {
+    var card = cbCardById(el.getAttribute('data-cid'));
+    var head = el.querySelector('.cb-card-head');
+    if (!card || !head || !card.cpAuto || head.querySelector('.cp-empty-art') || cpCardPids(card).length) return;
+    var chip = document.createElement('span');
+    chip.className = 'cp-art cp-art-warn cp-empty-art';
+    chip.textContent = 'нет кадров';
+    chip.title = 'Карточка заведена по папке ' + (card.cpArticleDir || card.title) + ', но кадров JPG в ней нет: папка пустая, в ней только видео или другой формат';
+    head.appendChild(chip);
+  });
   var type = cpShootType(CP.shoot.name);
   if (!type || !type.cardArticle) return;
   Array.prototype.forEach.call(document.querySelectorAll('#cbCards .cb-card'), function (el) {

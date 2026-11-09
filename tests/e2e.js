@@ -527,6 +527,12 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     var by = {}; App.cards.filter(c => c.cpAuto).forEach(c => { by[c.title] = cpCardPids(c).map(pid => cbPhotoById(pid).name); });
     return by['74595'] && by['74595'].join() === 'manekin.jpg' && by['74596'] && by['74596'].join() === 'manekin2.jpg' && by['74598'] && by['74598'].length === 0;
   }), JSON.stringify(await page.evaluate(() => App.cards.map(c => [c.title, cpCardPids(c).length]))));
+  check('пустая карточка по папке без кадров помечена «нет кадров» (с подсказкой, какая папка)', await page.evaluate(() => {
+    var el = document.querySelector('#cbCards .cb-card[data-cid="' + App.cards.find(c => c.title === '74598').id + '"]');
+    var chip = el.querySelector('.cp-empty-art');
+    var full = document.querySelector('#cbCards .cb-card[data-cid="' + App.cards.find(c => c.title === '74595').id + '"] .cp-empty-art');
+    return chip && chip.textContent === 'нет кадров' && /74598/.test(chip.title) && !full;
+  }));
   check('у карточки товара нет кнопки «Удалить» (удалять карточки товара: нет)', await page.evaluate(() => {
     var el = document.querySelector('#cbCards .cb-card[data-cid="' + App.cards.find(c => c.title === '74598').id + '"]');
     var del = el.querySelector('[data-act="del"]');

@@ -240,6 +240,7 @@ function cpArtBarPhys(sum, phys) {
   var leg = [];
   if (n) leg.push('артикулов ' + n);
   if (sum && sum.filled) leg.push('<span><i class="cp-k1"></i>отобрано <b>' + sum.filled + '</b></span>');
+  if (sum && sum.empty) leg.push('<span class="cp-warn" title="Карточка заведена по папке артикула, но кадров JPG в папке нет (пустая, только видео или другой формат). Откройте съёмку — такая карточка помечена «нет кадров».">пустых карточек <b>' + sum.empty + '</b></span>');
   phys.forEach(function (x) {
     leg.push('<span><i class="cp-' + CP_PHYS_CLS[x.key] + '"></i>' + cbEsc(x.label) + ' <b>' + (x.n < 0 ? 'есть' : x.n) + '</b>' + (x.took ? ' (забрали ' + x.took + ')' : '') + '</span>');
   });
