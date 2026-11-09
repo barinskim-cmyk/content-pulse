@@ -255,6 +255,11 @@ var CPDisk = (function () {
     }, Promise.resolve());
   }
 
+  /** Одна папка (родитель уже есть); уже есть — не ошибка. */
+  function mkdir(path) {
+    return api(ep(path), { path: path }, 'PUT').catch(function (e) { if (e.status !== 409) throw e; });
+  }
+
   /** Залить файл. onProgress(загружено байт) — по ходу загрузки (XHR: у fetch нет прогресса отправки). */
   function uploadBlob(path, blob, overwrite, onProgress) {
     return api(ep(path, '/upload'), { path: path, overwrite: overwrite === false ? 'false' : 'true' })
@@ -464,6 +469,7 @@ var CPDisk = (function () {
     proxyPreview: proxyPreview, proxyPreviews: proxyPreviews, proxyDlTest: proxyDlTest, proxyZip: proxyZip, proxyBench: proxyBench, proxyMpu: proxyMpu, proxyFile: proxyFile, proxyCopy: proxyCopy, proxyProps: proxyProps,
     hasToken: function () { return !!token; },
     isPhoto: function (name) { return PHOTO_RE.test(name || ''); },
+    mkdir: mkdir,
     DiskError: DiskError,
     STATE_FILE: STATE_FILE, RETOUCH_DIR: RETOUCH_DIR,
     info: info, listDir: listDir, listShoots: listShoots, walkPhotos: walkPhotos,

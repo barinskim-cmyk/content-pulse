@@ -49,6 +49,7 @@ const log = [];
 const DOWNLOADS = [];
 const DOWNLOADS_REFERER = [];
 const ZIPS = new Map();
+const UPLOADS = [];   /* что и в каком порядке залито на Диск */
 const FRESH = new Map();   /* как у Яндекса: новый файл появляется в списке папки не сразу */
 const CLOUD = new Map();
 const MPU = new Map();
@@ -106,7 +107,12 @@ async function route(r) {
     /* с октября 2026 Яндекс не отдаёт папки архивом */
     if (pn === '/v1/disk/resources/download' && DIRS.has(p)) return json(500, { error: 'InternalServerError', message: 'Ошибка сервера.' });
     if (pn === '/v1/disk/resources/download') return json(200, { href: 'https://downloader.disk.yandex.ru/dl?p=' + encodeURIComponent(p) });
-    if (pn === '/v1/disk/resources/upload') return json(200, { href: 'https://uploader1.disk.yandex.net/up?p=' + encodeURIComponent(p) });
+    if (pn === '/v1/disk/resources/upload') {
+      /* как у Яндекса: нет папки — 409; файл есть, а перезаписывать нельзя — 409 */
+      if (!DIRS.has(p.slice(0, p.lastIndexOf('/')))) return json(409, { error: 'DiskPathDoesntExistsError', message: 'нет папки' });
+      if (q.overwrite === 'false' && FILES.has(p)) return json(409, { error: 'DiskResourceAlreadyExistsError', message: 'exists' });
+      return json(200, { href: 'https://uploader1.disk.yandex.net/up?p=' + encodeURIComponent(p) });
+    }
     if (pn === '/v1/disk/resources/copy' && m === 'POST') {
       if (FILES.has(q.path)) return json(409, { message: 'exists' });
       FILES.set(q.path, FILES.get(q.from)); return json(201, {});
@@ -273,7 +279,7 @@ async function route(r) {
     DOWNLOADS.push(CLOUD.get(key));
     return r.fulfill({ status: 200, headers: { 'content-type': 'application/zip', 'content-disposition': 'attachment; filename="x.zip"' }, body: 'PK' });
   }
-  if (u.host === 'uploader1.disk.yandex.net') { if (!FILES.has(q.p)) FRESH.set(q.p, Date.now()); FILES.set(q.p, req.postDataBuffer()); return r.fulfill({ status: 201, headers: CORS, body: '' }); }
+  if (u.host === 'uploader1.disk.yandex.net') { UPLOADS.push(q.p); if (!FILES.has(q.p)) FRESH.set(q.p, Date.now()); FILES.set(q.p, req.postDataBuffer()); return r.fulfill({ status: 201, headers: CORS, body: '' }); }
   return r.continue();
 }
 
@@ -1589,6 +1595,67 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.waitForFunction(() => CP_CONFIG.serviceDir === 'disk:/_ContentPulse' && !CP.catalogList, null, { timeout: 8000 }).catch(() => {});
     check('обычный архив снова — не каталог', await page.evaluate(() => CP_CONFIG.serviceDir === 'disk:/_ContentPulse' && !document.getElementById('cpSettings').classList.contains('cp-cat')));
     await page.keyboard.press('Escape');
+  }
+
+  /* загрузка в исходники (Маша, 09.11): папкой, как на Диск; «…_2» — часть той же съёмки; сначала кадры, потом видео */
+  {
+    await page.evaluate(() => { CP.stageFilter = ''; cpRenderShoots(); });
+    check('исходники: сверху полоска «Загрузить съёмку»', /Загрузить съёмку/.test(await page.textContent('#cpSrcDrop').catch(() => '')));
+    /* перетащили отдельный файл — окно открылось, файл без папки съёмки не загрузится */
+    await page.evaluate(() => {
+      const dt = new DataTransfer(); dt.items.add(new File(['x'], 'x.jpg', { type: 'image/jpeg' }));
+      document.getElementById('cpSrcDrop').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+    });
+    await page.waitForFunction(() => /без папки съёмки не загрузятся \(1\)/.test((document.getElementById('cpSrcUp') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => {});
+    check('перетащили файл без папки — окно «Загрузить в Архив», «без папки съёмки не загрузятся (1)», в галерею не попал', /Загрузить в Архив/.test(await page.textContent('#cpSrcUp'))
+      && /без папки съёмки не загрузятся \(1\)/.test(await page.textContent('#cpSrcUp')) && await page.evaluate(() => !App.photos.some(p => p.name === 'x.jpg')), await page.textContent('#cpSrcUp'));
+    /* новая съёмка папкой: кадры, потом видео */
+    const NEW = '2026-11-09_SV_НОВАЯ', up0 = UPLOADS.length;
+    await page.evaluate(n => {
+      CP.srcUp.files = []; CP.srcUp.plan = null;
+      cpSrcAdd([[n + '/видео/v.mp4', 'V'.repeat(90)], [n + '/1/a.jpg', 'A'.repeat(30)], [n + '/1/74001/b.jpg', 'B'.repeat(31)], [n + '/.DS_Store', 'x']]
+        .map(x => ({ file: new File([x[1]], x[0].split('/').pop()), rel: x[0] })));
+    }, NEW);
+    await page.waitForFunction(() => /кадров 2/.test((document.getElementById('cpSrcUp') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => {});
+    const pl = await page.textContent('#cpSrcUp');
+    await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-srcup.png') });
+    check('новая папка — «новая съёмка», кадров 2, видео 1 (после кадров), мусор не считается', /новая съёмка/.test(pl) && /кадров 2/.test(pl) && /видео 1 · .*после кадров/.test(pl) && /Файлов: 3/.test(pl), pl);
+    await page.click('[data-cp-su="go"]');
+    await page.waitForFunction(() => /Загружено файлов: 3/.test((document.getElementById('cpSrcUp') || {}).textContent || ''), null, { timeout: 10000 }).catch(() => {});
+    const order = UPLOADS.slice(up0);
+    check('залито в Архив/<съёмка>/… со структурой, видео — последним', FILES.has('disk:/Архив/' + NEW + '/1/74001/b.jpg') && FILES.has('disk:/Архив/' + NEW + '/видео/v.mp4')
+      && order.length === 3 && /v\.mp4$/.test(order[2]) && !order.some(p => /DS_Store/.test(p)), JSON.stringify(order));
+    await page.waitForFunction(n => CP.shoots && CP.shoots.some(s => s.name === n), NEW, { timeout: 8000 }).catch(() => {});
+    check('новая съёмка сразу на витрине', await page.evaluate(n => CP.shoots.some(s => s.name === n), NEW));
+    await page.click('[data-cp-su="close"]');
+    /* «LM-1043_2» — часть LM-1043: добавляется в её папки; тот же файл — пропуск, то же имя с другим размером — рядом «_2» */
+    const bBefore = FILES.get('disk:/Архив/LM-1043/b.jpg').toString();
+    await page.evaluate(() => {
+      cpSrcOpen(null);
+      cpSrcAdd([['LM-1043_2/part2/e.jpg', 'E'.repeat(20)], ['LM-1043_2/a.jpg', 'A'.repeat(100)], ['LM-1043_2/b.jpg', 'Q'.repeat(77)]]
+        .map(x => ({ file: new File([x[1]], x[0].split('/').pop()), rel: x[0] })));
+    });
+    await page.waitForFunction(() => /часть съёмки/.test((document.getElementById('cpSrcUp') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => {});
+    const pp = await page.textContent('#cpSrcUp');
+    check('«LM-1043_2» — часть съёмки LM-1043: тот же файл — пропуск, другой с тем же именем — рядом «_2»', /LM-1043/.test(pp) && /часть съёмки \(из «LM-1043_2»\)/.test(pp)
+      && /пропущу: 1/.test(pp) && /рядом с «_2»: 1/.test(pp) && /Файлов: 2/.test(pp), pp);
+    await page.click('[data-cp-su="go"]');
+    await page.waitForFunction(() => /Загружено файлов: 2/.test((document.getElementById('cpSrcUp') || {}).textContent || ''), null, { timeout: 10000 }).catch(() => {});
+    check('догружено в LM-1043 по структуре: part2/e.jpg, b_2.jpg; исходник b.jpg не тронут', FILES.has('disk:/Архив/LM-1043/part2/e.jpg') && FILES.has('disk:/Архив/LM-1043/b_2.jpg')
+      && FILES.get('disk:/Архив/LM-1043/b.jpg').toString() === bBefore && !FILES.has('disk:/Архив/LM-1043_2/a.jpg'), JSON.stringify(UPLOADS.slice(-3)));
+    await page.click('[data-cp-su="close"]');
+    /* «Догрузить» в панели съёмки: папка «видео» — в эту съёмку, как есть */
+    await page.click('#cpShelfList .cp-shoot[data-name="LM-2001"]');
+    await page.waitForSelector('#cpPanel [data-cp-srcup]', { timeout: 8000 }).catch(() => {});
+    await page.click('#cpPanel [data-cp-srcup]');
+    await page.evaluate(() => cpSrcAdd([{ file: new File(['C'.repeat(55)], 'clip2.mov'), rel: 'видео/clip2.mov' }]));
+    await page.waitForFunction(() => /догрузка/.test((document.getElementById('cpSrcUp') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => {});
+    check('«Догрузить» в панели съёмки: окно «Догрузить в съёмку · LM-2001», видео 1', /Догрузить в съёмку · LM-2001/.test(await page.textContent('#cpSrcUp')) && /видео 1/.test(await page.textContent('#cpSrcUp')), await page.textContent('#cpSrcUp'));
+    await page.click('[data-cp-su="go"]');
+    for (let i = 0; i < 60 && !FILES.has('disk:/Архив/LM-2001/видео/clip2.mov'); i++) await page.waitForTimeout(100);
+    check('догружено: LM-2001/видео/clip2.mov', FILES.has('disk:/Архив/LM-2001/видео/clip2.mov'));
+    await page.click('[data-cp-su="close"]');
+    await page.click('[data-cp-p="close"]').catch(() => {});
   }
 
   /* вышла новая версия: плашка «Обновить» — страница с ?v=<версия>, мимо кэша Safari */
