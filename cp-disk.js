@@ -342,6 +342,21 @@ var CPDisk = (function () {
     }, Promise.resolve([]));
   }
 
+  /** Загрузка в исходники через Облако: body {op: start|done|fetch, ...} (см. proxy/index.js doCloudUp). */
+  function proxyCloudUp(body) {
+    return proxyReq({ a: 'cloudup' }, { method: 'POST', body: body, as: 'json' });
+  }
+
+  /** Состояние операции Диска по её адресу: 'success' | 'failed' | 'in-progress'. */
+  function opStatus(href) {
+    return req(href, { retries: 1 }).then(function (d) { return d.status || 'in-progress'; });
+  }
+
+  /** Удалить свой служебный временный файл насовсем (не данные пользователя). */
+  function removeTemp(path) {
+    return api(ep(path), { path: path, permanently: 'true' }, 'DELETE').catch(function (e) { if (e.status !== 404) throw e; });
+  }
+
   /** Ссылки на загрузку пробных файлов в Облако (проверка скорости). */
   function proxySpeedUrls(n) {
     return proxyReq({ a: 'speedurls', n: String(n) }, { as: 'json' });
@@ -487,6 +502,6 @@ var CPDisk = (function () {
     ensureDir: ensureDir, uploadBlob: uploadBlob, copy: copy, waitOperation: waitOperation,
     readState: readState, writeState: writeState, stateRev: stateRev, safeName: safeName,
     isVd: isVd, rootOf: rootOf, showPath: showPath, rawGet: rawGet,
-    trash: trash, proxyMove: proxyMove, proxyZipPart: proxyZipPart, proxyCrc: proxyCrc, meta: meta, proxySpeedUrls: proxySpeedUrls, uploadHref: uploadHref
+    trash: trash, proxyMove: proxyMove, proxyZipPart: proxyZipPart, proxyCrc: proxyCrc, meta: meta, proxySpeedUrls: proxySpeedUrls, uploadHref: uploadHref, proxyCloudUp: proxyCloudUp, opStatus: opStatus, removeTemp: removeTemp
   };
 })();
