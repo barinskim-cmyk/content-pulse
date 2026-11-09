@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.68';
+var CP_VERSION = '2.0.69';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1873,39 +1873,126 @@ function cpZipExport(name, entries, note) {
 }
 
 /** Один архив, собранный за несколько вызовов прослойки. */
+/* Большие файлы (видео) — в том же архиве, но кусками (Маша, 08.11: «видео скачалось, но
+   15 архивов — почему на 5 ГБ 15 архивов?»): раньше каждое видео крупнее 48 МБ шло отдельной
+   ссылкой. Теперь файл крупнее CP.zipBigMin режется на куски по CP.zipSlice: сначала прослойка
+   считает контрольную сумму каждого куска (CRC складываются здесь), потом куски ложатся в
+   архив — каждый вызов короткий. Отдельной ссылкой — только файл больше 4 ГБ. */
+CP.zipBigMin = 64 * 1024 * 1024;
+CP.zipSlice = 256 * 1024 * 1024;
+
+/** CRC двух кусков подряд: crc1 — первого, crc2 — второго длиной len2 (как crc32_combine в zlib). */
+function cpCrcCombine(crc1, crc2, len2) {
+  if (len2 <= 0) return crc1 >>> 0;
+  var times = function (mat, vec) { var sum = 0, i = 0; vec >>>= 0; while (vec) { if (vec & 1) sum ^= mat[i]; vec >>>= 1; i++; } return sum >>> 0; };
+  var square = function (sq, mat) { for (var n = 0; n < 32; n++) sq[n] = times(mat, mat[n]); };
+  var even = new Array(32), odd = new Array(32), row = 1;
+  odd[0] = 0xedb88320;
+  for (var n = 1; n < 32; n++) { odd[n] = row >>> 0; row = (row << 1) >>> 0; }
+  square(even, odd);
+  square(odd, even);
+  crc1 >>>= 0;
+  do {
+    square(even, odd);
+    if (len2 % 2) crc1 = times(even, crc1);
+    len2 = Math.floor(len2 / 2);
+    if (!len2) break;
+    square(odd, even);
+    if (len2 % 2) crc1 = times(odd, crc1);
+    len2 = Math.floor(len2 / 2);
+  } while (len2);
+  return (crc1 ^ crc2) >>> 0;
+}
+
+/** Один архив, собранный за несколько вызовов прослойки. */
 function cpZipOne(name, entries, note) {
   var total = entries.reduce(function (a, e) { return a + e.size; }, 0);
   var target = cpExportsDir() + '/' + name + '.zip';
   var res = { parts: [], files: 0, bytes: 0 };
-  var up = null, parts = [], done = [], offset = 0, n = 0, i = 0, ts = Date.now(), skipped = [];
+  var up = null, parts = [], done = [], offset = 0, n = 0, pi = 0, ts = Date.now(), skipped = [];
+  /* куски: файл целиком или кусок большого файла */
+  var pieces = [];
+  var cut = function () {
+    pieces = [];
+    entries.forEach(function (e) {
+      if (e.size > CP.zipBigMin && !e.noSlice) {
+        for (var st = 0; st < e.size; st += CP.zipSlice) {
+          pieces.push({ e: e, start: st, end: Math.min(e.size, st + CP.zipSlice) - 1, head: st === 0, last: st + CP.zipSlice >= e.size });
+        }
+      } else pieces.push({ e: e, whole: true, last: true });
+    });
+  };
+  cut();
+  var lenOf = function (p) { return p.whole ? p.e.size : p.end - p.start + 1; };
   cpDlCard(name, note, [], 'Собираю архив...');
+
+  /* контрольные суммы больших файлов — по кускам */
+  function crcBig() {
+    var big = entries.filter(function (e) { return e.size > CP.zipBigMin && !e.noSlice; });
+    if (!big.length) return Promise.resolve();
+    var all = big.reduce(function (a, e) { return a + e.size; }, 0), seen = 0;
+    return big.reduce(function (chain, e) {
+      return chain.then(function () {
+        var sl = pieces.filter(function (p) { return p.e === e; });
+        var show = function () {
+          var msg = 'Считаю контрольную сумму видео: ' + cpMb(seen) + ' из ' + cpMb(all);
+          cbBusyShow(msg, Math.max(0.02, 0.3 * seen / all));
+          cpDlCard(name, note, [], msg);
+        };
+        show();
+        /* куски одного файла — по три сразу, суммы складываются по порядку */
+        return cpPool(sl, 3, function (p) {
+          return CPDisk.proxyCrc({ from: e.from, start: p.start, end: p.end }).then(function (r) {
+            seen += p.end - p.start + 1;
+            show();
+            return r.crc >>> 0;
+          });
+        }).then(function (crcs) {
+          var crc = crcs[0];
+          for (var k = 1; k < crcs.length; k++) crc = cpCrcCombine(crc, crcs[k], sl[k].end - sl[k].start + 1);
+          e.crc = crc;
+        }, function (err) {
+          /* Диск не отдаёт файл кусками — этот файл целиком одним вызовом */
+          if (err && /range_unsupported/.test(err.body || '')) { e.noSlice = true; return; }
+          throw err;
+        });
+      });
+    }, Promise.resolve()).then(cut);
+  }
+
   function nextChunk() {
     var chunk = [], bytes = 0;
     var want = Math.max(CP.zipTarget, CP.zipPartMin);
-    while (i < entries.length && (!chunk.length || bytes < want)) { chunk.push(entries[i]); bytes += entries[i].size; i++; }
+    while (pi < pieces.length && (!chunk.length || bytes < want)) { chunk.push(pieces[pi]); bytes += lenOf(pieces[pi]); pi++; }
     /* хвост меньше минимального куска — забираем в этот вызов */
     var rest = 0;
-    for (var j = i; j < entries.length; j++) rest += entries[j].size;
-    if (rest > 0 && rest < CP.zipPartMin) while (i < entries.length) { chunk.push(entries[i]); bytes += entries[i].size; i++; }
-    var final = i >= entries.length;
+    for (var j = pi; j < pieces.length; j++) rest += lenOf(pieces[j]);
+    if (rest > 0 && rest < CP.zipPartMin) while (pi < pieces.length) { chunk.push(pieces[pi]); bytes += lenOf(pieces[pi]); pi++; }
+    var final = pi >= pieces.length;
     n++;
-    var msg = 'Собираю архив ' + name + ': ' + cpMb(res.bytes + bytes) + ' из ' + cpMb(total) + ' · кадров ' + (res.files + chunk.length) + ' из ' + entries.length;
+    var nFiles = function (list) { return list.filter(function (p) { return p.last; }).length; };
+    var msg = 'Собираю архив ' + name + ': ' + cpMb(res.bytes + bytes) + ' из ' + cpMb(total) + ' · файлов ' + (res.files + nFiles(chunk)) + ' из ' + entries.length;
     cbBusyShow(msg, Math.max(0.03, res.bytes / Math.max(1, total)));
     cpDlCard(name, note, [], msg);
     var t0 = Date.now();
     var tick = setInterval(function () {
       cbBusyShow(msg + ' · ' + Math.round((Date.now() - t0) / 1000) + ' с', Math.max(0.03, res.bytes / Math.max(1, total)));
     }, 1000);
+    var asEntry = function (p) {
+      var x = { from: p.e.from, name: name + '/' + p.e.name, size: p.e.size };
+      if (!p.whole) { x.start = p.start; x.end = p.end; x.head = p.head; x.crc = p.e.crc; }
+      return x;
+    };
     var body = {
       key: up.key, uploadId: up.uploadId, n: n, ts: ts, offset: offset, target: target, final: final,
-      entries: chunk.map(function (e) { return { from: e.from, name: name + '/' + e.name, size: e.size }; }),
+      entries: chunk.map(asEntry),
       done: final ? done : undefined
     };
     /* сеть оборвалась посреди куска (Яндекс: «terminated») — тот же кусок ещё раз:
        облако примет его под тем же номером поверх недописанного.
        Яндекс не отдаёт конкретный файл (Маша, 08.11: «ПустоеИмя_2.jpg: файл не отдан,
        HTTP 500» — прослойка уже повторила его трижды) — собираем кусок без него и
-       пишем в карточке, что не попало. */
+       пишем в карточке, что не попало (только целые файлы: кусок большого не выкинешь). */
     var tries = 0;
     var call = function () {
       return CPDisk.proxyZipPart(body).catch(function (e) {
@@ -1913,11 +2000,11 @@ function cpZipOne(name, entries, note) {
         try { j = JSON.parse(e && e.body); } catch (x) { }
         if (j && j.from && /не отдан|не выдана|terminated|нет ответа/.test(j.error || '') && skipped.length < 30) {
           var bad = null;
-          chunk = chunk.filter(function (c) { if (!bad && c.from === j.from) { bad = c; return false; } return true; });
+          chunk = chunk.filter(function (c) { if (!bad && c.whole && c.e.from === j.from) { bad = c; return false; } return true; });
           if (bad) {
-            skipped.push({ name: bad.name, why: j.error });
-            bytes -= bad.size;
-            body.entries = body.entries.filter(function (x) { return x.from !== j.from; });
+            skipped.push({ name: bad.e.name, why: j.error });
+            bytes -= bad.e.size;
+            body.entries = chunk.map(asEntry);
             if (!body.entries.length && !final) return null;   /* кусок опустел — его номер возьмёт следующий */
             return call();
           }
@@ -1932,11 +2019,12 @@ function cpZipOne(name, entries, note) {
     return call().then(function (r) {
       clearInterval(tick);
       if (r === null) { n--; return final ? null : nextChunk(); }
-      if (!r || !r.etag || !Array.isArray(r.done) || r.done.length !== chunk.length) throw new Error('кусок архива ' + n + ' собран не полностью');
+      var heads = chunk.filter(function (p) { return p.whole || p.head; }).length;
+      if (!r || !r.etag || !Array.isArray(r.done) || r.done.length !== heads) throw new Error('кусок архива ' + n + ' собран не полностью');
       parts.push({ n: r.n, etag: r.etag });
       done = done.concat(r.done);
       offset = r.next;
-      res.files += chunk.length;
+      res.files += nFiles(chunk);
       res.bytes += bytes;
       var ms = Math.max(1000, Date.now() - t0);
       CP.zipTarget = Math.max(CP_ZIP_MIN, Math.min(CP_ZIP_MAX, Math.round(bytes / ms * CP_ZIP_PART_MS)));
@@ -1945,8 +2033,8 @@ function cpZipOne(name, entries, note) {
   }
   return CPDisk.proxyMpu({ op: 'start', type: 'application/zip' }).then(function (st) {
     up = st;
-    return nextChunk();
-  }).then(function () {
+    return crcBig();
+  }).then(nextChunk).then(function () {
     return CPDisk.proxyMpu({ op: 'done', key: up.key, uploadId: up.uploadId, parts: parts, filename: name + '.zip' });
   }).then(function (out) {
     if (res.files + skipped.length !== entries.length) throw new Error('в архив попало ' + res.files + ' файлов из ' + entries.length);
@@ -2022,9 +2110,10 @@ function cpZipParts(name, entries, note) {
   });
 }
 
-/* Крупные файлы (видео) идут не в архив, а отдельной ссылкой: функция
-   переносит их в облако кусками по CP.directPart — каждый вызов короткий. */
-CP.directMin = 48 * 1024 * 1024;   /* всё крупнее (видео) — отдельной ссылкой, не в архив */
+/* Отдельной ссылкой (не в архив) — только видео больше 4 ГБ: такой файл в ZIP не помещается
+   одной записью. Остальные видео — в архиве кусками (cpZipOne). Функция переносит такой файл
+   в облако кусками по CP.directPart — каждый вызов короткий. */
+CP.directMin = 3.9 * 1024 * 1024 * 1024;
 CP.directPart = 256 * 1024 * 1024;
 
 function cpDirectExport(e, onProgress) {

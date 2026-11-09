@@ -59,6 +59,7 @@ const PREVIEW_CALLS = { single: 0, batch: 0, big: 0 };
 if (process.env.BLOCK_PREVIEW) for (const k of [...FILES.keys()]) FILES.set(k, png(60, 40));
 const md5 = (b) => require('crypto').createHash('md5').update(b).digest('hex');
 const TRASHED = [], MOVED = [], ZIPPART_CALLS = [];
+const CRC_CALLS = [], ZIP_SLICES = [];
 let ZIPPART_FAIL_ONCE = null, ZIPPART_BAD = null;   /* ZIPPART_BAD — файл, который Яндекс не отдаёт (HTTP 500) */   /* оборвать один кусок архива — страница должна повторить */   /* что ушло в Корзину Диска / перенесено между этапами */
 const PROPS = new Map();   /* custom_properties папок (сводка съёмки) */
 const meta = (p) => {
@@ -205,6 +206,12 @@ async function route(r) {
       }
       return json(200, { ok: true });
     }
+    if (q.a === 'crc' && m === 'POST') {
+      const b = JSON.parse(req.postData() || '{}');
+      if (!FILES.has(b.from)) return json(422, { error: 'нет файла', from: b.from });
+      CRC_CALLS.push(b.from + ' ' + b.start + '-' + b.end);
+      return json(200, { crc: 0, n: b.end - b.start + 1 });
+    }
     if (q.a === 'zippart' && m === 'POST') {
       const b = JSON.parse(req.postData() || '{}');
       const u = MPU.get(b.key);
@@ -212,15 +219,22 @@ async function route(r) {
       for (const e of b.entries) {
         if (!FILES.has(e.from)) return json(422, { error: 'нет файла ' + e.from });
         if (FILES.get(e.from).length !== e.size) return json(422, { error: 'размер изменился ' + e.from });
+        if (e.start !== undefined && !(e.start >= 0 && e.end < e.size && e.end >= e.start)) return json(400, { error: 'кусок за пределами файла' });
       }
       if (b.n !== (u.calls || 0) + 1 || b.offset !== (u.next || 0)) return json(400, { error: 'кусок не по порядку' });
       const bad = b.entries.find(e => e.from === ZIPPART_BAD);
       if (bad) return json(422, { error: bad.from.split('/').pop() + ': файл не отдан, HTTP 500', from: bad.from });
       if (ZIPPART_FAIL_ONCE && !ZIPPART_FAIL_ONCE.done) { ZIPPART_FAIL_ONCE.done = true; return json(422, { error: 'IMG_0101.jpg: terminated' }); }
       ZIPPART_CALLS.push(b.n);
-      u.zip = true; u.target = b.target; u.calls = b.n; u.names = (u.names || []).concat(b.entries.map(e => e.name));
+      b.entries.filter(e => e.start !== undefined).forEach(e => ZIP_SLICES.push(e.name + ' ' + e.start + '-' + e.end + (e.head ? ' head' : '')));
+      u.zip = true; u.target = b.target; u.calls = b.n; u.names = (u.names || []).concat(b.entries.filter(e => e.start === undefined || e.head).map(e => e.name));
       let off = b.offset;
-      const done = b.entries.map(e => { const d = { name: e.name, size: e.size, crc: 1, offset: off }; off += 30 + Buffer.byteLength(e.name) + e.size; return d; });
+      const done = [];
+      b.entries.forEach(e => {
+        if (e.start === undefined) { done.push({ name: e.name, size: e.size, crc: 1, offset: off }); off += 30 + Buffer.byteLength(e.name) + e.size; return; }
+        if (e.head) { done.push({ name: e.name, size: e.size, crc: e.crc, offset: off }); off += 30 + Buffer.byteLength(e.name); }
+        off += e.end - e.start + 1;
+      });
       u.next = off;
       if (b.final && (b.done || []).length + done.length !== u.names.length) return json(400, { error: 'оглавление неполное' });
       return json(200, { n: b.n, etag: '"z' + b.n + '"', next: off, bytes: off - b.offset, done });
@@ -952,7 +966,22 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   await page.waitForFunction(() => [...document.querySelectorAll('#cpDlCard a.cp-dlcard-btn')].some(a => a.textContent === 'clip.mp4'), null, { timeout: 10000 });
   for (let i = 0; i < 30 && !DOWNLOADS.some(p => /видео\/clip\.mp4$/.test(p)); i++) await page.waitForTimeout(100);
   check('крупное видео — отдельной ссылкой, перенесено частями и скачивается', MPU_PARTS.length === 3 && DOWNLOADS.some(p => /видео\/clip\.mp4$/.test(p)), MPU_PARTS.join(',') + ' :: ' + DOWNLOADS.slice(-3).join(' | '));
-  await page.evaluate(() => { CP.directMin = 200 * 1024 * 1024; CP.directPart = 256 * 1024 * 1024; });
+  await page.evaluate(() => { CP.directMin = 3.9 * 1024 * 1024 * 1024; CP.directPart = 256 * 1024 * 1024; });
+  /* видео — в том же архиве, кусками (Маша, 08.11: «на 5 ГБ 15 архивов»): clip.mp4 (500 байт) — «большой», куски по 200 */
+  {
+    const crcBefore = CRC_CALLS.length, slBefore = ZIP_SLICES.length, zBefore = new Set(ZIPS.keys());
+    await page.evaluate(() => { CP.zipBigMin = 300; CP.zipSlice = 200; CP.zipTarget = 250; CP.zipPartMin = 100; });
+    await page.click('[data-cp-p="download"]');
+    for (let i = 0; i < 80 && ![...ZIPS.keys()].some(k => !zBefore.has(k)); i++) await page.waitForTimeout(100);
+    const zk = [...ZIPS.keys()].find(k => !zBefore.has(k));
+    const zn = zk ? ZIPS.get(zk) : [];
+    check('видео — в том же архиве одним файлом: контрольная сумма по кускам (3), в архив тремя кусками, отдельных ссылок нет',
+      zn.filter(n => /видео\/clip\.mp4$/.test(n)).length === 1 && CRC_CALLS.length - crcBefore === 3 && ZIP_SLICES.length - slBefore === 3
+      && ZIP_SLICES.slice(slBefore).filter(x => / head$/.test(x)).length === 1
+      && !(await page.evaluate(() => [...document.querySelectorAll('#cpDlCard a.cp-dlcard-btn')].some(a => a.textContent === 'clip.mp4'))),
+      JSON.stringify([zk, zn, CRC_CALLS.slice(crcBefore), ZIP_SLICES.slice(slBefore)]));
+    await page.evaluate(() => { CP.zipBigMin = 64 * 1024 * 1024; CP.zipSlice = 256 * 1024 * 1024; CP.zipTarget = 400 * 1024 * 1024; CP.zipPartMin = 6 * 1024 * 1024; });
+  }
   const zVid = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST_1\.zip$/.test(k)).flatMap(([, v]) => v);
   check('«скачать всё» из исходников: структура как на Диске, кадр карточки артикула — в папке артикула (и кадр лука, попавший в карточку)',
     zVid.some(n => /_1\/1\/74595_модель\/IMG_0101\.jpg$/.test(n)) && zVid.some(n => /_1\/1\/74595_модель\/manekin\.jpg$/.test(n)) && !zVid.some(n => /_1\/74595\//.test(n)), zVid.join(' | '));
@@ -973,12 +1002,11 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     document.querySelector('[data-cp-fold="1/74596_модель"]').checked && document.querySelector('[data-cp-fold="1/74596_модель"]').disabled && !CP.sel.folders['1/74596_модель']));
   await page.uncheck('[data-cp-fold="1"]');
   await page.check('[data-cp-fold="1/74595_модель"]');
-  const zipsBefore = ZIPS.size;
+  const zipsBefore = new Set(ZIPS.keys());
   await page.click('[data-cp-p="download"]');
-  await page.waitForFunction(n => window.__zipsDone === undefined || true, zipsBefore);
-  await page.waitForTimeout(1500);
-  const zSub = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST_2\.zip$/.test(k)).flatMap(([, v]) => v);
-  check('«Скачать отмеченные» по вложенной папке: в архиве только её кадры', zSub.length === 2 && zSub.every(n => /_2\/1\/74595_модель\//.test(n)), zSub.join(' | '));
+  for (let i = 0; i < 60 && ![...ZIPS.keys()].some(k => !zipsBefore.has(k)); i++) await page.waitForTimeout(100);
+  const zSub = [...ZIPS.entries()].filter(([k]) => !zipsBefore.has(k)).flatMap(([, v]) => v);
+  check('«Скачать отмеченные» по вложенной папке: в архиве только её кадры', zSub.length === 2 && zSub.every(n => /_\d+\/1\/74595_модель\//.test(n)), zSub.join(' | '));
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-tree-open.png') });
   await page.click('[data-cp-p="expall"]');
   check('«свернуть все» сворачивает дерево', await page.evaluate(() => !document.querySelector('[data-cp-fold="1/74595_модель"]')));

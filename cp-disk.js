@@ -335,6 +335,11 @@ var CPDisk = (function () {
     }, Promise.resolve([]));
   }
 
+  /** CRC куска файла Диска (для больших файлов в архиве). */
+  function proxyCrc(body) {
+    return proxyReq({ a: 'crc' }, { method: 'POST', body: body, as: 'json' });
+  }
+
   /** Кусок одного архива (см. proxy/index.js doZipPart). */
   function proxyZipPart(body) {
     return proxyReq({ a: 'zippart' }, { method: 'POST', body: body, as: 'json' });
@@ -464,6 +469,6 @@ var CPDisk = (function () {
     ensureDir: ensureDir, uploadBlob: uploadBlob, copy: copy, waitOperation: waitOperation,
     readState: readState, writeState: writeState, stateRev: stateRev, safeName: safeName,
     isVd: isVd, rootOf: rootOf, showPath: showPath, rawGet: rawGet,
-    trash: trash, proxyMove: proxyMove, proxyZipPart: proxyZipPart, meta: meta
+    trash: trash, proxyMove: proxyMove, proxyZipPart: proxyZipPart, proxyCrc: proxyCrc, meta: meta
   };
 })();

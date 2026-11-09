@@ -611,6 +611,52 @@ async function diskHref(token, path) {
   return link.data.href;
 }
 
+/** Кусок файла Диска [start..end] (включительно) потоком; три попытки, пока ничего не отдали дальше. */
+async function streamDiskRange(token, path, start, end, onChunk, retryUntilGiven) {
+  const len = end - start + 1;
+  for (let attempt = 0; ; attempt++) {
+    let given = 0;
+    try {
+      const href = await diskHref(token, path);
+      const r = await fetch(href, { redirect: 'follow', headers: { Range: 'bytes=' + start + '-' + end } });
+      if (r.status !== 206 && !(r.status === 200 && start === 0 && +r.headers.get('content-length') === len)) {
+        try { await r.body?.cancel(); } catch (e) { }
+        if (r.status === 200) { const e = new Error('Диск не отдаёт файл кусками'); e.code = 'range_unsupported'; throw e; }
+        throw new Error(path.split('/').pop() + ': кусок файла не отдан, HTTP ' + r.status);
+      }
+      const reader = r.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const b = Buffer.from(value);
+        if (given + b.length > len) throw new Error('Диск отдал больше, чем просили');
+        given += b.length;
+        await onChunk(b, attempt);
+      }
+      if (given !== len) throw new Error(path.split('/').pop() + ': кусок пришёл не целиком (' + given + ' из ' + len + ')');
+      return given;
+    } catch (e) {
+      if (e && e.code === 'range_unsupported') throw e;
+      if (attempt >= 2 || (given && !retryUntilGiven)) throw e;
+      console.log(JSON.stringify({ ev: 'range_retry', path: path.split('/').pop(), attempt: attempt + 1, given, error: String(e && e.message || e) }));
+      await sleep(800 * (attempt + 1));
+    }
+  }
+}
+
+/** CRC куска файла (для больших файлов страница складывает CRC кусков). req: {from, start, end} */
+async function doCrc(token, req) {
+  const start = +req.start, end = +req.end;
+  if (!req.from || !(end >= start)) return { status: 400, result: { error: 'Нет куска' } };
+  let c = -1, at = 0;
+  try {
+    const n = await streamDiskRange(token, req.from, start, end, (b, attempt) => { if (attempt !== at) { at = attempt; c = -1; } c = crc32Update(c, b); }, true);
+    return { status: 200, result: { crc: (c ^ -1) >>> 0, n } };
+  } catch (e) {
+    return { status: 422, result: { error: String(e && e.message || e), code: e && e.code, from: req.from } };
+  }
+}
+
 /** Поток файла Диска. retry — можно повторить, пока ничего не отдали дальше (первый проход для CRC). */
 async function streamDiskFile(token, path, onChunk, retry) {
   for (let attempt = 0; ; attempt++) {
@@ -782,18 +828,27 @@ async function doZipPart(token, req, openPart) {
   if (!req.key || !req.uploadId || !(req.n >= 1)) return { status: 400, result: { error: 'Нет загрузки' } };
   const dt = dosDateTime(new Date(+req.ts || Date.now()));
   const start = +req.offset || 0;
-  const items = (Array.isArray(req.entries) ? req.entries : []).map((e) => ({ from: e.from, name: Buffer.from(String(e.name).replace(/^\/+/, ''), 'utf8'), size: +e.size || 0 }));
-  if (items.some((x) => !x.size)) return { status: 400, result: { error: 'Нет размеров файлов' } };
+  /* кусок архива — файлы целиком и куски больших файлов (slice: start..end, head — с заголовка,
+     crc — посчитан заранее по кускам): так большое видео ложится в архив, а вызов остаётся коротким */
+  const items = (Array.isArray(req.entries) ? req.entries : []).map((e) => {
+    const x = { from: e.from, name: Buffer.from(String(e.name).replace(/^\/+/, ''), 'utf8'), size: +e.size || 0 };
+    if (e.start !== undefined) { x.slice = true; x.start = +e.start; x.end = +e.end; x.head = !!e.head; x.crc = +e.crc >>> 0; }
+    return x;
+  });
+  if (items.some((x) => !x.size || (x.slice && !(x.end >= x.start)))) return { status: 400, result: { error: 'Нет размеров файлов' } };
   if (!items.length && !req.final) return { status: 400, result: { error: 'Нет файлов' } };
   let dataLen = 0;
-  for (const x of items) dataLen += 30 + x.name.length + x.size;
+  for (const x of items) dataLen += x.slice ? (x.head ? 30 + x.name.length : 0) + (x.end - x.start + 1) : 30 + x.name.length + x.size;
   if (items.some((x) => x.size >= Z64)) return { status: 413, result: { error: 'Файл больше 4 ГБ — такой отдаётся отдельной ссылкой' } };
   let cdLen = 0, prev = [], tail = 0;
   if (req.final) {
     prev = (Array.isArray(req.done) ? req.done : []).map((d) => ({ name: Buffer.from(String(d.name).replace(/^\/+/, ''), 'utf8'), size: +d.size, crc: +d.crc >>> 0, offset: +d.offset }));
     for (const d of prev) cdLen += cdEntryLen(d.name.length, d.offset);
     let off = start;
-    for (const x of items) { cdLen += cdEntryLen(x.name.length, off); off += 30 + x.name.length + x.size; }
+    for (const x of items) {
+      if (!x.slice || x.head) cdLen += cdEntryLen(x.name.length, off);
+      off += x.slice ? (x.head ? 30 + x.name.length : 0) + (x.end - x.start + 1) : 30 + x.name.length + x.size;
+    }
     tail = endLen(prev.length + items.length, cdLen, start + dataLen);
   }
   const partLen = dataLen + (req.final ? cdLen + tail : 0);
@@ -804,7 +859,7 @@ async function doZipPart(token, req, openPart) {
   function pump() {
     while (next < items.length && pending.length < AHEAD) {
       const x = items[next++];
-      const p = x.size > BIG_ENTRY ? Promise.resolve(null) : readDiskFile(token, x.from);
+      const p = x.slice || x.size > BIG_ENTRY ? Promise.resolve(null) : readDiskFile(token, x.from);
       p.catch(() => { });
       pending.push(p);
     }
@@ -821,6 +876,11 @@ async function doZipPart(token, req, openPart) {
       const buf = await pending.shift();
       pump();
       let crc;
+      if (x.slice) {
+        if (x.head) { await out.write(localHeader(x.name, x.crc, x.size, dt, needs64(offset))); mine.push({ name: x.name, size: x.size, crc: x.crc, offset }); offset += 30 + x.name.length; }
+        offset += await streamDiskRange(token, x.from, x.start, x.end, (b) => out.write(b), false);
+        continue;
+      }
       if (buf === null) {
         let c = -1, at = 0;
         const n1 = await streamDiskFile(token, x.from, (b, attempt) => { if (attempt !== at) { at = attempt; c = -1; } c = crc32Update(c, b); }, true);
@@ -991,6 +1051,16 @@ module.exports.handler = async function (event) {
       return json(r.status, r.result, h);
     }
 
+    if (a === 'crc') {
+      if (event.httpMethod !== 'POST') return json(405, { error: 'Нужен POST' }, h);
+      let body = event.body || '';
+      if (event.isBase64Encoded) body = Buffer.from(body, 'base64').toString('utf8');
+      let req;
+      try { req = JSON.parse(body); } catch (e) { return json(400, { error: 'Тело не JSON' }, h); }
+      const r = await doCrc(token, req);
+      return json(r.status, r.result, h);
+    }
+
     if (a === 'zippart') {
       if (event.httpMethod !== 'POST') return json(405, { error: 'Нужен POST' }, h);
       if (!s3Ready()) return json(501, { error: 'Хранилище не настроено' }, h);
@@ -1131,4 +1201,4 @@ module.exports.handler = async function (event) {
 
 /* для скриптов настройки и проверки (proxy/s3setup.js) */
 module.exports._s3 = { S3, s3Sign, s3Presign, openS3Upload, s3Ready, s3Call };
-module.exports._zip = { doZipPart, doMultipart };
+module.exports._zip = { doZipPart, doMultipart, doCrc };
