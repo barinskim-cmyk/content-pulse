@@ -258,6 +258,10 @@ function cpMirrorApply(rs, letters, idx) {
     m.status[pid] = { s: want, by: who, ts: now, card: card ? card.id : undefined };
     nStat++;
   });
+  /* файлы 04, уже записанные в версиях любой карточки: у артикула бывает две карточки — вторая
+     не получает «версию с Диска» из тех же файлов (и карточка в браке — тоже) */
+  var knownAny = {}, rvAll = cpRv();
+  Object.keys(rvAll).forEach(function (id) { (rvAll[id] || []).forEach(function (v) { (v.files || []).forEach(function (f) { knownAny[f.path] = true; }); }); });
   /* карточки: статус, буква ретушёра, версия ретуши, «загружено» */
   App.cards.forEach(function (c) {
     var pids = cpCardPids(c).filter(function (pid) { return pres[pid]; });
@@ -270,7 +274,7 @@ function cpMirrorApply(rs, letters, idx) {
     pids.forEach(function (pid) { if (pres[pid].retouch && pres[pid].retouch.letter) letter = pres[pid].retouch.letter; });
     if (letter && (c.tags || []).indexOf(letter) === -1) { c.tags = cpTagsWith(c.tags, letter); nLetter++; }
     var rvFiles = pids.filter(function (pid) { return pres[pid].review; }).map(function (pid) { var x = pres[pid].review; return { path: x.path, name: x.name, size: x.size }; });
-    if (rvFiles.length) {
+    if (rvFiles.length && !(cs && cs.s === 'reshoot') && rvFiles.some(function (f) { return !knownAny[f.path]; })) {
       var rv = cpRv(), list = rv[c.id] = rv[c.id] || [], last = list[list.length - 1];
       var known = {};
       list.forEach(function (v) { (v.files || []).forEach(function (f) { known[f.path] = true; }); });

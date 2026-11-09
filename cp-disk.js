@@ -180,6 +180,7 @@ var CPDisk = (function () {
   function walkPhotos(root, previewSize, parallel, allFiles) {
     var out = [], queue = [root], active = 0, limit = parallel || 4, failed = null;
     out.dirs = [];   /* все папки съёмки (и пустые) — для карточек по папкам артикулов */
+    out.dirProps = {};   /* метки папок (custom_properties) — «скачано» в «Сайте» и т. п. */
     var ps = previewSize === false ? null : (previewSize || 'XL');
     return new Promise(function (resolve, reject) {
       function pump() {
@@ -199,6 +200,7 @@ var CPDisk = (function () {
                 if (r.name.charAt(0) === '_' || r.name === RETOUCH_DIR) return;
                 queue.push(r.path);
                 out.dirs.push(r.path);
+                if (r.custom_properties) out.dirProps[r.path] = r.custom_properties;
               } else if (allFiles ? !JUNK_RE.test(r.name) && r.name !== STATE_FILE : PHOTO_RE.test(r.name)) {
                 out.push(r);
               }

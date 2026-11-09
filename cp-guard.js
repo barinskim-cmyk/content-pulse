@@ -454,9 +454,24 @@ function cpCheckUpdate() {
       if ((nv[i] || 0) > (cur[i] || 0)) break;
       if ((nv[i] || 0) < (cur[i] || 0)) return null;
     }
-    cpShowUpdate(m[1]);
+    if (!cpAutoUpdate(m[1])) cpShowUpdate(m[1]);
     return m[1];
   }).catch(function () { return null; });
+}
+
+/* Только что открыли старую страницу (Safari взял её из кэша по голой ссылке) — сразу
+   перейти на свежую, без плашки (Маша, 09.11: «по голой ссылке должна последняя версия
+   показываться»). Только в первые секунды и без несохранённых правок; на одну версию —
+   одна попытка (если и по ?v= пришла старая — покажем плашку, а не будем перезагружать по кругу). */
+CP.loadedAt = Date.now();
+function cpAutoUpdate(ver) {
+  if (Date.now() - CP.loadedAt > 30000 || (typeof App !== 'undefined' && App.dirty)) return false;
+  var tried = '';
+  try { tried = sessionStorage.getItem('cp_upd_tried') || ''; } catch (e) { }
+  if (tried === ver || new RegExp('[?&]v=' + ver.replace(/\./g, '\\.') + '(&|$)').test(location.search)) return false;
+  try { sessionStorage.setItem('cp_upd_tried', ver); } catch (e) { }
+  location.replace(location.pathname + '?v=' + encodeURIComponent(ver) + location.hash);
+  return true;
 }
 
 function cpShowUpdate(ver) {
@@ -479,7 +494,7 @@ function cpShowUpdate(ver) {
 
 setInterval(function () { if (document.visibilityState !== 'hidden') cpCheckUpdate(); }, 5 * 60 * 1000);
 document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible' && Date.now() - CP.updateAt > 60000) cpCheckUpdate(); });
-setTimeout(cpCheckUpdate, 3000);
+cpCheckUpdate();   /* сразу при открытии: старая страница из кэша — сама перейдёт на свежую */
 
 (function cpUpdateCss() {
   var st = document.createElement('style');

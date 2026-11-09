@@ -849,6 +849,36 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     const ids = await page.evaluate(() => { const rv = cpMeta().rv, f = n => Object.keys(rv).find(id => { const l = rv[id].slice(-1)[0]; return l && l.letter === 'U' && l.files.some(x => x.name === n); });
       return { a: f('manekin.tif'), b: f('manekin2.tif') }; });
     check('на карточке — «На сайт» и «На доработку»', await page.evaluate(i => /На сайт/.test(document.querySelector('[data-cp-rv="' + i + '"] [data-cp-rva="approve"]').textContent), ids.b));
+    /* панель съёмки в 04 (Маша, 09.11): «сдано — с ретушью» (что в 04), «не сдано — без ретуши» (кадры из 03 у карточек
+       без версии), всё; «без брака / только брак» */
+    {
+      const RT0 = 'disk:/Этапы/03_ТЕСТ/' + SN, STF = 'disk:/Архив/' + SN + '/_contentpulse.json';
+      ['disk:/Этапы/03_ТЕСТ', RT0, RT0 + '/1', RT0 + '/1/74595_модель', RT0 + '/1/99999'].forEach(d => DIRS.add(d));
+      FILES.set(RT0 + '/1/74595_модель/manekin.jpg', Buffer.from('M'.repeat(33)));
+      FILES.set(RT0 + '/1/99999/zzz.jpg', Buffer.from('Z'.repeat(34)));
+      for (let i = 0; i < 60; i++) { try { const st = JSON.parse(FILES.get(STF).toString()); if (st.meta.cp.rv && st.meta.cp.rv[ids.a]) break; } catch (e) { } await page.waitForTimeout(100); }
+      for (const k of [...FRESH.keys()]) if (k.indexOf(RV) === 0) FRESH.delete(k);   /* свежие файлы Диск показывает не сразу — здесь не ждём */
+      await page.evaluate(([rv, rt, sn]) => { const low = sn.toLowerCase(); CP.stagePaths = CP.stagePaths || {};
+        (CP.stagePaths.review = CP.stagePaths.review || {})[low] = [rv + '/' + sn]; (CP.stagePaths.retouch = CP.stagePaths.retouch || {})[low] = [rt];
+        CP.stageFilter = 'review'; cpSelectShoot(CP.shoot.path, CP.shoot.name, ''); }, [RV, RT0, SN]);
+      await page.waitForFunction(() => /Сдано — с ретушью/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
+      const pt = await page.textContent('#cpPanel');
+      check('04: «Сдано — с ретушью 2 · Не сдано — без ретуши 1 · Всё 3», по умолчанию — сдано; чипы брака', /Сдано — с ретушью\s*2/.test(pt) && /Не сдано — без ретуши\s*1/.test(pt) && /Всё\s*3/.test(pt)
+        && /без брака/.test(pt) && /только брак/.test(pt) && await page.evaluate(() => CP.sel.scope === 'done'), pt.slice(0, 600));
+      const nBrak = () => page.evaluate(() => +(/\d+/.exec(document.querySelector('#cpPanel [data-cp-sbrak="only"] small').textContent) || [0])[0]);
+      const b0 = await nBrak();
+      await page.evaluate(() => { CP.sel.data.photos.filter(x => /^manekin2?\.jpg$/.test(x.name)).forEach(p => { CP.sel.data.meta.cp.status[p.id] = { s: 'reshoot' }; }); cpStageTagIndex(CP.sel); cpRenderPanel(); });
+      check('кадры в браке — «только брак 2», «без брака 0» (было ' + b0 + ')', await nBrak() === 2 && /без брака\s*0/.test(await page.textContent('#cpPanel')), await page.textContent('#cpPanel'));
+      await page.evaluate(() => document.querySelector('#cpPanel [data-cp-scope="todo"]').click());
+      const zb = new Set(ZIPS.keys());
+      await page.evaluate(() => document.querySelector('[data-cp-stdl]').click());
+      for (let i = 0; i < 80 && ![...ZIPS.keys()].some(k => !zb.has(k)); i++) await page.waitForTimeout(100);
+      const zt = [...ZIPS.entries()].filter(([k]) => !zb.has(k)).flatMap(([, v]) => v);
+      check('«Не сдано — без ретуши»: из 03 только кадры карточек без версии (99999/zzz.jpg, не 74595)', zt.length === 1 && /\/1\/99999\/zzz\.jpg$/.test(zt[0]), JSON.stringify(zt));
+      [RT0 + '/1/74595_модель/manekin.jpg', RT0 + '/1/99999/zzz.jpg'].forEach(f => FILES.delete(f));
+      [RT0 + '/1/74595_модель', RT0 + '/1/99999', RT0 + '/1', RT0, 'disk:/Этапы/03_ТЕСТ'].forEach(d => DIRS.delete(d));
+      await page.evaluate(sn => { delete CP.stagePaths.retouch[sn.toLowerCase()]; CP.stageFilter = ''; CP.sel = null; cpRenderPanel(); }, SN);
+    }
     /* открыли съёмку из фильтра 04 — видны только карточки этого этапа; отправленное на сайт сразу пропадает */
     const vis = () => page.evaluate(() => [...document.querySelectorAll('#cbCards .cb-card')].filter(el => el.style.display !== 'none').map(el => el.getAttribute('data-cid')));
     await page.evaluate(() => { CP.stageFilter = 'review'; CP.openedHooks.forEach(f => { try { f(CP.shoot.path); } catch (e) { } }); });
@@ -876,7 +906,8 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     for (let i = 0; i < 60 && FILES.has(RT3 + '/1/74596_модель/manekin2.jpg'); i++) await page.waitForTimeout(100);
     check('«На сайт» — копия артикула в 03_РЕТУШЬ сразу в Корзине (и при второй карточке того же артикула)', !FILES.has(RT3 + '/1/74596_модель/manekin2.jpg') && TRASHED.some(p => p.indexOf(RT3) === 0), JSON.stringify(TRASHED.slice(-3)));
     const v2 = await vis();
-    check('отправили на сайт — карточка сразу пропала из этого вида', v2.length === 1 && v2[0] === ids.a, JSON.stringify(v2));
+    check('отправили на сайт — карточка сразу пропала из этого вида', v2.length === 1 && v2[0] === ids.a, JSON.stringify([v2, ids, await page.evaluate(v => v.map(id => { const c = cbCardById(id), l = (cpMeta().rv[id] || []).slice(-1)[0];
+      return [id, c && c.title, l && l.status, !!(cpMeta().delivered || {})[id], (cpMeta().cardStatus[id] || {}).s]; }), v2)]));
     page.once('dialog', d => d.accept('тени'));
     await page.click('[data-cp-rv="' + ids.a + '"] [data-cp-rva="rework"]');
     for (let i = 0; i < 60 && !inRv('manekin.tif').some(k => /_доработка\//.test(k)); i++) await page.waitForTimeout(100);
@@ -1030,12 +1061,15 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('крупное видео — отдельной ссылкой, перенесено частями и скачивается', MPU_PARTS.length === 3 && DOWNLOADS.some(p => /видео\/clip\.mp4$/.test(p)), MPU_PARTS.join(',') + ' :: ' + DOWNLOADS.slice(-3).join(' | '));
   await page.evaluate(() => { CP.directMin = 3.9 * 1024 * 1024 * 1024; CP.directPart = 256 * 1024 * 1024; });
   /* видео — в том же архиве, кусками (Маша, 08.11: «на 5 ГБ 15 архивов»): clip.mp4 (500 байт) — «большой», куски по 200 */
+  const zVid = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST_1\.zip$/.test(k)).flatMap(([, v]) => v);
   {
-    const crcBefore = CRC_CALLS.length, slBefore = ZIP_SLICES.length, zBefore = new Set(ZIPS.keys());
+    /* новый архив — новый ключ или тот же ключ с новым содержимым (номер скачивания мог не успеть вырасти) */
+    const crcBefore = CRC_CALLS.length, slBefore = ZIP_SLICES.length, zBefore = new Map(ZIPS);
+    const fresh = () => [...ZIPS.keys()].find(k => !zBefore.has(k) || zBefore.get(k) !== ZIPS.get(k));
     await page.evaluate(() => { CP.zipBigMin = 300; CP.zipSlice = 200; CP.zipTarget = 250; CP.zipPartMin = 100; });
     await page.click('[data-cp-p="download"]');
-    for (let i = 0; i < 80 && ![...ZIPS.keys()].some(k => !zBefore.has(k)); i++) await page.waitForTimeout(100);
-    const zk = [...ZIPS.keys()].find(k => !zBefore.has(k));
+    for (let i = 0; i < 80 && !fresh(); i++) await page.waitForTimeout(100);
+    const zk = fresh();
     const zn = zk ? ZIPS.get(zk) : [];
     check('видео — в том же архиве одним файлом: контрольная сумма по кускам (3), в архив тремя кусками, отдельных ссылок нет',
       zn.filter(n => /видео\/clip\.mp4$/.test(n)).length === 1 && CRC_CALLS.length - crcBefore === 3 && ZIP_SLICES.length - slBefore === 3
@@ -1044,7 +1078,6 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
       JSON.stringify([zk, zn, CRC_CALLS.slice(crcBefore), ZIP_SLICES.slice(slBefore)]));
     await page.evaluate(() => { CP.zipBigMin = 64 * 1024 * 1024; CP.zipSlice = 256 * 1024 * 1024; CP.zipTarget = 400 * 1024 * 1024; CP.zipPartMin = 6 * 1024 * 1024; });
   }
-  const zVid = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST_1\.zip$/.test(k)).flatMap(([, v]) => v);
   check('«скачать всё» из исходников: структура как на Диске, кадр карточки артикула — в папке артикула (и кадр лука, попавший в карточку)',
     zVid.some(n => /_1\/1\/74595_модель\/IMG_0101\.jpg$/.test(n)) && zVid.some(n => /_1\/1\/74595_модель\/manekin\.jpg$/.test(n)) && !zVid.some(n => /_1\/74595\//.test(n)), zVid.join(' | '));
   check('«Все файлы»: кадры в архиве, видео в архив не попало', !zVid.some(n => /clip\.mp4$/.test(n)) && zVid.filter(n => /\.jpg$/.test(n)).length === 3, zVid.join(' | '));
@@ -1433,6 +1466,30 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     const zY = [...ZIPS.entries()].filter(([k]) => /2026-11-06_SV_КАТ_03_РЕТУШЬ_Y_/.test(k)).flatMap(([, v]) => v);
     check('скачалось только с тегом Y — папка Y_74001_модель, без 74002', zY.length === 1 && /Y_74001_модель\/k1\.jpg$/.test(zY[0]), JSON.stringify([...ZIPS.keys()].slice(-2)) + ' ' + zY.join(' | '));
     await page.click('[data-cp-p="close"]');
+    /* 02_ОТБОР (Маша, 09.11): «только отбор» или «все файлы съёмки», с видео / без видео */
+    {
+      const CLIP = K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ/clip.mov';
+      FILES.set(CLIP, Buffer.from('V'.repeat(70)));
+      await page.click('[data-cp-stage="approval"]');
+      await page.click('#cpShelfList .cp-shoot[data-name="2026-11-06_SV_КАТ"]');
+      await page.waitForFunction(() => /Только отбор/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
+      check('02: чипы «Только отбор 1» и «Все файлы съёмки», по умолчанию — только отбор', await page.evaluate(() => {
+        const on = document.querySelector('#cpPanel [data-cp-scope].cp-on'); return on && on.getAttribute('data-cp-scope') === 'stage' && /Только отбор\s*1/.test(on.textContent) && !!document.querySelector('#cpPanel [data-cp-scope="all"]'); }),
+        await page.textContent('#cpPanel'));
+      await page.click('#cpPanel [data-cp-scope="all"]');
+      await page.waitForFunction(() => /Все файлы съёмки\s*2/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
+      check('«Все файлы съёмки» — исходники (кадр и видео), чипы «только видео 1 · без видео 1»', await page.evaluate(() => {
+        const t = document.getElementById('cpPanel').textContent; return /Все файлы съёмки\s*2/.test(t) && /только видео\s*1/.test(t) && /без видео\s*1/.test(t) && /Скачать файлы съёмки · 2/.test(t); }), await page.textContent('#cpPanel'));
+      await page.click('#cpPanel [data-cp-smedia="video"]');
+      const zb = new Set(ZIPS.keys());
+      await page.click('[data-cp-stdl]');
+      for (let i = 0; i < 80 && ![...ZIPS.keys()].some(k => !zb.has(k)); i++) await page.waitForTimeout(100);
+      const zv = [...ZIPS.entries()].filter(([k]) => !zb.has(k)).flatMap(([, v]) => v);
+      check('из 02 скачали «все файлы съёмки, только видео» — в архиве clip.mov', zv.length === 1 && /\/clip\.mov$/.test(zv[0]) && [...ZIPS.keys()].some(k => !zb.has(k) && /_02_ОТБОР_все файлы\+видео_/.test(k)), JSON.stringify([[...ZIPS.keys()].filter(k => !zb.has(k)), zv]));
+      FILES.delete(CLIP);
+      await page.click('[data-cp-p="close"]');
+      await page.click('[data-cp-stage="retouch"]');
+    }
     /* удалили папку съёмки из этапа на Диске — при следующей сверке (сама, раз в 45 с) съёмка из фильтра пропадает */
     DIRS.delete(K + '/02_ОТБОР/2026-11-06_SV_КАТ'); FILES.delete(K + '/02_ОТБОР/2026-11-06_SV_КАТ/k1.jpg');
     await page.evaluate(() => cpScanStages());
@@ -1461,39 +1518,67 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.selectOption('[data-cp-cat="00_АРХИВ"]', 'не показывать');
     await page.waitForFunction(() => CP.shoots && !CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА'), null, { timeout: 10000 }).catch(() => {});
     check('снова «не показывать» — съёмок архива нет', await page.evaluate(() => !CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА')));
-    /* «Сайт» (Маша, 09.11): «Не скачано» — что ни разу не скачивали из «Сайта»; «Ближайшие даты»; свежие даты сверху */
+    /* «Сайт» (Маша, 09.11): плитки дат — «важна дата и что в эту дату сдано»; «скачано» — по папке артикула,
+       по умолчанию качается всё за дату, галочкой — пропустить уже скачанное */
     {
       const today = await page.evaluate(() => cpToday());
-      const S5 = K + '/05_САЙТ', A = '2026-11-06_SV_КАТ', B = '2026-11-07_SV_КАТ2';
-      [K + '/01_ИСХОДНИКИ/' + B, S5 + '/' + today, S5 + '/' + today + '/' + A, S5 + '/' + today + '/' + A + '/74001', S5 + '/2026-10-20', S5 + '/2026-10-20/' + B, S5 + '/2026-10-20/' + B + '/75001'].forEach(d => DIRS.add(d));
+      const S5 = K + '/05_САЙТ', A = '2026-11-06_SV_КАТ', B = '2026-11-07_SV_КАТ2', D2 = S5 + '/2026-10-20';
+      [K + '/01_ИСХОДНИКИ/' + B, S5 + '/' + today, S5 + '/' + today + '/' + A, S5 + '/' + today + '/' + A + '/74001', D2, D2 + '/' + B, D2 + '/' + B + '/75001', D2 + '/' + B + '/75002'].forEach(d => DIRS.add(d));
       FILES.set(K + '/01_ИСХОДНИКИ/' + B + '/b1.jpg', Buffer.from('B'.repeat(40)));
       FILES.set(S5 + '/' + today + '/' + A + '/74001/k1.jpg', Buffer.from('R'.repeat(50)));
-      FILES.set(S5 + '/2026-10-20/' + B + '/75001/b1.jpg', Buffer.from('R'.repeat(45)));
+      FILES.set(D2 + '/' + B + '/75001/b1.jpg', Buffer.from('R'.repeat(45)));
+      FILES.set(D2 + '/' + B + '/75002/b2.jpg', Buffer.from('R'.repeat(46)));
+      if (await page.isVisible('#cpArchiveInput')) await page.keyboard.press('Escape');
       await page.click('#cpShelfRefresh');
-      await page.waitForFunction(b => CP.shoots && CP.shoots.some(s => s.name === b) && CP.stagePaths && CP.stagePaths.site && Object.keys(CP.stagePaths.site).length >= 2, B, { timeout: 10000 }).catch(() => {});
+      await page.waitForFunction(b => CP.shoots && CP.shoots.some(s => s.name === b), B, { timeout: 10000 }).catch(() => {});
       await page.click('[data-cp-stage="site"]');
-      const rowsTxt = () => page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-shoot')].filter(b => b.style.display !== 'none').map(b => b.dataset.name));
+      const tiles = () => page.evaluate(() => [...document.querySelectorAll('#cpShelfList [data-cp-date]')].map(b => b.getAttribute('data-cp-date').split('/').pop()));
       const chips = () => page.evaluate(() => [...document.querySelectorAll('[data-cp-site-sub]')].map(b => b.textContent.replace(/\s+/g, ' ').trim()).join(' | '));
-      const r0 = await rowsTxt(), c0 = await chips();
-      check('«Сайт»: чипы «Все 2 · Не скачано 2 · Ближайшие даты 1», свежая дата сверху, под съёмкой — дата и «не скачано»', r0[0] === A && r0[1] === B
-        && /Все 2/.test(c0) && /Не скачано 2/.test(c0) && /Ближайшие даты \(7 дней\) 1/.test(c0)
-        && /не скачано/.test(await page.textContent('#cpShelfList .cp-shoot[data-name="' + B + '"]')), JSON.stringify([r0, c0]));
+      const tileTxt = d => page.evaluate(d => { const b = [...document.querySelectorAll('#cpShelfList [data-cp-date]')].find(x => x.getAttribute('data-cp-date').endsWith('/' + d)); return b ? b.textContent : ''; }, d);
+      await page.waitForFunction(() => document.querySelectorAll('#cpShelfList [data-cp-date]').length >= 3 && !/читаю/.test(document.getElementById('cpShelfList').textContent), null, { timeout: 10000 }).catch(() => {});
+      const t0 = await tiles(), c0 = await chips();
+      check('«Сайт»: плитки дат, свежие сверху (сегодня, 01.11, 2026-10-20); чипы «Все даты 3 · Не скачано 3 · Ближайшие даты 1»', JSON.stringify(t0) === JSON.stringify([today, '01.11', '2026-10-20'])
+        && /Все даты 3/.test(c0) && /Не скачано 3/.test(c0) && /Ближайшие даты \(7 дней\) 1/.test(c0), JSON.stringify([t0, c0]));
+      const tt = await tileTxt('2026-10-20');
+      check('в плитке даты — съёмки, артикулы, «не скачано 2 из 2»', /20\.10\.2026/.test(tt) && tt.indexOf(B) !== -1 && /артикулов 2/.test(tt) && /не скачано 2 из 2/.test(tt), tt);
+      check('на вкладке «05_САЙТ» — число дат', /05_САЙТ\s*3/.test(await page.textContent('#cpStages')), await page.textContent('#cpStages'));
       await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-site.png') });
       await page.click('[data-cp-site-sub="recent"]');
-      check('«Ближайшие даты» — только то, что пришло в «Сайт» за 7 дней', JSON.stringify(await rowsTxt()) === JSON.stringify([A]), JSON.stringify(await rowsTxt()));
+      check('«Ближайшие даты» — только то, что пришло за 7 дней', JSON.stringify(await tiles()) === JSON.stringify([today]), JSON.stringify(await tiles()));
       await page.click('[data-cp-site-sub=""]');
-      await page.click('#cpShelfList .cp-shoot[data-name="' + B + '"]');
-      await page.waitForFunction(() => /Скачать всё из 05_САЙТ · 1/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
-      await page.click('[data-cp-stdl]');
-      for (let i = 0; i < 80 && !((PROPS.get(S5 + '/2026-10-20/' + B) || {}).cp_dl); i++) await page.waitForTimeout(100);
+      /* выбрали дату — справа съёмка → артикулы, «не скачано»; «Скачать всё за 20.10.2026» */
+      await page.click('#cpShelfList [data-cp-date$="/2026-10-20"]');
+      await page.waitForFunction(() => /75002/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
+      const p1 = await page.textContent('#cpPanel');
+      check('панель даты: съёмка → артикулы 75001, 75002 «не скачано», кнопка «Скачать всё за 20.10.2026 · 2»', p1.indexOf(B) !== -1 && /75001/.test(p1) && /75002/.test(p1) && /не скачано/.test(p1)
+        && /Скачать всё за 20\.10\.2026 · 2/.test(p1) && !/пропустить уже скачанное/.test(p1), p1.slice(0, 500));
+      const zb = new Set(ZIPS.keys());
+      await page.click('[data-cp-site-dl]');
+      for (let i = 0; i < 80 && !((PROPS.get(D2 + '/' + B + '/75002') || {}).cp_dl); i++) await page.waitForTimeout(100);
+      const z1 = [...ZIPS.entries()].filter(([k]) => !zb.has(k)).flatMap(([, v]) => v);
+      check('скачали дату: в архиве съёмка/артикул/файл; метка «скачано» на каждой папке артикула на Диске (кто)', z1.length === 2 && z1.some(n => n.endsWith('/' + B + '/75001/b1.jpg'))
+        && (PROPS.get(D2 + '/' + B + '/75001') || {}).cp_dl_by === 'Маша' && !!(PROPS.get(D2 + '/' + B + '/75002') || {}).cp_dl, JSON.stringify([z1, PROPS.get(D2 + '/' + B + '/75001')]));
+      await page.waitForFunction(() => /всё скачано/.test(([...document.querySelectorAll('#cpShelfList [data-cp-date]')].find(x => x.getAttribute('data-cp-date').endsWith('/2026-10-20')) || {}).textContent || ''), null, { timeout: 5000 }).catch(() => {});
+      check('плитка даты — «всё скачано · когда · кто», в панели у артикулов «скачано»', /всё скачано[^]*Маша/.test(await tileTxt('2026-10-20')) && /скачано \d/.test(await page.textContent('#cpPanel')), await tileTxt('2026-10-20'));
+      /* в ту же дату приехал новый артикул — он «не скачано»; с галочкой качается только он */
+      DIRS.add(D2 + '/' + B + '/75003'); FILES.set(D2 + '/' + B + '/75003/b3.jpg', Buffer.from('R'.repeat(47)));
+      await page.click('#cpShelfRefresh');
+      await page.click('[data-cp-stage="site"]').catch(() => {});
+      await page.waitForFunction(() => /не скачано 1 из 3/.test(([...document.querySelectorAll('#cpShelfList [data-cp-date]')].find(x => x.getAttribute('data-cp-date').endsWith('/2026-10-20')) || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
+      check('новый артикул в той же дате — «не скачано 1 из 3» (метки читаются с Диска)', /не скачано 1 из 3/.test(await tileTxt('2026-10-20')), await tileTxt('2026-10-20'));
+      await page.click('#cpShelfList [data-cp-date$="/2026-10-20"]');
+      await page.waitForFunction(() => /75003/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
+      check('по умолчанию качается всё за дату (3), галочка «пропустить уже скачанное (2)»', /Скачать всё за 20\.10\.2026 · 3/.test(await page.textContent('#cpPanel')) && /пропустить уже скачанное \(2\)/.test(await page.textContent('#cpPanel')), await page.textContent('#cpPanel'));
+      await page.check('[data-cp-site-skip]');
+      check('галочка — «Скачать нескачанное · 1»', /Скачать нескачанное · 1/.test(await page.textContent('[data-cp-site-dl]')), await page.textContent('[data-cp-site-dl]'));
+      const zb2 = new Set(ZIPS.keys());
+      await page.click('[data-cp-site-dl]');
+      for (let i = 0; i < 80 && !((PROPS.get(D2 + '/' + B + '/75003') || {}).cp_dl); i++) await page.waitForTimeout(100);
+      const z2 = [...ZIPS.entries()].filter(([k]) => !zb2.has(k)).flatMap(([, v]) => v);
+      check('скачалось только новое: 75003', z2.length === 1 && z2[0].endsWith('/75003/b3.jpg'), JSON.stringify(z2));
       await page.click('[data-cp-p="close"]').catch(() => {});
-      const c1 = await chips();
-      check('скачали из «Сайта» — у папки даты метка на Диске (cp_dl, кто), «Не скачано 1», под съёмкой «скачано»', !!(PROPS.get(S5 + '/2026-10-20/' + B) || {}).cp_dl
-        && (PROPS.get(S5 + '/2026-10-20/' + B) || {}).cp_dl_by === 'Маша' && /Не скачано 1/.test(c1) && /скачано \d/.test(await page.textContent('#cpShelfList .cp-shoot[data-name="' + B + '"]')), JSON.stringify([c1, PROPS.get(S5 + '/2026-10-20/' + B)]));
-      await page.evaluate(() => cpScanStages());
-      await page.waitForTimeout(300);
       await page.click('[data-cp-site-sub="new"]');
-      check('«Не скачано» — метка читается с Диска (после сверки), скачанная съёмка скрыта', JSON.stringify(await rowsTxt()) === JSON.stringify([A]), JSON.stringify([await rowsTxt(), await chips()]));
+      check('«Не скачано» — дат, где всё скачано, нет', JSON.stringify(await tiles()) === JSON.stringify([today, '01.11']), JSON.stringify([await tiles(), await chips()]));
       await page.click('[data-cp-site-sub=""]');
       await page.click('[data-cp-stage=""]');
       if (!(await page.isVisible('#cpArchiveInput'))) await page.click('#cpGear');
@@ -1541,6 +1626,23 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await fast.waitForTimeout(600);
     check('обычная загрузка: витрина читается один раз', shelfLoads === 1, 'запросов архива: ' + shelfLoads);
     await slow.close(); await fast.close();
+    /* голая ссылка, а Safari отдал старую страницу из кэша — сама переходит на свежую (?v=), без круга */
+    const old = await ctx.newPage();
+    let appLoads = 0;
+    await old.route(/cp-app\.js/, async r => {
+      appLoads++;
+      if (appLoads > 1) return r.continue();
+      const res = await r.fetch();
+      r.fulfill({ response: res, body: (await res.text()).replace(/var CP_VERSION = '[^']*';/, "var CP_VERSION = '2.0.1';") });
+    });
+    await old.goto(base);
+    await old.waitForURL(/\?v=\d/, { timeout: 10000 }).catch(() => {});
+    await old.waitForFunction(() => window.CP && CP.booted, null, { timeout: 10000 }).catch(() => {});
+    await old.waitForTimeout(800);
+    const real = await page.evaluate(() => CP_VERSION).catch(() => '');
+    check('старая страница из кэша — сама перешла на свежую (?v=…), без плашки и без перезагрузок по кругу', new RegExp('\\?v=' + real.replace(/\./g, '\\.') + '$').test(old.url())
+      && await old.evaluate(r => CP_VERSION === r && !document.getElementById('cpUpdate'), real) && appLoads === 2, old.url() + ' · загрузок cp-app.js: ' + appLoads);
+    await old.close();
   }
 
   await browser.close(); srv.close();
