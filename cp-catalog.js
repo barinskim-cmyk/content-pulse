@@ -30,13 +30,17 @@ var CP_CAT_ROLES = [
   { role: 'review', word: 'отретушировано', setting: 'retouched', def: '04_ОТРЕТУШИРОВАНО' },
   { role: 'site', word: 'сайт', setting: 'site', def: '05_САЙТ' }
 ];
+/* 00_АРХИВ — не этап, а место для закрытых съёмок и брака (Маша, 09.11): в фильтры
+   витрины не входит, но «Исправить папки» его создаёт, а брак и «В архив» пишут в него */
+var CP_CAT_ARCHIVE = { role: 'archive', word: 'архив', setting: 'archive', def: '00_АРХИВ' };
+function cpCatRoleDef(role) { return CP_CAT_ROLES.concat([CP_CAT_ARCHIVE]).filter(function (r) { return r.role === role || r.setting === role; })[0] || null; }
 var CP_CAT_SKIP_WORD = 'не показывать';
-var CP_CAT_NUM = { '00': 'skip', '01': 'source', '02': 'approval', '03': 'retouch', '04': 'review', '05': 'site' };
+var CP_CAT_NUM = { '00': 'archive', '01': 'source', '02': 'approval', '03': 'retouch', '04': 'review', '05': 'site' };
 /* по смыслу имени — раньше номера: у SK «04_САЙТ» — это сайт, а не 04-й этап по умолчанию.
    Маша, 06.11: «в исходниках показывает всё, что лежит в архиве, а должен только исходники» —
    архив (00_АРХИВ) не читаем; включить можно в шестерёнке. */
 var CP_CAT_WORDS = [
-  [/архив/i, 'skip'], [/исходн/i, 'source'], [/отретуш|проверк/i, 'review'], [/ретуш/i, 'retouch'],
+  [/архив/i, 'archive'], [/исходн/i, 'source'], [/отретуш|проверк/i, 'review'], [/ретуш/i, 'retouch'],
   [/сайт|site/i, 'site'], [/отбор|соглас/i, 'approval']
 ];
 var CP_CAT_RE = /^(\d{2})[_ .\-]/;
@@ -73,7 +77,7 @@ function cpCatDirs(role, settings) {
 /** Папки этапов из каталога — в настройки (ими пользуются ретушь, сверка, фильтры). */
 function cpCatMerge(settings) {
   if (!settings || !cpCatalog() || !CP.catalogList) return settings;
-  CP_CAT_ROLES.forEach(function (r) {
+  CP_CAT_ROLES.concat([CP_CAT_ARCHIVE]).forEach(function (r) {
     if (!r.setting) return;
     var d = cpCatDirs(r.role, settings)[0];
     if (d) settings[r.setting] = d.path;
@@ -103,7 +107,7 @@ cpParseSettings = (function (orig) {
       var m = /^\s*этап\s+(.+?)\s*=\s*(.*?)\s*$/i.exec(line);
       if (!m || !m[2]) return;
       var w = m[2].toLowerCase();
-      var r = CP_CAT_ROLES.filter(function (x) { return x.word === w; })[0];
+      var r = CP_CAT_ROLES.concat([CP_CAT_ARCHIVE]).filter(function (x) { return x.word === w; })[0];
       roles[m[1].toLowerCase()] = r ? r.role : 'skip';
     });
     out.stageRoles = roles;
@@ -157,12 +161,12 @@ cpParseSettings = (function (orig) {
    Теперь в каталоге каждое действие этапа проверяет его папку: нет — тост
    «создайте её: Исправить папки» и ничего не делается. Обычный архив (не
    каталог) работает по-старому — для него эти пути и задуманы. */
-var CP_CAT_STAGE_ACTION = { approve: 'на согласование', retouch: 'на ретушь', retouched: 'сдача и проверка ретуши', site: 'на сайт' };
+var CP_CAT_STAGE_ACTION = { approve: 'на согласование', retouch: 'на ретушь', retouched: 'сдача и проверка ретуши', site: 'на сайт', archive: 'брак и закрытые съёмки' };
 
 /** true — каталог открыт, а папки этапа нет (тост уже показан, действие делать нельзя). */
 function cpCatStageMissing(setting) {
   if (!cpCatalog() || (CP.settings || {})[setting]) return false;
-  var role = CP_CAT_ROLES.filter(function (r) { return r.setting === setting; })[0];
+  var role = cpCatRoleDef(setting);
   cbToast(!CP.catalogList
     ? 'Каталог ещё не прочитан — вернитесь на витрину и повторите. Ничего не сделано.'
     : 'В каталоге нет папки этапа «' + (role ? role.def : setting) + '» (' + (CP_CAT_STAGE_ACTION[setting] || '')
@@ -348,10 +352,10 @@ function cpCatRender() {
     box.innerHTML = '<div class="cp-set-dir">Укажите выше папку, где лежат все этапы (01_ИСХОДНИКИ, 02…, 05_САЙТ), — программа прочитает их сама</div>';
     return;
   }
-  var opts = CP_CAT_ROLES.map(function (r) { return r.word; }).concat([CP_CAT_SKIP_WORD]);
+  var opts = CP_CAT_ROLES.concat([CP_CAT_ARCHIVE]).map(function (r) { return r.word; }).concat([CP_CAT_SKIP_WORD]);
   var html = CP.catalogList.map(function (d) {
     var role = cpCatRoleOf(d.name);
-    var cur = role === 'skip' ? CP_CAT_SKIP_WORD : CP_CAT_ROLES.filter(function (r) { return r.role === role; })[0].word;
+    var cur = role === 'skip' ? CP_CAT_SKIP_WORD : cpCatRoleDef(role).word;
     return '<div class="cp-cat-row"><span class="cp-cat-name">' + cbEsc(d.name) + '</span><select data-cp-cat="' + cbEsc(d.name) + '">'
       + opts.map(function (w) { return '<option' + (w === cur ? ' selected' : '') + '>' + cbEsc(w) + '</option>'; }).join('') + '</select></div>';
   }).join('');
@@ -385,6 +389,7 @@ function cpCatPlan() {
     if (taken[to.toLowerCase()]) return;
     plan.rename.push({ dir: d, to: to, role: r });
   });
+  if (!cpCatDirs('archive').length && !taken[CP_CAT_ARCHIVE.def.toLowerCase()]) plan.create.push({ role: CP_CAT_ARCHIVE, name: CP_CAT_ARCHIVE.def });
   return plan;
 }
 

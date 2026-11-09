@@ -34,6 +34,7 @@ var CPQ = {
   timer: null,
   after: {},        /* type -> function (op, meta, shootPath) — модули регистрируют свои */
   delays: [5000, 10000, 20000, 40000, 60000],
+  redraw: { 'rv-approve': true, 'rv-rework': true },
   alarmAfter: 3
 };
 
@@ -196,7 +197,9 @@ function cpqDone(ent) {
     if (fn) { try { fn(op, m, ent.shoot); } catch (e) { if (window.console) console.error('[CPQ] after', e); } }
     (m.events = m.events || []).push({ ts: new Date().toISOString(), action: 'queue_done', actor: cpActor(), items: [], note: op.label + (op.tries ? ' — с ' + (op.tries + 1) + '-й попытки' : '') });
   }).then(function () {
-    if (CP.shoot && CP.shoot.path === ent.shoot.path) cpAfterStatus();
+    /* перерисовать только если поменялось видимое (статус ретуши на карточке); служебные отметки
+       (копии в 02, в _БРАК) на экран не влияют — лишняя перерисовка сбивает работу с карточками */
+    if (CP.shoot && CP.shoot.path === ent.shoot.path && op.after && CPQ.redraw[op.after.type]) cpAfterStatus();
     if (op.tries) cbToast('Перенеслось: ' + op.label);
   });
 }

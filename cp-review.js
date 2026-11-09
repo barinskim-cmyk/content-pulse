@@ -40,19 +40,20 @@ function cpRvDirOf(ver) { return ver.dir || (ver.files && ver.files[0] ? cpParen
 
 /* ---------- выработка: строка на каждую сдачу и решение ---------- */
 
-function cpOutputAppend(rows) {
+function cpOutputAppend(rows, file, head) {
   if (!rows.length) return Promise.resolve();
-  var path = cpServicePath(CP_OUTPUT_FILE);
+  file = file || CP_OUTPUT_FILE; head = head || CP_OUTPUT_HEAD;
+  var path = cpServicePath(file);
   var esc = function (v) { v = String(v === undefined || v === null ? '' : v); return /[;"\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
   var text = rows.map(function (r) { return r.map(esc).join(';'); }).join('\n');
   return CPDisk.proxyFile(path).then(function (b) { return b.text(); }, function (e) { if (e && e.status === 404) return ''; throw e; })
     .then(function (old) {
       old = String(old || '').replace(/^﻿/, '').replace(/\s+$/, '');
-      var body = '﻿' + (old || CP_OUTPUT_HEAD) + '\n' + text + '\n';   /* BOM — Excel открывает кириллицу */
+      var body = '﻿' + (old || head) + '\n' + text + '\n';   /* BOM — Excel открывает кириллицу */
       return CPDisk.ensureDir(CP_CONFIG.serviceDir).then(function () {
         return CPDisk.uploadBlob(path, new Blob([body], { type: 'text/csv;charset=utf-8' }), true);
       });
-    }).catch(function (e) { if (window.console) console.warn('[CP] выработка не записалась', e && (e.body || e.message || e)); });
+    }).catch(function (e) { if (window.console) console.warn('[CP] ' + file + ' не записался', e && (e.body || e.message || e)); });
 }
 
 function cpOutputRow(ver, shootName, card, event) {

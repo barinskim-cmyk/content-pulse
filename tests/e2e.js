@@ -704,10 +704,26 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
   await page.check('#cpFollowCard');
   await page.evaluate(() => { CP.folder = ''; CP.folderByCard = false; cbRenderTray(); });
   await page.click('#cbCards .cb-card[data-cid="' + (await page.evaluate(() => App.cards.find(c => c.title === '74595').id)) + '"] [data-cp-card-brak]');
+  /* брак (Маша, 09.11): окно — вид брака и комментарий; копия в «брак/<съёмка>» со структурой; строка в брак.csv */
+  await page.waitForSelector('#cpBrak.cp-open', { timeout: 5000 }).catch(() => {});
+  await page.click('#cpBrak [data-cp-brak-go]');
+  check('«В брак»: окно не пускает без вида брака', /Выберите вид брака/.test(await page.textContent('#cpBrakErr')) && await page.evaluate(() => !cpMeta().cardStatus[App.cards.find(x => x.title === '74595').id]));
+  await page.check('#cpBrak input[value="style"]');
+  await page.fill('#cpBrakNote', 'фон серый');
+  await page.click('#cpBrak [data-cp-brak-go]');
   check('«В брак» на карточке — пересъём для карточки и её кадров', await page.evaluate(() => {
     var c = App.cards.find(x => x.title === '74595'), m = cpMeta();
     return m.cardStatus[c.id].s === 'reshoot' && cpCardPids(c).every(pid => m.status[pid].s === 'reshoot') && !!document.querySelector('#cbCards .cp-badge.cp-reshoot');
   }));
+  {
+    const BR = 'disk:/_ContentPulse/брак/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/';
+    for (let i = 0; i < 60 && !FILES.has(BR + '1/74595_модель/manekin.jpg'); i++) await page.waitForTimeout(100);
+    for (let i = 0; i < 40 && !/фон серый/.test((FILES.get('disk:/_ContentPulse/брак.csv') || '').toString()); i++) await page.waitForTimeout(100);
+    check('брак: вид и комментарий в отборе, копия кадров в «брак/<съёмка>/<лук>/<артикул>», строка в брак.csv',
+      FILES.has(BR + '1/74595_модель/manekin.jpg') && /по стилю;фон серый;.*;в брак/.test((FILES.get('disk:/_ContentPulse/брак.csv') || '').toString())
+      && await page.evaluate(() => { var c = App.cards.find(x => x.title === '74595'), m = cpMeta(); return m.cardStatus[c.id].kind === 'style' && m.cardStatus[c.id].note === 'фон серый' && cpCardPids(c).every(pid => !!(m.brak || {})[pid]); }),
+      [...FILES.keys()].filter(k => /брак/.test(k)).join(' | '));
+  }
   await page.evaluate(() => {
     var tpl = App.templates[0];
     cbAddCardFromTpl(tpl.id);
@@ -1127,6 +1143,10 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
   await page.check('[data-cp-ck="' + bt[0] + '"]');
   await page.check('[data-cp-ck="' + bt[1] + '"]');
   await page.click('[data-cp-batch="reshoot"]');
+  await page.waitForSelector('#cpBrak.cp-open', { timeout: 5000 }).catch(() => {});
+  check('пачкой «В брак» — одно окно на всю пачку', /карточек 2/.test(await page.textContent('#cpBrak h3').catch(() => '')));
+  await page.check('#cpBrak input[value="photo"]');
+  await page.click('#cpBrak [data-cp-brak-go]');
   check('пачкой «В брак»: обе карточки и их кадры', await page.evaluate(x => { var m = cpMeta(); return m.cardStatus[x[0]].s === 'reshoot' && m.cardStatus[x[1]].s === 'reshoot' && m.status[x[2]].s === 'reshoot'; }, bt));
   await page.click('[data-cp-batch="approval"]');
   check('пачкой «На согласование»', await page.evaluate(x => { var m = cpMeta(); return m.cardStatus[x[0]].s === 'approval' && m.status[x[2]].s === 'approval'; }, bt));
@@ -1302,7 +1322,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     var take = (card, id) => { if (card.mode === 'auto') card.pids = card.pids.filter(x => x !== id); else card.slots.forEach(s => { if (s.pid === id) s.pid = null; }); };
     put(A, [b.id, c.id]); cbMarkDirty(); cbRenderCards();
     cpDoAction('approval', [b.id], A.id);
-    cpDoAction('reshoot', [c.id], A.id);
+    CP.brakAuto = { kind: 'photo', note: '' }; cpDoAction('reshoot', [c.id], A.id); CP.brakAuto = null;
     var before = [cpMeta().status[b.id] && cpMeta().status[b.id].s, cpMeta().status[c.id] && cpMeta().status[c.id].s];
     take(A, b.id); take(A, c.id); cbMarkDirty(); cbRenderCards();
     var after = [cpMeta().status[b.id] ? cpMeta().status[b.id].s : '', cpMeta().status[c.id] ? cpMeta().status[c.id].s : ''];
@@ -1554,7 +1574,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     check('каталог не запомнен в браузере — узнаётся сам: фильтры по папкам, служебная папка внутри каталога', await page.evaluate(k => cpGet('cp_catalog', '') === k
       && CP_CONFIG.serviceDir === k + '/_ContentPulse' && /^01_ИСХОДНИКИ/.test(document.getElementById('cpStages').textContent.trim()), K), await page.textContent('#cpStages'));
     check('что значит папка — по смыслу имени, потом по номеру: 04_САЙТ — сайт', await page.evaluate(() => cpCatRoleOf('04_САЙТ', {}) === 'site' && cpCatRoleOf('04_ОТРЕТУШИРОВАНО', {}) === 'review'
-      && cpCatRoleOf('03_РЕТУШЬ', {}) === 'retouch' && cpCatRoleOf('00_АРХИВ', {}) === 'skip' && cpCatRoleOf('02_ОТБОР', {}) === 'approval' && cpCatRoleOf('05_X', {}) === 'site' && cpCatRoleOf('ПРОЧЕЕ', {}) === 'skip'));
+      && cpCatRoleOf('03_РЕТУШЬ', {}) === 'retouch' && cpCatRoleOf('00_АРХИВ', {}) === 'archive' && cpCatRoleOf('02_ОТБОР', {}) === 'approval' && cpCatRoleOf('05_X', {}) === 'site' && cpCatRoleOf('ПРОЧЕЕ', {}) === 'skip'));
     check('каталог: фильтры = папки (01, 02_ОТБОР, 03, 04_САЙТ — по имени это сайт), нет «отретушировано» — нет фильтра, внутреннего «Отбора» нет',
       /^01_ИСХОДНИКИ\s*\d+02_ОТБОР/.test(st.stages.trim()) && !/Отбор в/.test(st.stages) && /02_ОТБОР\s*1/.test(st.stages) && /03_РЕТУШЬ/.test(st.stages) && /04_САЙТ/.test(st.stages) && !/ОТРЕТУШ|Согласование|ПРОЧЕЕ/.test(st.stages)
       && st.s.approve === K + '/02_ОТБОР' && st.s.retouch === K + '/03_РЕТУШЬ' && st.s.site === K + '/04_САЙТ' && !st.s.retouched, st.stages);

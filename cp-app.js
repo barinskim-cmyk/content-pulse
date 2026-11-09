@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.81';
+var CP_VERSION = '2.0.82';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1477,7 +1477,7 @@ function cpDecorate(rootId) {
       bk.setAttribute('data-cp-card-brak', cid);
       if (st && st.s === 'reshoot') {
         bk.textContent = 'В браке';
-        bk.title = 'В браке (пересъём) · ' + st.by + ' · ' + cpFmtDate(st.ts);
+        bk.title = 'В браке' + (st.kind && typeof cpBrakKindLabel === 'function' ? ' ' + cpBrakKindLabel(st.kind) : '') + (st.note ? ': ' + st.note : '') + ' · ' + st.by + ' · ' + cpFmtDate(st.ts);
         bk.style.borderColor = '#d9534f';
       } else {
         bk.textContent = 'В брак';
