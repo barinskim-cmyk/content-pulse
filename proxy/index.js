@@ -576,8 +576,20 @@ function endRecord(count, cdSize, cdOffset) {
   return h;
 }
 
-/** Скачать один файл Диска целиком (сервер-сервер, без Origin). */
+/** Скачать один файл Диска целиком; оборвалось соединение (Яндекс: «terminated», сброс) —
+    ещё две попытки с новой ссылкой (Маша, 08.11: «ПустоеИмя_11.jpg: terminated»). */
 async function readDiskFile(token, path) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await readDiskFileOnce(token, path); } catch (e) {
+      const msg = String(e && e.message || e);
+      if (attempt >= 2 || /размер изменился|не выдана \(4\d\d/.test(msg)) throw e;
+      console.log(JSON.stringify({ ev: 'read_retry', path: path.split('/').pop(), attempt: attempt + 1, error: msg }));
+      await sleep(800 * (attempt + 1));
+    }
+  }
+}
+
+async function readDiskFileOnce(token, path) {
   const t0 = Date.now();
   const link = await disk(token, 'GET', '/resources/download', { path });
   if (link.status !== 200) throw new Error(path.split('/').pop() + ': ссылка не выдана (' + link.status + ' ' + (link.data.message || '') + ')');
@@ -599,7 +611,19 @@ async function diskHref(token, path) {
   return link.data.href;
 }
 
-async function streamDiskFile(token, path, onChunk) {
+/** Поток файла Диска. retry — можно повторить, пока ничего не отдали дальше (первый проход для CRC). */
+async function streamDiskFile(token, path, onChunk, retry) {
+  for (let attempt = 0; ; attempt++) {
+    let given = 0;
+    try { return await streamDiskFileOnce(token, path, (b) => { given += b.length; return onChunk(b, attempt); }); } catch (e) {
+      if (!retry || attempt >= 2) throw e;
+      console.log(JSON.stringify({ ev: 'stream_retry', path: path.split('/').pop(), attempt: attempt + 1, given, error: String(e && e.message || e) }));
+      await sleep(800 * (attempt + 1));
+    }
+  }
+}
+
+async function streamDiskFileOnce(token, path, onChunk) {
   const href = await diskHref(token, path);
   const r = await fetch(href, { redirect: 'follow' });
   if (r.status !== 200) throw new Error(path.split('/').pop() + ': файл не отдан, HTTP ' + r.status);
@@ -703,7 +727,8 @@ async function doZipInner(token, target, entries, store) {
       if (buf === null) {
         /* крупный файл: проход 1 — CRC, проход 2 — данные в архив */
         let c = -1;
-        const n1 = await streamDiskFile(token, x.from, (b) => { c = crc32Update(c, b); });
+        let at = 0;
+        const n1 = await streamDiskFile(token, x.from, (b, attempt) => { if (attempt !== at) { at = attempt; c = -1; } c = crc32Update(c, b); }, true);
         if (n1 !== x.size) throw new Error(x.from.split('/').pop() + ': размер изменился (' + n1 + ' вместо ' + x.size + '), обновите съёмку');
         const crc = (c ^ -1) >>> 0;
         const lh = localHeader(x.name, crc, x.size, dt);
@@ -795,8 +820,8 @@ async function doZipPart(token, req, openPart) {
       pump();
       let crc;
       if (buf === null) {
-        let c = -1;
-        const n1 = await streamDiskFile(token, x.from, (b) => { c = crc32Update(c, b); });
+        let c = -1, at = 0;
+        const n1 = await streamDiskFile(token, x.from, (b, attempt) => { if (attempt !== at) { at = attempt; c = -1; } c = crc32Update(c, b); }, true);
         if (n1 !== x.size) throw new Error(x.from.split('/').pop() + ': размер изменился (' + n1 + ' вместо ' + x.size + '), обновите съёмку');
         crc = (c ^ -1) >>> 0;
         await out.write(localHeader(x.name, crc, x.size, dt, needs64(offset)));

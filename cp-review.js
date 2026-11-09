@@ -487,7 +487,7 @@ cpRenderPanel = (function (orig) {
     body += '<div class="cp-note">' + sel.stagePaths.map(function (p) { return cbEsc(CPDisk.showPath(p)); }).join('<br>') + '</div>';
     panel.setAttribute('data-path', sel.path);
     panel.innerHTML = head + '<div class="cp-panel-body">' + body + '</div><div class="cp-panel-actions"><div class="cp-sum">Здесь файлов: <b>' + t.files + '</b> · ' + cpMb(t.bytes) + '</div>'
-      + acts + '<button class="cb-primary" data-cp-stdl="1"' + (t.files ? '' : ' disabled') + '>Скачать отсюда</button></div>';
+      + acts + '<button class="cb-primary" data-cp-stdl="1"' + (t.files ? '' : ' disabled') + '>Скачать всё из ' + cbEsc(label) + ' · ' + t.files + '</button></div>';
   };
 })(cpRenderPanel);
 

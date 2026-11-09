@@ -66,8 +66,9 @@ var CP_DICT_TEMPLATE = [
     + '.cp-panel-head .cp-sp{flex:1}'
     + '.cp-panel-body{flex:1;overflow:auto;padding:6px 18px 18px}'
     + '.cp-panel h4{font-size:10px;letter-spacing:.12em;color:#a3a09a;font-weight:600;margin:16px 0 8px;text-transform:uppercase}'
-    + '.cp-panel-actions{display:flex;gap:8px;padding:12px 18px;border-top:1px solid #2a2a28;align-items:center}'
-    + '.cp-panel-actions .cp-sum{flex:1;color:#a3a09a;font-size:11px;line-height:1.4}'
+    + '.cp-panel-actions{display:flex;flex-wrap:wrap;gap:8px;padding:12px 18px;border-top:1px solid #2a2a28;align-items:center}'
+    + '.cp-panel-actions .cp-sum{flex:1 0 100%;order:-1;color:#a3a09a;font-size:11px;line-height:1.4}'
+    + '.cp-panel-actions .cb-primary{margin-left:auto}'
     + '.cp-fold{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #1f1f1d;font-size:12px}'
     + '.cp-fold label{flex:1;display:flex;gap:8px;align-items:center;cursor:pointer;word-break:break-word}'
     + '.cp-fold small{color:#a3a09a;font-family:"IBM Plex Mono",monospace}'
@@ -291,8 +292,14 @@ function cpMarkSelected() {
   });
 }
 
+/** Как называется папка исходников (в каталоге — 01_ИСХОДНИКИ). */
+function cpSourceLabel() {
+  var l = typeof cpStageList === 'function' ? cpStageList()[0] : null;
+  return (l && l.label) || 'исходников';
+}
+
 function cpSelectShoot(path, name, modified) {
-  CP.sel = { path: path, name: name, modified: modified, loading: true,
+  CP.sel = { path: path, name: name, modified: modified, loading: true, allFiles: true,
     folders: {}, open: {}, status: '', tag: '', dl: '', data: null, rev: '', files: [], dirs: [] };
   cpMarkSelected();
   cpRenderPanel();
@@ -319,6 +326,12 @@ function cpSelectShoot(path, name, modified) {
     sel.files = r[1];
     sel.loading = false;
     cpRenderPanel();
+    /* из исходников скачивается всё — видео и прочие файлы досчитываем в фоне */
+    cpWalkAll(path).then(function (list) {
+      if (CP.sel !== sel) return;
+      sel.allList = list;
+      cpRenderPanel();
+    }, function () { });
   }).catch(function (e) {
     sel.loading = false;
     sel.error = e;
@@ -452,9 +465,12 @@ function cpPhotoIndex(sel) {
  * Действуют папки и теги папок; статус и «скачано» есть только у кадров —
  * при этих фильтрах прочие файлы не берём.
  */
-/* Фильтры панели — чипы сверху (Маша, 08.11: «фильтры снизу убрать, наверх добавить
-   в виде тегов, которые надо отметить — сейчас нажимаю „Скачать“ и скачиваю хрен знает что»).
-   Внутри группы отмеченные складываются (на ретуши ИЛИ брак), группы — пересекаются. */
+/* Что скачивается, решает папка, из которой смотришь (Маша, 08.11): «из исходников
+   скачивается всё, из ретуши — только то, что на ретуши, из отбора — то, что на
+   согласовании; скачивается именно то, что лежит в этой папке, а не в исходниках;
+   фильтр можно убрать». Здесь — исходники: всё (кадры, видео и прочие файлы), галочки
+   папок сужают. Этапы — панель папки этапа (cp-review.js). Отборы по статусу и тегу
+   остались внутри (sel.statuses / sel.tags), в панели их нет. */
 function cpOn(map) { return Object.keys(map || {}).filter(function (k) { return map[k]; }); }
 
 function cpFilteredOthers(sel) {
@@ -611,9 +627,6 @@ function cpRenderPanel() {
   var untagAttr = function (html, fp) { return html.replace(/data-cp-untag=/g, 'data-cp-fold-untag="' + cbEsc(fp) + '" data-cp-untag='); };
   var plus = function (fp) { return '<button class="cp-addtag" data-cp-addtag="' + cbEsc(fp) + '" title="Добавить тег">+</button>'; };
 
-  /* что скачать — чипы сверху: статусы, «в карточках», теги, видео */
-  body += cpFilterChips(sel, idx);
-
   /* вся съёмка: что внутри и теги */
   body += '<div class="cp-fold cp-fold-all"><span class="cp-fold-name">Вся съёмка <small>· ' + Object.keys(idx).length + '</small></span>'
     + '<span class="cp-fold-props">' + cpStateChips(cpFolderState(idx, null))
@@ -655,7 +668,6 @@ function cpRenderPanel() {
   }
   if (!CP_SHOW_DL) sel.dl = '';
   if (sel.allFiles && !sel.allList) body += '<div class="cp-note">Считаю видео и прочие файлы...</div>';
-  else if (sel.allFiles && (cpOn(sel.statuses).length || sel.inCards)) body += '<div class="cp-note">Статус и «в карточках» есть только у кадров — видео и прочие файлы с ними не скачиваются.</div>';
   if (sel.stateError) body += '<div class="cp-note cp-warn">Отбор съёмки не прочитался — статусы и карточки не учитываются.</div>';
   else if (!sel.data) body += '<div class="cp-note">Съёмку ещё не открывали в Content Pulse: карточек и статусов пока нет.</div>';
   body += '<div class="cp-note"><a href="#" data-cp-p="bench">Проверить скорость Диска</a></div>';
@@ -679,75 +691,9 @@ function cpRenderPanel() {
     + '<div class="cp-panel-actions"><div class="cp-sum">' + sum + '</div>'
     + '<button data-cp-p="open">Открыть</button>'
     + '<button class="cb-primary" data-cp-p="download"' + (items.length || others.length ? '' : ' disabled') + '>'
-    + (nChecked ? 'Скачать отмеченные' : 'Скачать') + ' · ' + (items.length + others.length) + '</button></div>';
+    + (nChecked ? 'Скачать отмеченные папки' : 'Скачать всё из ' + cbEsc(cpSourceLabel())) + ' · ' + (items.length + others.length) + '</button></div>';
   if (keepScroll) panel.querySelector('.cp-panel-body').scrollTop = keepScroll;
 }
-
-/** Чипы фильтров над деревом папок: что войдёт в «Скачать». Числа — сколько кадров с этим признаком. */
-function cpFilterChips(sel, idx) {
-  sel.statuses = sel.statuses || {};
-  sel.tags = sel.tags || {};
-  var st = {}, tg = {}, inCards = 0;
-  Object.keys(idx).forEach(function (k) {
-    var x = idx[k];
-    st[x.status || 'none'] = (st[x.status || 'none'] || 0) + 1;
-    x.tags.forEach(function (t) { tg[t] = (tg[t] || 0) + 1; });
-    if (x.cards.length) inCards++;
-  });
-  var chip = function (key, label, n, on, title) {
-    return '<button class="cp-fchip' + (on ? ' cp-on' : '') + '" data-cp-fchip="' + cbEsc(key) + '"' + (title ? ' title="' + cbEsc(title) + '"' : '') + '>'
-      + cbEsc(label) + (n !== null ? ' <small>' + n + '</small>' : '') + '</button>';
-  };
-  var html = '';
-  [['retouch', 'на ретуши'], ['approval', 'на согласовании'], ['reshoot', 'брак'], ['removed', 'удалено из отбора'], ['none', 'без статуса']].forEach(function (c) {
-    if (st[c[0]] || sel.statuses[c[0]]) html += chip('st:' + c[0], c[1], st[c[0]] || 0, sel.statuses[c[0]]);
-  });
-  if (inCards || sel.inCards) html += chip('cards', 'в карточках', inCards, sel.inCards, 'Только кадры, которые лежат в карточках');
-  var order = (CP.dict || []).map(function (d) { return d.tag; });
-  Object.keys(tg).sort(function (a, b) { var ia = order.indexOf(a), ib = order.indexOf(b); return (ia < 0 ? 1e6 : ia) - (ib < 0 ? 1e6 : ib) || a.localeCompare(b); })
-    .concat(cpOn(sel.tags).filter(function (t) { return !tg[t]; }))
-    .forEach(function (t) { html += chip('tag:' + t, t, tg[t] || 0, sel.tags[t], 'Тег'); });
-  html += chip('files', 'с видео и прочими файлами', null, sel.allFiles, 'Кроме кадров JPG — видео и другие файлы съёмки');
-  var any = cpOn(sel.statuses).length || cpOn(sel.tags).length || sel.inCards || sel.allFiles;
-  return '<div class="cp-fchips"><span class="cp-fchips-l">Что скачать' + (any ? '' : ' — все кадры, отметьте нужное') + ':</span>' + html
-    + (any ? '<a href="#" data-cp-fchip="reset">сбросить</a>' : '') + '</div>';
-}
-
-document.getElementById('cpPanel').addEventListener('click', function (e) {
-  var b = e.target.closest('[data-cp-fchip]');
-  var sel = CP.sel;
-  if (!b || !sel || sel.stage) return;
-  e.preventDefault();
-  var k = b.getAttribute('data-cp-fchip');
-  sel.statuses = sel.statuses || {};
-  sel.tags = sel.tags || {};
-  if (k === 'reset') { sel.statuses = {}; sel.tags = {}; sel.inCards = false; sel.allFiles = false; }
-  else if (k === 'cards') sel.inCards = !sel.inCards;
-  else if (k.indexOf('st:') === 0) sel.statuses[k.slice(3)] = !sel.statuses[k.slice(3)];
-  else if (k.indexOf('tag:') === 0) sel.tags[k.slice(4)] = !sel.tags[k.slice(4)];
-  else if (k === 'files') {
-    sel.allFiles = !sel.allFiles;
-    if (sel.allFiles && !sel.allList) {
-      cpWalkAll(sel.path).then(function (list) {
-        if (CP.sel !== sel) return;
-        sel.allList = list;
-        cpRenderPanel();
-      }, function (err) { cpHandleError(err, 'Не удалось прочитать файлы съёмки'); });
-    }
-  }
-  cpRenderPanel();
-});
-
-(function cpFChipCss() {
-  var st = document.createElement('style');
-  st.textContent = '.cp-fchips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 14px;padding-bottom:12px;border-bottom:1px solid #2a2a28}'
-    + '.cp-fchips-l{font-size:12px;color:#a3a09a;width:100%}'
-    + '.cp-fchip{font:inherit;font-size:12px;padding:3px 9px;border-radius:12px;border:1px solid #3a3a37;background:transparent;color:#cfcac2;cursor:pointer}'
-    + '.cp-fchip small{color:#8a877f;margin-left:2px}'
-    + '.cp-fchip.cp-on{border-color:#C9956B;background:#2b231c;color:#f2e2cf}.cp-fchip.cp-on small{color:#e7c9a8}'
-    + '.cp-fchips a{font-size:12px;color:#C9956B}';
-  document.head.appendChild(st);
-})();
 
 /* ---------- изменения отбора с витрины (чтение-правка-запись) ---------- */
 
@@ -845,14 +791,22 @@ function cpShelfDownload() {
   var cards = data.cards || [];
   var name;
   var used = {};
-  /* раскладка внутри архива: кадры из карточек — по папкам карточек,
-     остальные — по исходным папкам; имена файлов исходные */
+  /* Раскладка внутри архива — структура съёмки как на Диске (Маша, 08.11: «когда скачиваю
+     всё, нужно, чтобы структура сохранялась; фотография, которая переехала в карточку, —
+     в папке артикула, все остальные — вне папки артикула»):
+     - кадр в карточке артикула — в её папке артикула (с луком), даже если на Диске лежит
+       в другой папке;
+     - кадр в другой карточке — в папке карточки «NN название» (если в структура.txt не
+       сказано «как в папках»);
+     - остальные — в исходных папках. Имена файлов исходные. */
   var stype = typeof cpShootType === 'function' ? cpShootType(sel.name) : null;
   var asFolders = !!(stype && stype.exportMode === 'folders');   /* правило из структура.txt */
   var numbered = !!(stype && stype.exportNames === 'numbered');
   var entries = items.map(function (x) {
     var parts;
-    if (x.cards.length && !asFolders) {
+    var art = x.cards.map(function (i) { return cards[i]; }).filter(function (c) { return c && c.cpArticleDir; })[0];
+    if (art) parts = art.cpArticleDir.split('/');
+    else if (x.cards.length && !asFolders) {
       var c = cards[x.cards[0]];
       /* карточка артикула — исходная папка артикула (с луком), иначе «NN название» */
       parts = [cpCardExportFolder(c, x.cards[0])];

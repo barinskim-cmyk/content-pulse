@@ -58,7 +58,8 @@ const PREVIEW_CALLS = { single: 0, batch: 0, big: 0 };
 /* режим «превью заблокировано»: файлы — настоящие картинки, их будут уменьшать в браузере */
 if (process.env.BLOCK_PREVIEW) for (const k of [...FILES.keys()]) FILES.set(k, png(60, 40));
 const md5 = (b) => require('crypto').createHash('md5').update(b).digest('hex');
-const TRASHED = [], MOVED = [], ZIPPART_CALLS = [];   /* что ушло в Корзину Диска / перенесено между этапами */
+const TRASHED = [], MOVED = [], ZIPPART_CALLS = [];
+let ZIPPART_FAIL_ONCE = null;   /* оборвать один кусок архива — страница должна повторить */   /* что ушло в Корзину Диска / перенесено между этапами */
 const PROPS = new Map();   /* custom_properties папок (сводка съёмки) */
 const meta = (p) => {
   const name = p.split('/').pop();
@@ -213,6 +214,7 @@ async function route(r) {
         if (FILES.get(e.from).length !== e.size) return json(422, { error: 'размер изменился ' + e.from });
       }
       if (b.n !== (u.calls || 0) + 1 || b.offset !== (u.next || 0)) return json(400, { error: 'кусок не по порядку' });
+      if (ZIPPART_FAIL_ONCE && !ZIPPART_FAIL_ONCE.done) { ZIPPART_FAIL_ONCE.done = true; return json(422, { error: 'IMG_0101.jpg: terminated' }); }
       ZIPPART_CALLS.push(b.n);
       u.zip = true; u.target = b.target; u.calls = b.n; u.names = (u.names || []).concat(b.entries.map(e => e.name));
       let off = b.offset;
@@ -384,7 +386,9 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('архив отбора скачивается обычной загрузкой браузера', DOWNLOADS.some(p => /выгрузки\/LM-1043_отбор_1\.zip$/.test(p)), DOWNLOADS.join(' | '));
   check('ссылку на папку у Яндекса не просим (папки он не отдаёт)', !log.some(l => /resources\/download disk:\/_ContentPulse\/выгрузки\/[^.]*$/.test(l)));
 
-  /* вся съёмка большая: собирается за несколько вызовов, но архив — ОДИН (Маша, 06.11: «разбил на два куска») */
+  /* вся съёмка большая: собирается за несколько вызовов, но архив — ОДИН (Маша, 06.11: «разбил на два куска»);
+     один кусок обрывается на середине (Яндекс: «terminated») — страница повторяет его сама */
+  ZIPPART_FAIL_ONCE = {};
   const callsBefore = ZIPPART_CALLS.length;
   await page.evaluate(() => { CP.zipTarget = 250; CP.zipPartMin = 100; CP.directMin = 150; document.getElementById('cpMenuDlAll').click(); });
   await page.waitForFunction(() => App.projectMeta.cp.events.some(e => e.action === 'download_shoot'), null, { timeout: 10000 });
@@ -394,6 +398,8 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     && allNames.length === 4 && allNames.some(n => n === 'LM-1043_вся съёмка_1/part2/c.jpg'), JSON.stringify([ZIPPART_CALLS.slice(callsBefore), allNames, zParts]));
   check('карточка: одна кнопка «Скачать ZIP»', await page.evaluate(() => document.querySelectorAll('#cpDlCard a.cp-dlcard-btn').length === 1 && /Скачать ZIP/.test(document.getElementById('cpDlCard').textContent)));
   check('один архив скачивается', DOWNLOADS.some(p => /выгрузки\/LM-1043_вся съёмка_1\.zip$/.test(p)), DOWNLOADS.join(' | '));
+  check('кусок архива оборвался — повторён, архив всё равно собран целиком', ZIPPART_FAIL_ONCE.done && allNames.length === 4);
+  ZIPPART_FAIL_ONCE = null;
   await page.evaluate(() => { CP.zipTarget = 400 * 1024 * 1024; CP.zipPartMin = 6 * 1024 * 1024; CP.directMin = 48 * 1024 * 1024; });
 
   /* повторное открытие той же съёмки: отбор читается с Диска */
@@ -442,16 +448,15 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('тег сразу нескольким: выбор появляется, когда отмечены папки', !!(await page.$('#cpAssignTag')) && /Отмеченным \(1\)/.test(await page.textContent('[data-cp-p="assign"]')));
   const st1 = JSON.parse(FILES.get('disk:/Архив/LM-1043/_contentpulse.json').toString());
   check('тег папки записан в отбор на Диске', (st1.meta.cp.folderTags.part2 || []).includes('Яна'));
-  /* фильтры — чипы над папками (Маша, 08.11) */
-  check('фильтры скачивания — чипами сверху панели, внизу выпадающих списков нет', !!(await page.$('#cpPanel .cp-fchips [data-cp-fchip="tag:Яна"]')) && !(await page.$('#cpFTag')) && !(await page.$('#cpFStatus'))
-    && await page.evaluate(() => { const c = document.querySelector('#cpPanel .cp-fchips'), f = document.querySelector('#cpPanel .cp-fold-all'); return !!c && !!f && (c.compareDocumentPosition(f) & Node.DOCUMENT_POSITION_FOLLOWING); }));
-  await page.click('[data-cp-fchip="tag:Яна"]');
+  /* фильтров в панели нет: что скачивается, решает папка (Маша, 08.11) — из исходников всё; отбор по тегу/статусу остался внутри */
+  check('в панели исходников нет фильтров-чипов и списков; кнопка «Скачать всё из Архив» (с галочками — «отмеченные папки»)', !(await page.$('#cpPanel .cp-fchips')) && !(await page.$('#cpFTag')) && !(await page.$('#cpFStatus'))
+    && /Скачать отмеченные папки/.test(await page.textContent('[data-cp-p="download"]')));
+  await page.evaluate(() => { CP.sel.tags = { 'Яна': true }; cpRenderPanel(); });
   check('фильтр по тегу папки: только её кадры (наследование)', await page.evaluate(() => cpFiltered(CP.sel).length === 2 && cpFiltered(CP.sel).every(x => x.dir === 'part2')));
   await page.uncheck('[data-cp-fold="part2"]');
-  await page.click('[data-cp-fchip="tag:Яна"]');
-  await page.click('[data-cp-fchip="st:retouch"]');
-  check('фильтр по статусу «на ретуши» — чип отмечен, на кнопке — сколько скачается', await page.evaluate(() => cpFiltered(CP.sel).length === 2)
-    && /cp-on/.test(await page.getAttribute('[data-cp-fchip="st:retouch"]', 'class')) && /Скачать · 2/.test(await page.textContent('[data-cp-p="download"]')));
+  check('без галочек — «Скачать всё из Архив» и число', /Скачать всё из Архив · \d+/.test(await page.textContent('[data-cp-p="download"]')), await page.textContent('[data-cp-p="download"]'));
+  await page.evaluate(() => { CP.sel.tags = {}; CP.sel.statuses = { retouch: true }; cpRenderPanel(); });
+  check('отбор по статусу «на ретуши» (внутренний)', await page.evaluate(() => cpFiltered(CP.sel).length === 2));
   await page.click('[data-cp-p="download"]');
   await page.waitForFunction(() => CP.sel && CP.sel.data && Object.keys(CP.sel.data.meta.cp.downloads).length === 2, null, { timeout: 10000 });
   const ex1 = ZIPS.get('disk:/_ContentPulse/выгрузки/LM-1043_Ретушь_1.zip') || [];
@@ -467,7 +472,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   await page.click('[data-cp-p="download"]');
   await page.waitForFunction(() => Object.values(CP.sel.data.meta.cp.downloads).every(d => d.n === 2), null, { timeout: 10000 });
   check('повторное скачивание разрешено: _2 и счётчик ×2', ZIPS.has('disk:/_ContentPulse/выгрузки/LM-1043_Ретушь_2.zip'));
-  await page.click('[data-cp-fchip="st:retouch"]');
+  await page.evaluate(() => { CP.sel.statuses = {}; cpRenderPanel(); });
   await page.check('[data-cp-fold="part2"]');
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-panel.png') });
   await page.uncheck('[data-cp-fold="part2"]');
@@ -881,9 +886,9 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   await page.evaluate(() => cpShowShelf());
   await page.fill('#cpShelfSearch', 'МОДЕЛЬ');
   await page.click('.cp-shoot');
-  await page.waitForSelector('#cpPanel.cp-open [data-cp-fchip="files"]', { timeout: 10000 });
+  await page.waitForSelector('#cpPanel.cp-open [data-cp-p="download"]', { timeout: 10000 });
   await page.evaluate(() => { CP.directMin = 400; CP.directPart = 200; });   /* clip.mp4 (500 байт) — «крупный» */
-  await page.click('[data-cp-fchip="files"]');
+  /* из исходников скачивается всё — видео и прочие файлы считаются сами */
   await page.waitForFunction(() => CP.sel && CP.sel.allList && /других файлов: 1/.test(document.querySelector('#cpPanel .cp-sum').textContent), null, { timeout: 8000 });
   check('«Все файлы»: видео посчитано, мусор (.DS_Store) — нет', true);
   await page.click('[data-cp-p="download"]');
@@ -892,11 +897,11 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('крупное видео — отдельной ссылкой, перенесено частями и скачивается', MPU_PARTS.length === 3 && DOWNLOADS.some(p => /видео\/clip\.mp4$/.test(p)), MPU_PARTS.join(',') + ' :: ' + DOWNLOADS.slice(-3).join(' | '));
   await page.evaluate(() => { CP.directMin = 200 * 1024 * 1024; CP.directPart = 256 * 1024 * 1024; });
   const zVid = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST_1\.zip$/.test(k)).flatMap(([, v]) => v);
-  check('моделька: карточка артикула в выгрузке — папкой с именем карточки, без лука', zVid.some(n => /_1\/74595\/IMG_0101\.jpg$/.test(n)) && zVid.some(n => /_1\/74595\/manekin\.jpg$/.test(n)) && !zVid.some(n => /74595_модель/.test(n)), zVid.join(' | '));
+  check('«скачать всё» из исходников: структура как на Диске, кадр карточки артикула — в папке артикула (и кадр лука, попавший в карточку)',
+    zVid.some(n => /_1\/1\/74595_модель\/IMG_0101\.jpg$/.test(n)) && zVid.some(n => /_1\/1\/74595_модель\/manekin\.jpg$/.test(n)) && !zVid.some(n => /_1\/74595\//.test(n)), zVid.join(' | '));
   check('«Все файлы»: кадры в архиве, видео в архив не попало', !zVid.some(n => /clip\.mp4$/.test(n)) && zVid.filter(n => /\.jpg$/.test(n)).length === 3, zVid.join(' | '));
 
   /* дерево папок на панели: раскрыть до последнего уровня, отметить одну вложенную, статусы вложенных */
-  await page.click('[data-cp-fchip="files"]');
   check('папки с вложенными — кнопка «папок: N», вложенные скрыты', await page.evaluate(() =>
     /папок: 3/.test(document.querySelector('[data-cp-exp="1"]').textContent) && !document.querySelector('[data-cp-fold="1/74595_модель"]')));
   await page.click('[data-cp-exp="1"]');
@@ -916,7 +921,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   await page.waitForFunction(n => window.__zipsDone === undefined || true, zipsBefore);
   await page.waitForTimeout(1500);
   const zSub = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST_2\.zip$/.test(k)).flatMap(([, v]) => v);
-  check('«Скачать отмеченные» по вложенной папке: в архиве только её кадры', zSub.length === 2 && zSub.every(n => /_2\/74595\//.test(n)), zSub.join(' | '));
+  check('«Скачать отмеченные» по вложенной папке: в архиве только её кадры', zSub.length === 2 && zSub.every(n => /_2\/1\/74595_модель\//.test(n)), zSub.join(' | '));
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-tree-open.png') });
   await page.click('[data-cp-p="expall"]');
   check('«свернуть все» сворачивает дерево', await page.evaluate(() => !document.querySelector('[data-cp-fold="1/74595_модель"]')));
@@ -1269,7 +1274,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.waitForFunction(() => /файлов 2/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
     const pan = await page.textContent('#cpPanel');
     check('панель в фильтре 03_РЕТУШЬ: структура папки этапа — Y_74001_модель (забрал Y), 74002_модель, файлов 2; не исходники', /в папке 03_РЕТУШЬ/.test(pan)
-      && /Y_74001_модель/.test(pan) && /забрал Y/.test(pan) && /74002_модель/.test(pan) && /Здесь файлов: 2/.test(pan) && !/k1\.jpg · 1/.test(pan) && /Скачать отсюда/.test(pan), pan.slice(0, 400));
+      && /Y_74001_модель/.test(pan) && /забрал Y/.test(pan) && /74002_модель/.test(pan) && /Здесь файлов: 2/.test(pan) && !/k1\.jpg · 1/.test(pan) && /Скачать всё из 03_РЕТУШЬ · 2/.test(pan), pan.slice(0, 400));
     await page.click('[data-cp-p="close"]');
     /* удалили папку съёмки из этапа на Диске — при следующей сверке (сама, раз в 45 с) съёмка из фильтра пропадает */
     DIRS.delete(K + '/02_ОТБОР/2026-11-06_SV_КАТ'); FILES.delete(K + '/02_ОТБОР/2026-11-06_SV_КАТ/k1.jpg');

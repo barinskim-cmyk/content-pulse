@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.65';
+var CP_VERSION = '2.0.66';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1896,11 +1896,25 @@ function cpZipOne(name, entries, note) {
     var tick = setInterval(function () {
       cbBusyShow(msg + ' · ' + Math.round((Date.now() - t0) / 1000) + ' с', Math.max(0.03, res.bytes / Math.max(1, total)));
     }, 1000);
-    return CPDisk.proxyZipPart({
+    var body = {
       key: up.key, uploadId: up.uploadId, n: n, ts: ts, offset: offset, target: target, final: final,
       entries: chunk.map(function (e) { return { from: e.from, name: name + '/' + e.name, size: e.size }; }),
       done: final ? done : undefined
-    }).then(function (r) {
+    };
+    /* сеть оборвалась посреди куска (Яндекс: «terminated») — тот же кусок ещё раз:
+       облако примет его под тем же номером поверх недописанного */
+    var tries = 0;
+    var call = function () {
+      return CPDisk.proxyZipPart(body).catch(function (e) {
+        var txt = String((e && (e.body || e.message)) || e);
+        if (tries >= 2 || /размер изменился|изменился во время|больше 4 ГБ|65 тысяч/.test(txt)) throw e;
+        tries++;
+        msg = 'Сеть оборвалась, повторяю кусок ' + n + ' (' + tries + ' из 2)... · ' + cpMb(res.bytes) + ' из ' + cpMb(total);
+        cpDlCard(name, note, [], msg);
+        return new Promise(function (r) { setTimeout(r, 1500 * tries); }).then(call);
+      });
+    };
+    return call().then(function (r) {
       clearInterval(tick);
       if (!r || !r.etag || !Array.isArray(r.done) || r.done.length !== chunk.length) throw new Error('кусок архива ' + n + ' собран не полностью');
       parts.push({ n: r.n, etag: r.etag });
@@ -1928,7 +1942,9 @@ function cpZipOne(name, entries, note) {
   }).catch(function (e) {
     cbBusyHide();
     if (up) CPDisk.proxyMpu({ op: 'abort', key: up.key, uploadId: up.uploadId }).catch(function () { });
-    if (!(e && e.status === 501 && !up)) cpDlCard(name, note, [], '', 'Не удалось собрать архив: ' + ((e && (e.body || e.message)) || e));
+    var why = (e && (e.body || e.message)) || e;
+    try { var j = JSON.parse(why); if (j && j.error) why = j.error; } catch (x) { }
+    if (!(e && e.status === 501 && !up)) cpDlCard(name, note, [], '', 'Не удалось собрать архив: ' + why + '. Нажмите «Скачать» ещё раз — если повторится, напишите, на каком файле.');
     throw e;
   });
 }
