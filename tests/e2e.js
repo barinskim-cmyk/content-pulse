@@ -1650,9 +1650,9 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     const setTxt = (FILES.get(K + '/_ContentPulse/настройки.txt') || '').toString();
     check('00_АРХИВ = «исходники»: строка в настройках, его съёмки на витрине', /^этап 00_АРХИВ = исходники$/m.test(setTxt)
       && await page.evaluate(() => CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА')), setTxt.slice(-120));
-    await page.selectOption('[data-cp-cat="00_АРХИВ"]', 'не показывать');
+    await page.selectOption('[data-cp-cat="00_АРХИВ"]', 'архив');
     await page.waitForFunction(() => CP.shoots && !CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА'), null, { timeout: 10000 }).catch(() => {});
-    check('снова «не показывать» — съёмок архива нет', await page.evaluate(() => !CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА')));
+    check('снова «архив» — съёмок архива среди исходников нет', await page.evaluate(() => !CP.shoots.some(s => s.name === '2026-11-01_SV_ПРЕДМЕТКА')));
     /* «Сайт» (Маша, 09.11): плитки дат — «важна дата и что в эту дату сдано»; «скачано» — по папке артикула,
        по умолчанию качается всё за дату, галочкой — пропустить уже скачанное */
     {
@@ -1738,6 +1738,31 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       check('каталог без 04: «Согласовать ретушь» не копирует в старый «Сайт/дата/буква_номер»', /04_ОТРЕТУШИРОВАНО/.test(r.approve), r.approve);
       check('каталог без 03 и 02: «На ретушь» и «На согласование» — предупреждение до статуса', /03_РЕТУШЬ/.test(r.retouch) && /02_ОТБОР/.test(r.approval) && !/Нет кадров/.test(r.retouch + r.approval), JSON.stringify(r));
       check('каталог без 03: путь ретуши — ошибка, а не <съёмка>/Ретушь в исходниках', /нет папки ретуши/.test(r.base) && r.siteOk, r.base);
+    }
+    /* 00_АРХИВ (Маша, 09.11): «готова к архиву», «В архив» переносит съёмку целиком, фильтр архива — по клику */
+    {
+      await page.evaluate(() => { CP.stageFilter = ''; CP.archShoots = null; return cpLoadShoots(); });
+      await page.waitForFunction(() => CP.settings && CP.settings.archive && CP.shoots && CP.shoots.some(s => s.name === '2026-11-06_SV_КАТ'), null, { timeout: 8000 }).catch(() => {});
+      const a0 = await page.evaluate(() => ({ arch: CP.settings.archive, chip: !!document.querySelector('#cpStages [data-cp-stage="archive"]'), loaded: !!CP.archShoots }));
+      check('каталог: 00_АРХИВ — роль «архив», фильтр последним, при запуске не читается', a0.arch === 'disk:/КАТАЛОГ/00_АРХИВ' && a0.chip && !a0.loaded, JSON.stringify(a0));
+      await page.click('#cpStages [data-cp-stage="archive"]');
+      await page.waitForFunction(() => [...document.querySelectorAll('#cpShelfList .cp-shoot')].some(b => b.dataset.name === '2026-11-01_SV_ПРЕДМЕТКА'), null, { timeout: 8000 }).catch(() => {});
+      check('фильтр 00_АРХИВ по клику — съёмки архива', await page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-shoot')].map(b => b.dataset.name).join() === '2026-11-01_SV_ПРЕДМЕТКА'),
+        await page.textContent('#cpShelfList'));
+      await page.click('#cpStages [data-cp-stage=""]');
+      await page.evaluate(() => { var d = CP.shoots.find(s => s.name === '2026-11-06_SV_КАТ'); d.custom_properties = {}; d.cpSum = { k: [0, 0, 0, 0, 0, 2, 1], filled: 3 }; cpRenderShoots(); });
+      check('все артикулы на сайте или в браке — «готова к архиву»', /готова к архиву/.test(await page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === '2026-11-06_SV_КАТ').textContent)));
+      await page.evaluate(() => { var d = CP.shoots.find(s => s.name === '2026-11-06_SV_КАТ'); cpSelectShoot(d.path, d.name, d.modified); });
+      await page.waitForSelector('#cpPanel [data-cp-arch-go]', { timeout: 8000 }).catch(() => {});
+      let dlg = '';
+      page.once('dialog', d => { dlg = d.message(); d.accept(); });
+      await page.click('#cpPanel [data-cp-arch-go]');
+      for (let i = 0; i < 60 && !DIRS.has(K + '/00_АРХИВ/2026-11-06_SV_КАТ'); i++) await page.waitForTimeout(100);
+      await page.waitForFunction(() => CP.shoots && !CP.shoots.some(s => s.name === '2026-11-06_SV_КАТ'), null, { timeout: 8000 }).catch(() => {});
+      check('«В архив»: съёмка целиком в 00_АРХИВ (с отбором), из исходников ушла, с витрины тоже',
+        DIRS.has(K + '/00_АРХИВ/2026-11-06_SV_КАТ') && FILES.has(K + '/00_АРХИВ/2026-11-06_SV_КАТ/k1.jpg') && !DIRS.has(K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ')
+        && /на сайте \(2\) или в браке \(1\)/.test(dlg) && await page.evaluate(() => !CP.shoots.some(s => s.name === '2026-11-06_SV_КАТ')), dlg);
+      if (!(await page.isVisible('#cpArchiveInput'))) await page.click('#cpGear');
     }
     await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-catalog.png') });
     await page.fill('#cpArchiveInput', 'Архив');
