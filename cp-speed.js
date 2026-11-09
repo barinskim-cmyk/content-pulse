@@ -15,6 +15,11 @@
    (после проверки — в Корзину), в Облаке — exports/, бакет сам удалит через 3 дня.
    Итог: МБ/с, Мбит/с и сколько займут 15 ГБ; вывод — куда грузить и упирается ли
    всё в интернет.
+
+   «Давай такой же тест на скачивание» (09.11, после первой проверки: Облако в 4 потока
+   38 МБ/с, Диск 8 МБ/с) — то же по очереди на скачивание из Облака: 1 поток (так
+   качается архив), 4 и 8 потоков. С Диска страница качать не может: Яндекс 360 не
+   отдаёт файлы странице (поэтому архивы и собираются в Облаке) — это сказано в окне.
    ============================================================ */
 
 CP.speedMs = 15000;
@@ -51,11 +56,12 @@ function cpSpeedPhase(n, next, onTick) {
   var total = function () { var s = 0; Object.keys(sent).forEach(function (i) { s += sent[i]; }); return s; };
   var stream = function () {
     if (done || Date.now() > deadline) return Promise.resolve();
-    var id = k++;
-    return next().then(function (url) {
+    var id = k++, it = null;
+    return next().then(function (x) {
       if (done) return;
-      return cpSpeedPut(url, blob, function (b) { sent[id] = b; }, xhrs);
-    }).then(stream, function (e) { errors.push(e && e.message || String(e)); if (errors.length < 6) return stream(); });
+      it = typeof x === 'string' ? { url: x } : x;
+      return cpSpeedPut(it.url, blob, function (b) { sent[id] = b; }, xhrs);
+    }).then(function (r) { if (r !== 'abort' && it && it.ok) it.ok(); }).then(stream, function (e) { errors.push(e && e.message || String(e)); if (errors.length < 6) return stream(); });
   };
   var timer = setInterval(function () { onTick(total(), Date.now() - t0); }, 300);
   var stop = new Promise(function (r) { setTimeout(r, CP.speedMs); }).then(function () {
@@ -69,6 +75,45 @@ function cpSpeedPhase(n, next, onTick) {
     clearInterval(timer);
     r.errors = errors;
     return r;
+  });
+}
+
+/** Скачивание: n потоков качают пробные файлы по кругу, пока не выйдет время. next() — адрес файла. */
+function cpSpeedDlPhase(n, next, onTick) {
+  var got = 0, done = false, errors = [], ctrls = [];
+  var t0 = Date.now(), deadline = t0 + CP.speedMs;
+  var stream = function () {
+    if (done || Date.now() > deadline) return Promise.resolve();
+    var ctrl = new AbortController();
+    ctrls.push(ctrl);
+    return next().then(function (url) {
+      if (done) return;
+      return fetch(url, { cache: 'no-store', signal: ctrl.signal }).then(function (resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        var rd = resp.body.getReader();
+        var pump = function () {
+          return rd.read().then(function (x) {
+            if (x.done || done) return;
+            got += x.value.length;
+            return pump();
+          });
+        };
+        return pump();
+      });
+    }).then(stream, function (e) {
+      if (done) return;
+      errors.push(e && e.message || String(e));
+      if (errors.length < 6) return stream();
+    });
+  };
+  var timer = setInterval(function () { onTick(got, Date.now() - t0); }, 300);
+  for (var i = 0; i < n; i++) stream();
+  return new Promise(function (r) { setTimeout(r, CP.speedMs); }).then(function () {
+    done = true;
+    var res = { bytes: got, ms: Date.now() - t0, errors: errors };
+    ctrls.forEach(function (c) { try { c.abort(); } catch (e) { } });
+    clearInterval(timer);
+    return res;
   });
 }
 
@@ -90,9 +135,10 @@ function cpSpeedOpen() {
       if (!b) return;
       if (b.getAttribute('data-cp-sp') === 'close') { if (CP.speed && CP.speed.busy) return; box.classList.remove('cp-open'); }
       else if (b.getAttribute('data-cp-sp') === 'go') cpSpeedRun();
+      else if (b.getAttribute('data-cp-sp') === 'dl') cpSpeedRunDl();
     });
   }
-  CP.speed = { busy: false, rows: [], note: '' };
+  CP.speed = { busy: false, rows: {}, note: '', dl: {}, dlNote: '', cloudGets: [] };
   box.classList.add('cp-open');
   cpSpeedRender();
 }
@@ -104,24 +150,40 @@ var CP_SPEED_PHASES = [
   { key: 'cloud8', label: 'Облако, 8 потоков', where: 'cloud', n: 8 }
 ];
 
-function cpSpeedRender() {
-  var box = document.getElementById('cpSpeedBox'), st = CP.speed;
-  if (!box || !st) return;
-  var h = '<div class="cp-files-box"><div class="cp-files-head"><b>Скорость загрузки: Диск или Облако</b><button data-cp-sp="close" title="Закрыть">×</button></div><div class="cp-acc-body">'
-    + '<div class="cp-note">По очереди, по ' + Math.round(CP.speedMs / 1000) + ' секунд: Диск в 1 и 4 потока, Облако в 4 и 8 потоков. Грузятся пробные файлы, потом удаляются. '
-    + 'Пока идёт проверка, лучше ничего больше не качать и не заливать — иначе цифры занизятся.</div>'
-    + '<table class="cp-speed"><tr><th></th><th>МБ/с</th><th>Мбит/с</th><th>' + CP.speedGoalGb + ' ГБ займут</th></tr>';
-  CP_SPEED_PHASES.forEach(function (ph) {
-    var r = st.rows[ph.key];
+var CP_SPEED_DL_PHASES = [
+  { key: 'cloud1', label: 'Из Облака, 1 поток', where: 'cloud', n: 1, hint: 'так качается архив' },
+  { key: 'cloud4', label: 'Из Облака, 4 потока', where: 'cloud', n: 4 },
+  { key: 'cloud8', label: 'Из Облака, 8 потоков', where: 'cloud', n: 8 }
+];
+
+function cpSpeedTable(title, phases, rows, col) {
+  var h = '<h5 class="cp-speed-h">' + title + '</h5><table class="cp-speed"><tr><th></th><th>МБ/с</th><th>Мбит/с</th><th>' + col + '</th></tr>';
+  phases.forEach(function (ph) {
+    var r = rows[ph.key];
     var f = r && r.res ? cpSpeedFmt(r.res) : null;
     h += '<tr' + (r && r.now ? ' class="cp-speed-now"' : '') + '><td>' + cbEsc(ph.label) + (ph.hint ? ' <small>(' + ph.hint + ')</small>' : '') + '</td>'
       + (r && r.error ? '<td colspan="3" class="cp-acc-warn">' + cbEsc(r.error) + '</td>'
         : f ? '<td>' + f.mbs.toFixed(1) + '</td><td>' + Math.round(f.mbit) + '</td><td' + (f.min <= 15 ? ' class="cp-speed-ok"' : '') + '>' + (isFinite(f.min) ? '≈ ' + Math.ceil(f.min) + ' мин' : '—') + '</td>'
           : r && r.now ? '<td colspan="3">' + cbEsc(r.now) + '</td>' : '<td colspan="3" class="cp-speed-wait">—</td>') + '</tr>';
   });
-  h += '</table>';
+  return h + '</table>';
+}
+
+function cpSpeedRender() {
+  var box = document.getElementById('cpSpeedBox'), st = CP.speed;
+  if (!box || !st) return;
+  var h = '<div class="cp-files-box"><div class="cp-files-head"><b>Скорость: Диск или Облако</b><button data-cp-sp="close" title="Закрыть">×</button></div><div class="cp-acc-body">'
+    + '<div class="cp-note">По очереди, по ' + Math.round(CP.speedMs / 1000) + ' секунд: Диск в 1 и 4 потока, Облако в 4 и 8 потоков. Используются пробные файлы, потом удаляются. '
+    + 'Пока идёт проверка, лучше ничего больше не качать и не заливать — иначе цифры занизятся.</div>';
+  h += cpSpeedTable('Загрузка', CP_SPEED_PHASES, st.rows, CP.speedGoalGb + ' ГБ займут');
   if (st.note) h += '<div class="cp-speed-note">' + st.note + '</div>';
-  if (!st.busy) h += '<div class="cp-files-foot"><span class="cp-sp"></span><button class="cb-primary" data-cp-sp="go">' + (Object.keys(st.rows).length ? 'Проверить ещё раз' : 'Начать проверку') + '</button></div>';
+  h += cpSpeedTable('Скачивание', CP_SPEED_DL_PHASES, st.dl, CP.speedGoalGb + ' ГБ скачаются за');
+  h += '<div class="cp-note">С Диска напрямую страница качать не может — Яндекс 360 не отдаёт ей файлы; поэтому архивы и собираются в Облаке.</div>';
+  if (st.dlNote) h += '<div class="cp-speed-note">' + st.dlNote + '</div>';
+  if (st.prep) h += '<div class="cp-note">' + cbEsc(st.prep) + '</div>';
+  if (!st.busy) h += '<div class="cp-files-foot"><span class="cp-sp"></span>'
+    + '<button' + (Object.keys(st.rows).length ? '' : ' class="cb-primary"') + ' data-cp-sp="go">' + (Object.keys(st.rows).length ? 'Загрузку ещё раз' : 'Проверить загрузку') + '</button>'
+    + '<button' + (Object.keys(st.rows).length && !Object.keys(st.dl).length ? ' class="cb-primary"' : '') + ' data-cp-sp="dl">' + (Object.keys(st.dl).length ? 'Скачивание ещё раз' : 'Проверить скачивание') + '</button></div>';
   h += '</div></div>';
   box.innerHTML = h;
 }
@@ -129,14 +191,16 @@ function cpSpeedRender() {
 function cpSpeedRun() {
   var st = CP.speed;
   if (!st || st.busy) return;
-  st.busy = true; st.rows = {}; st.note = '';
+  st.busy = true; st.rows = {}; st.note = ''; st.cloudGets = [];
   cpSpeedRender();
   var tmp = CP_CONFIG.serviceDir.replace(/\/+$/, '') + '/_проверка_скорости_' + Date.now();
   var cloudUrls = null, ci = 0, di = 0;
   var res = {};
+  var cloudGets = null;
+  var take = function () { var i = ci++; return { url: cloudUrls[i], ok: function () { if (cloudGets && cloudGets[i]) st.cloudGets.push(cloudGets[i]); } }; };
   var getCloud = function () {
-    if (cloudUrls && ci < cloudUrls.length) return Promise.resolve(cloudUrls[ci++]);
-    return CPDisk.proxySpeedUrls(60).then(function (d) { cloudUrls = d.urls || []; ci = 0; return cloudUrls[ci++]; });
+    if (cloudUrls && ci < cloudUrls.length) return Promise.resolve(take());
+    return CPDisk.proxySpeedUrls(60).then(function (d) { cloudUrls = d.urls || []; cloudGets = d.gets || []; ci = 0; return take(); });
   };
   var getDisk = function () { return CPDisk.uploadHref(tmp + '/' + (di++) + '.bin', true); };
   var ready = CPDisk.ensureDir(tmp);
@@ -169,6 +233,57 @@ function cpSpeedRun() {
   });
 }
 
+/** Проверка скачивания: пробные файлы (4 на Диск, 4 в Облако — если от загрузки не осталось), потом по очереди качаем. */
+function cpSpeedRunDl() {
+  var st = CP.speed;
+  if (!st || st.busy) return;
+  if (!CPDisk.hasProxy()) { st.dlNote = 'Прослойка не подключена — Облако недоступно.'; cpSpeedRender(); return; }
+  st.busy = true; st.dl = {}; st.dlNote = '';
+  st.prep = st.cloudGets.length >= 4 ? '' : 'Готовлю пробные файлы в Облаке…';
+  cpSpeedRender();
+  var blob = cpSpeedBlob(), res = {}, xhrs = [];
+  var prep = st.cloudGets.length >= 4 ? Promise.resolve() : CPDisk.proxySpeedUrls(4).then(function (d) {
+    return cpPool([0, 1, 2, 3], 4, function (i) {
+      return cpSpeedPut(d.urls[i], blob, function () { }, xhrs).then(function () { st.cloudGets.push(d.gets[i]); });
+    });
+  });
+  var ci = 0;
+  var next = function () { return Promise.resolve(st.cloudGets[(ci++) % st.cloudGets.length]); };
+  prep.catch(function (e) { st.dlNote = 'Пробные файлы не залились: ' + ((e && (e.message || e.body)) || e); }).then(function () {
+    st.prep = '';
+    return CP_SPEED_DL_PHASES.reduce(function (p, ph) {
+      return p.then(function () {
+        if (!st.cloudGets.length) { st.dl[ph.key] = { error: 'нет пробных файлов' }; cpSpeedRender(); return; }
+        st.dl[ph.key] = { now: 'готовлю…' };
+        cpSpeedRender();
+        return cpSpeedDlPhase(ph.n, next, function (bytes, ms) {
+          st.dl[ph.key] = { now: 'идёт: ' + (bytes / 1048576 / Math.max(ms / 1000, 0.3)).toFixed(1) + ' МБ/с · ' + Math.round(ms / 1000) + ' из ' + Math.round(CP.speedMs / 1000) + ' с' };
+          cpSpeedRender();
+        }).then(function (r) {
+          res[ph.key] = r;
+          st.dl[ph.key] = r.bytes ? { res: r } : { error: 'ничего не скачалось' + (r.errors.length ? ': ' + r.errors[0] : '') };
+          cpSpeedRender();
+        });
+      });
+    }, Promise.resolve());
+  }).then(function () {
+    st.busy = false;
+    if (!st.dlNote) st.dlNote = cpSpeedVerdictDl(res);
+    cpSpeedRender();
+  });
+}
+
+function cpSpeedVerdictDl(res) {
+  var v = function (k) { return res[k] && res[k].bytes ? cpSpeedFmt(res[k]).mbs : 0; };
+  var one = v('cloud1'), many = Math.max(v('cloud4'), v('cloud8'));
+  if (!one && !many) return 'Не получилось измерить — проверьте интернет и попробуйте ещё раз.';
+  var mins = function (mbs) { return mbs ? Math.ceil(CP.speedGoalGb * 1024 / mbs / 60) : '—'; };
+  var out = ['Архив одним файлом: ' + CP.speedGoalGb + ' ГБ — около <b>' + mins(one) + ' мин</b>.'];
+  if (many > one * 1.5) out.push('В несколько потоков быстрее в ' + (many / one).toFixed(1) + ' раза (около ' + mins(many) + ' мин) — большую выборку выгоднее качать частями одновременно.');
+  else out.push('Несколько потоков почти не ускоряют — упираемся в интернет.');
+  return out.join('<br>');
+}
+
 /** Вывод: куда грузить и во что упираемся. */
 function cpSpeedVerdict(res) {
   var v = function (k) { return res[k] && res[k].bytes ? cpSpeedFmt(res[k]).mbs : 0; };
@@ -189,7 +304,7 @@ function cpSpeedVerdict(res) {
 (function () {
   var diag = document.getElementById('cpDiag');
   if (!diag) return;
-  diag.insertAdjacentHTML('afterend', '<button id="cpSpeed">Проверить скорость загрузки</button>');
+  diag.insertAdjacentHTML('afterend', '<button id="cpSpeed">Проверить скорость: загрузка и скачивание</button>');
   document.getElementById('cpSpeed').addEventListener('click', function () {
     var box = document.getElementById('cpSettings');
     if (box) box.classList.remove('cp-open');
@@ -205,6 +320,7 @@ function cpSpeedVerdict(res) {
     + '.cp-speed th{font-weight:400;color:#8a877f;text-align:right;padding:4px 8px;font-size:12px}.cp-speed th:first-child{text-align:left}'
     + '.cp-speed td{padding:6px 8px;border-top:1px solid #2a2a28;text-align:right}.cp-speed td:first-child{text-align:left}'
     + '.cp-speed td small{color:#8a877f}.cp-speed-now td{color:#e7c9a8}.cp-speed-wait{color:#5f5d58}.cp-speed-ok{color:#9fc2a3}'
+    + '.cp-speed-h{margin:14px 0 0;font-size:12px;font-weight:600;color:#cfcac2;text-transform:none}'
     + '.cp-speed-note{margin-top:8px;padding:10px 12px;border:1px solid #3a3a37;border-radius:4px;font-size:13px;line-height:1.6;color:#e6e2da}';
   document.head.appendChild(st);
 })();

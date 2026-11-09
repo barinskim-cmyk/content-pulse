@@ -305,13 +305,13 @@ function s3Presign(key, ttl, filename, contentType) {
   return 'https://' + S3.host + s3Path(key) + '?' + qs + '&X-Amz-Signature=' + sig;
 }
 
-/** Ссылка на загрузку объекта из браузера (PUT): действует ttl секунд. */
-function s3PresignPut(key, ttl) {
+/** Подписанная ссылка на объект (PUT — залить из браузера, GET — забрать Диском): действует ttl секунд. extra — partNumber/uploadId. */
+function s3PresignPut(key, ttl, extra, method) {
   const ad = amzDate(new Date()), date = ad.slice(0, 8);
   const scope = date + '/' + S3.region + '/s3/aws4_request';
-  const q = { 'X-Amz-Algorithm': 'AWS4-HMAC-SHA256', 'X-Amz-Credential': S3.key + '/' + scope, 'X-Amz-Date': ad, 'X-Amz-Expires': String(ttl), 'X-Amz-SignedHeaders': 'host' };
+  const q = Object.assign({ 'X-Amz-Algorithm': 'AWS4-HMAC-SHA256', 'X-Amz-Credential': S3.key + '/' + scope, 'X-Amz-Date': ad, 'X-Amz-Expires': String(ttl), 'X-Amz-SignedHeaders': 'host' }, extra || {});
   const qs = s3Query(q);
-  const canon = ['PUT', s3Path(key), qs, 'host:' + S3.host + '\n', 'host', 'UNSIGNED-PAYLOAD'].join('\n');
+  const canon = [method || 'PUT', s3Path(key), qs, 'host:' + S3.host + '\n', 'host', 'UNSIGNED-PAYLOAD'].join('\n');
   const sts = ['AWS4-HMAC-SHA256', ad, scope, sha256hex(canon)].join('\n');
   const sig = crypto.createHmac('sha256', s3SigningKey(date)).update(sts, 'utf8').digest('hex');
   return 'https://' + S3.host + s3Path(key) + '?' + qs + '&X-Amz-Signature=' + sig;
@@ -325,9 +325,63 @@ async function doSpeedUrls(token, n) {
   const me = await disk(token, 'GET', '', { fields: 'user' });
   if (me.status !== 200) return { status: me.status, result: { error: me.data.message || 'Нет доступа к Диску' } };
   const dir = 'exports/speed_' + crypto.randomBytes(8).toString('hex') + '/';
-  const urls = [];
-  for (let i = 0; i < Math.min(Math.max(+n || 1, 1), 200); i++) urls.push(s3PresignPut(dir + i + '.bin', 1800));
-  return { status: 200, result: { urls } };
+  const urls = [], gets = [];
+  for (let i = 0; i < Math.min(Math.max(+n || 1, 1), 200); i++) {
+    urls.push(s3PresignPut(dir + i + '.bin', 1800));
+    gets.push(s3PresignPut(dir + i + '.bin', 3600, null, 'GET'));   /* для проверки скачивания */
+  }
+  return { status: 200, result: { urls, gets } };
+}
+
+/* ---------- загрузка в исходники через Облако ----------
+   Маша, 09.11: проверка скорости — Облако в 4 потока 38 МБ/с (15 ГБ ≈ 7 мин), Диск в 4 потока
+   8 МБ/с (≈ 31 мин). Браузер заливает файлы в бакет по подписанным ссылкам (большие — частями),
+   потом Диск сам забирает каждый файл по ссылке («сохранить из интернета») — компьютер можно
+   выключать. Токен пользователя прослойка только передаёт Диску и не хранит. Объекты — в
+   exports/: бакет удалит их сам через 3 дня (за это время Диск их забирает). */
+const CLOUD_PART = 64 * 1024 * 1024;
+async function doCloudUp(token, req) {
+  if (!s3Ready()) return { status: 501, result: { error: 'Хранилище не настроено' } };
+  const op = req.op;
+  if (op === 'start') {
+    const me = await disk(token, 'GET', '', { fields: 'user' });
+    if (me.status !== 200) return { status: me.status, result: { error: me.data.message || 'Нет доступа к Диску' } };
+    const dir = 'exports/in_' + crypto.randomBytes(8).toString('hex') + '/';
+    const files = (req.files || []).slice(0, 200), out = [];
+    for (let i = 0; i < files.length; i++) {
+      const size = +files[i].size || 0, key = dir + i;
+      if (size <= CLOUD_PART) { out.push({ key, put: s3PresignPut(key, 43200) }); continue; }
+      const r = await s3Call('POST', key, { uploads: '' }, '', { 'content-type': 'application/octet-stream' });
+      const m = /<UploadId>([^<]+)<\/UploadId>/.exec(r.body);
+      if (r.status !== 200 || !m) return { status: 502, result: { error: 'Облако не начало загрузку: HTTP ' + r.status } };
+      const n = Math.ceil(size / CLOUD_PART), parts = [];
+      for (let k = 1; k <= n; k++) parts.push(s3PresignPut(key, 43200, { partNumber: String(k), uploadId: m[1] }));
+      out.push({ key, uploadId: m[1], partSize: CLOUD_PART, parts });
+    }
+    return { status: 200, result: { files: out } };
+  }
+  if (op === 'done') {
+    if (!req.key || !req.uploadId || !Array.isArray(req.etags) || !req.etags.length) return { status: 400, result: { error: 'Нет частей' } };
+    if (String(req.key).indexOf('exports/in_') !== 0) return { status: 400, result: { error: 'Не тот ключ' } };
+    const xml = '<CompleteMultipartUpload>' + req.etags.map((e, i) => '<Part><PartNumber>' + (i + 1) + '</PartNumber><ETag>' + String(e).replace(/[<>&]/g, '') + '</ETag></Part>').join('') + '</CompleteMultipartUpload>';
+    const r = await s3Call('POST', req.key, { uploadId: req.uploadId }, xml, { 'content-type': 'application/xml' });
+    if (r.status !== 200 || /<Error>/.test(r.body)) return { status: 502, result: { error: 'Облако не собрало файл: HTTP ' + r.status + ' ' + r.body.slice(0, 200) } };
+    return { status: 200, result: { ok: true } };
+  }
+  if (op === 'fetch') {
+    /* Диск забирает файлы из Облака сам: «сохранить файл из интернета» по подписанной ссылке (3 дня) */
+    const items = (req.items || []).slice(0, 50), results = [];
+    for (const it of items) {
+      if (!it.path || String(it.key || '').indexOf('exports/in_') !== 0) { results.push({ path: it.path, status: 'failed', error: 'нет пути или ключа' }); continue; }
+      const url = s3PresignPut(it.key, 259200, null, 'GET');
+      const r = await disk(token, 'POST', '/resources/upload', { path: it.path, url });
+      if (r.status === 202 || r.status === 200) results.push({ path: it.path, status: 'started', href: r.data.href || '' });
+      else if (r.status === 409) results.push({ path: it.path, status: 'exists' });
+      else results.push({ path: it.path, status: 'failed', code: r.status, error: (r.data && (r.data.message || r.data.error)) || 'HTTP ' + r.status });
+    }
+    return { status: 200, result: { results } };
+  }
+  return { status: 400, result: { error: 'Неизвестная операция' } };
 }
 
 /** PUT в бакет потоком с известной длиной. Интерфейс как у openUpload. */
@@ -1110,6 +1164,15 @@ module.exports.handler = async function (event) {
 
     /* Замер: как быстро Диск отдаёт кадры этой функции и принимает загрузку.
        POST {files:[до 4 путей]} -> {reads:[...], parallel:{...}, upload:{...}} */
+    if (a === 'cloudup') {
+      if (event.httpMethod !== 'POST') return json(405, { error: 'Нужен POST' }, h);
+      let body = event.body || '';
+      if (event.isBase64Encoded) body = Buffer.from(body, 'base64').toString('utf8');
+      let rq;
+      try { rq = JSON.parse(body || '{}'); } catch (e) { return json(400, { error: 'Не JSON' }, h); }
+      const r = await doCloudUp(token, rq);
+      return json(r.status, r.result, h);
+    }
     if (a === 'speedurls') {
       const r = await doSpeedUrls(token, q.n);
       return json(r.status, r.result, h);

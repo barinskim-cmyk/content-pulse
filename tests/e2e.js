@@ -49,7 +49,7 @@ const log = [];
 const DOWNLOADS = [];
 const DOWNLOADS_REFERER = [];
 const ZIPS = new Map();
-const SPEED_PUTS = [];   /* пробные файлы проверки скорости в Облаке */
+const SPEED_PUTS = [], SPEED_GETS = [], SPEED_OBJ = new Map();   /* пробные файлы проверки скорости в Облаке */
 const UPLOADS = [];   /* что и в каком порядке залито на Диск */
 const FRESH = new Map();   /* как у Яндекса: новый файл появляется в списке папки не сразу */
 const CLOUD = new Map();
@@ -215,7 +215,8 @@ async function route(r) {
     }
     if (q.a === 'speedurls') {
       const dir = 'exports/speed_' + Math.random().toString(16).slice(2) + '/';
-      return json(200, { urls: Array.from({ length: +q.n || 1 }, (x, i) => 'https://storage.yandexcloud.net/content-pulse-exports-test/' + dir + i + '.bin?X-Amz-Signature=x') });
+      const mk = i => 'https://storage.yandexcloud.net/content-pulse-exports-test/' + dir + i + '.bin?X-Amz-Signature=x';
+      return json(200, { urls: Array.from({ length: +q.n || 1 }, (x, i) => mk(i)), gets: Array.from({ length: +q.n || 1 }, (x, i) => mk(i) + '&get=1') });
     }
     if (q.a === 'crc' && m === 'POST') {
       const b = JSON.parse(req.postData() || '{}');
@@ -282,7 +283,8 @@ async function route(r) {
     const key = u.pathname.split('/').slice(2).join('/');
     /* проверка скорости: браузер грузит пробные файлы прямо в бакет (нужен CORS на PUT) */
     if (m === 'OPTIONS') return r.fulfill({ status: 200, headers: { ...CORS, 'access-control-allow-methods': 'GET, PUT, HEAD', 'access-control-allow-headers': '*' }, body: '' });
-    if (m === 'PUT') { if (!q['X-Amz-Signature']) return r.fulfill({ status: 403, headers: CORS, body: 'AccessDenied' }); SPEED_PUTS.push(key); return r.fulfill({ status: 200, headers: CORS, body: '' }); }
+    if (m === 'PUT') { if (!q['X-Amz-Signature']) return r.fulfill({ status: 403, headers: CORS, body: 'AccessDenied' }); SPEED_PUTS.push(key); SPEED_OBJ.set(key, req.postDataBuffer()); return r.fulfill({ status: 200, headers: CORS, body: '' }); }
+    if (m === 'GET' && SPEED_OBJ.has(key)) { SPEED_GETS.push(key); return r.fulfill({ status: 200, headers: CORS, body: SPEED_OBJ.get(key) }); }
     if (!CLOUD.has(key) || !q['X-Amz-Signature']) return r.fulfill({ status: 403, body: 'AccessDenied' });
     DOWNLOADS.push(CLOUD.get(key));
     return r.fulfill({ status: 200, headers: { 'content-type': 'application/zip', 'content-disposition': 'attachment; filename="x.zip"' }, body: 'PK' });
@@ -1680,12 +1682,19 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     const tr0 = TRASHED.length;
     await page.click('[data-cp-sp="go"]');
     await page.waitForFunction(() => !!document.querySelector('#cpSpeedBox .cp-speed-note'), null, { timeout: 20000 }).catch(() => {});
-    const rows = await page.evaluate(() => [...document.querySelectorAll('#cpSpeedBox .cp-speed tr')].slice(1).map(tr => [...tr.cells].map(td => td.textContent.trim())));
+    const rows = await page.evaluate(() => [...document.querySelector('#cpSpeedBox .cp-speed').rows].slice(1).map(tr => [...tr.cells].map(td => td.textContent.trim())));
     check('по очереди все четыре: МБ/с, Мбит/с, «15 ГБ займут ≈ N мин»; вывод', rows.length === 4 && rows.every(r => r.length === 4 && +r[1] > 0 && /≈ \d+ мин/.test(r[3]))
       && /Облако|Диск/.test(await page.textContent('#cpSpeedBox .cp-speed-note')), JSON.stringify(rows) + ' ' + await page.textContent('#cpSpeedBox'));
     for (let i = 0; i < 30 && !TRASHED.slice(tr0).some(p => /_проверка_скорости_/.test(p)); i++) await page.waitForTimeout(100);
     check('пробные файлы: на Диске — во временной папке, потом в Корзину; в Облаке — по подписанным ссылкам', UPLOADS.some(p => /_проверка_скорости_\d+\/\d+\.bin$/.test(p))
       && TRASHED.slice(tr0).some(p => /_проверка_скорости_/.test(p)) && SPEED_PUTS.length > 0, JSON.stringify([TRASHED.slice(tr0), SPEED_PUTS.length]));
+    /* «давай такой же тест на скачивание» */
+    const dlBefore = SPEED_GETS.length;
+    await page.click('[data-cp-sp="dl"]');
+    await page.waitForFunction(() => document.querySelectorAll('#cpSpeedBox .cp-speed-note').length >= 2, null, { timeout: 25000 }).catch(() => {});
+    const drows = await page.evaluate(() => [...document.querySelectorAll('#cpSpeedBox .cp-speed')][1] ? [...[...document.querySelectorAll('#cpSpeedBox .cp-speed')][1].rows].slice(1).map(tr => [...tr.cells].map(td => td.textContent.trim())) : []);
+    check('скачивание: по очереди из Облака 1, 4 и 8 потоков; «15 ГБ скачаются за ≈ N мин»; вывод', drows.length === 3 && drows.every(r => r.length === 4 && +r[1] > 0 && /≈ \d+ мин/.test(r[3]))
+      && SPEED_GETS.length > dlBefore, JSON.stringify(drows) + ' ' + (await page.textContent('#cpSpeedBox')).slice(0, 800));
     await page.click('[data-cp-sp="close"]');
   }
 
