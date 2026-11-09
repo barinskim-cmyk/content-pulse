@@ -124,7 +124,10 @@ function cpOutlineDecorate() {
       + '<button data-cp-batch="" title="Снять статус с отмеченных карточек и их кадров">Снять статус</button></div>';
     html += '<button class="cb-primary" data-cp-o="download">Скачать отмеченные</button>';
   }
-  html += '<button data-cp-o="site" title="Прочитать папку «Сайт» и отметить сданные карточки">Проверить сдачу</button>';
+  /* в каталоге сданное видно по папке 05 (сверка с Диском) — старая проверка по «Сайт/дата/буква_номер» не нужна */
+  if (!(typeof cpCatalog === 'function' && cpCatalog())) {
+    html += '<button data-cp-o="site" title="Прочитать папку «Сайт» и отметить сданные карточки">Проверить сдачу</button>';
+  }
   bar.innerHTML = html;
 }
 
@@ -164,6 +167,8 @@ function cpCheckedCards() {
 function cpBatchStatus(status) {
   var cards = cpCheckedCards();
   if (!cards.length) return;
+  if ((status === 'retouch' || status === 'approval') && typeof cpCatStageMissing === 'function'
+    && cpCatStageMissing(status === 'retouch' ? 'retouch' : 'approve')) return;
   var all = [], names = [], same = [];
   var m = cpMeta();
   cards.forEach(function (c) {

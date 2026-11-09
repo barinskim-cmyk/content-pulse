@@ -369,34 +369,6 @@ function cpCardTagChips(card) {
   return html;
 }
 
-/** Пункты тегов для меню «ещё» карточки (больше не используется: теги — на шапке). */
-function cpCardTagMenu(card) {
-  return null;
-}
-
-function cpCardTagMenuOld(card) {
-  if (CP.dict === undefined) cpLoadDict().catch(function () { });
-  var html = '<div class="cp-menu-sub">Тег карточки</div>';
-  if (!CP.dict || !CP.dict.length) {
-    html += '<button data-x="nodict">' + (CP.dict === undefined ? 'Словарь загружается...' : 'Словаря тегов нет — «Файлы настроек» на витрине') + '</button>';
-  } else {
-    var have = card.tags || [];
-    CP.dict.forEach(function (d) {
-      var on = have.indexOf(d.tag) !== -1;
-      html += '<button data-x="tag" data-tag="' + cbEsc(d.tag) + '"' + (on ? ' class="cp-on"' : '') + '>'
-        + (on ? 'Снять тег ' : 'Тег ') + cbEsc(d.tag) + (d.group ? ' · ' + cbEsc(d.group) : '') + '</button>';
-    });
-  }
-  return {
-    html: html,
-    onClick: function (b) {
-      if (b.getAttribute('data-x') !== 'tag') return;
-      var tag = b.getAttribute('data-tag');
-      cpCardTag(card, tag, (card.tags || []).indexOf(tag) === -1);
-    }
-  };
-}
-
 function cpCardTag(card, tag, on) {
   if (!card || !tag) return;
   card.tags = on ? cpTagsWith(card.tags, tag) : (card.tags || []).filter(function (t) { return t !== tag; });
@@ -408,14 +380,10 @@ function cpCardTag(card, tag, on) {
 if (CPDisk.hasToken()) cpLoadDict().then(function () { if (CP.shoot) cbRenderCards(); }, function () { });
 
 /* ---------- запуск ----------
-   Cardboard открывает свой лаунчер («Проекты · Недавние проекты») по
-   таймеру через 150 мс. Если наши файлы грузятся дольше (медленная сеть,
-   новая версия без кэша), лаунчер успевал открыться раньше, чем мы его
-   подменим, и вместо витрины висел он. Поэтому здесь, в последнем файле:
-   лаунчер закрываем, витрину открываем сами. */
+   Окна проектов Cardboard больше нет. Витрину открываем здесь, в последнем
+   файле, — не дожидаясь таймера «лаунчера» в index.html (на медленной сети
+   наши файлы грузятся дольше него). */
 (function cpBoot() {
-  var m = document.getElementById('cbProjModal');
-  if (m) m.classList.remove('cb-open');
   CP.booted = true;
   if (!CP.shoot) cpShowShelf();
 })();

@@ -65,7 +65,7 @@ function cpOutputRow(ver, shootName, card, event) {
 var cpAcceptUploadLegacy = cpAcceptUpload;
 cpAcceptUpload = function () {
   var root = cpReviewRoot();
-  if (!root) return cpAcceptUploadLegacy();
+  if (!root) { if (cpCatStageMissing('retouched')) return; return cpAcceptUploadLegacy(); }
   var st = CP.accept, plan = st.plan;
   var li = document.getElementById('cpAccLetter'), ni = document.getElementById('cpAccN');
   if (li) st.letter = li.value.trim();
@@ -241,7 +241,7 @@ function cpMoveFolder(from, to, tries) {
 var cpRvApproveLegacy = cpRvApprove;
 cpRvApprove = function (ids) {
   var root = cpReviewRoot(), site = typeof cpSiteRoot === 'function' ? cpSiteRoot() : '';
-  if (!root) return cpRvApproveLegacy(ids);
+  if (!root) { if (cpCatStageMissing('retouched')) return; return cpRvApproveLegacy(ids); }
   if (!site) { cbToast('Нет папки сайта в каталоге: шестерёнка на витрине'); return; }
   var rv = cpRv(), shoot = CP.shoot, todo = [];
   ids.forEach(function (id) {
@@ -300,7 +300,7 @@ cpRvApprove = function (ids) {
 var cpRvReworkLegacy = cpRvRework;
 cpRvRework = function (id) {
   var root = cpReviewRoot();
-  if (!root) return cpRvReworkLegacy(id);
+  if (!root) { if (cpCatStageMissing('retouched')) return; return cpRvReworkLegacy(id); }
   var last = cpLastRv(cpRv()[id]);
   if (!last) return;
   var note = prompt('Что доработать? (увидит ретушёр)', '');

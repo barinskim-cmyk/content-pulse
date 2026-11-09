@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.79';
+var CP_VERSION = '2.0.80';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -225,12 +225,6 @@ function cpDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
     + '<div class="cb-pop-sep"></div>';
   while (block.firstChild) file.insertBefore(block.firstChild, first);
 
-  /* то, что в режиме Диска не нужно или сбивает с толку */
-  ['cbMenuNew', 'cbBtnOpen', 'cbMenuRename', 'cbBtnPick', 'cbBtnFolder', 'cbBtnWatch',
-    'cbBtnLocate', 'cbBtnSelected'].forEach(function (id) {
-    var el = document.getElementById(id);
-    if (el) el.style.display = 'none';
-  });
 
   /* строка статусов рядом с «+ Карточка» */
   var add = document.getElementById('cbBtnAdd');
@@ -1221,6 +1215,9 @@ function cpPhotoNames(pids) {
 
 /** Главное действие: статус + журнал; для ретуши — копия файлов в папку Ретушь. */
 function cpDoAction(status, pids, cardId) {
+  /* каталог без папки этапа — ничего не делаем (cp-catalog.js) */
+  if ((status === 'retouch' || status === 'approval') && typeof cpCatStageMissing === 'function'
+    && cpCatStageMissing(status === 'retouch' ? 'retouch' : 'approve')) return;
   pids = pids.filter(function (pid) { var p = cbPhotoById(pid); return p && (p.kind || 'photo') !== 'ref'; });
   if (!pids.length) { cbToast('Нет кадров для действия'); return; }
   var card = cardId ? cbCardById(cardId) : null;
@@ -1688,8 +1685,7 @@ document.addEventListener('click', function (e) {
     if (!card) return;
     var pids = cpCardPids(card);
     cpOpenMenu(actCard, 'Карточка: ' + (card.title || 'без названия') + ' · кадров ' + pids.length,
-      function (s) { cpDoAction(s, pids, card.id); },
-      typeof cpCardTagMenu === 'function' ? cpCardTagMenu(card) : null);
+      function (s) { cpDoAction(s, pids, card.id); });
     return;
   }
   if (!e.target.closest('#cpMenu')) menu.classList.remove('cp-open');
@@ -1719,84 +1715,6 @@ document.getElementById('cpMenuLog').onclick = function () {
   document.getElementById('cpLog').classList.add('cp-open');
 };
 document.getElementById('cpLogClose').onclick = function () { document.getElementById('cpLog').classList.remove('cp-open'); };
-
-/* ---------- скачивание ---------- */
-
-function cpCanPickFolder() { return typeof window.showDirectoryPicker === 'function'; }
-
-function cpGetDir(parent, name) { return parent.getDirectoryHandle(CPDisk.safeName(name), { create: true }); }
-
-/* Папки создаём один раз на путь: параллельные скачивания иначе
-   одновременно создают одну папку и браузер отвечает ошибкой типа. */
-var _cpDirCache = null;
-function cpDirPath(root, parts) {
-  if (!_cpDirCache || _cpDirCache.root !== root) _cpDirCache = { root: root, map: {} };
-  var key = '', chain = Promise.resolve(root);
-  parts.forEach(function (part) {
-    key += '/' + CPDisk.safeName(part);
-    if (!_cpDirCache.map[key]) {
-      _cpDirCache.map[key] = chain.then(function (d) { return cpGetDir(d, part); });
-    }
-    chain = _cpDirCache.map[key];
-  });
-  return chain;
-}
-
-/** jobs: [{disk, size, dir: [папки], file}] -> скачать с докачкой и прогрессом. */
-function cpRunDownloads(root, jobs, label) {
-  var done = 0, skipped = 0, failed = [], idx = 0, total = jobs.length;
-  return new Promise(function (resolve) {
-    var active = 0;
-    function report() {
-      cbBusyShow(label + ': ' + (done + skipped + failed.length) + ' / ' + total, (done + skipped + failed.length) / Math.max(1, total));
-    }
-    function next() {
-      if (idx >= total && !active) { resolve({ done: done, skipped: skipped, failed: failed }); return; }
-      while (active < CP_CONFIG.downloadParallel && idx < total) {
-        (function (job) {
-          active++;
-          cpDirPath(root, job.dir).then(function (dir) {
-            return dir.getFileHandle(CPDisk.safeName(job.file), { create: false }).then(function (fh) {
-              return fh.getFile().then(function (f) { return f.size === job.size; });
-            }, function () { return false; }).then(function (same) {
-              if (same) { skipped++; return; }
-              return CPDisk.downloadBlob(job.disk, job.size).then(function (blob) {
-                return dir.getFileHandle(CPDisk.safeName(job.file), { create: true }).then(function (fh) {
-                  return fh.createWritable().then(function (w) {
-                    return w.write(blob).then(function () { return w.close(); });
-                  });
-                });
-              }).then(function () { done++; });
-            });
-          }).catch(function (e) { failed.push(job.file + ': ' + (e && e.message || e)); })
-            .then(function () { active--; report(); next(); });
-        })(jobs[idx++]);
-      }
-    }
-    report();
-    next();
-  });
-}
-
-function cpPickRoot() {
-  if (!cpCanPickFolder()) {
-    cbToast('Скачивание папкой работает в Chrome или Edge');
-    return Promise.reject(null);
-  }
-  return window.showDirectoryPicker({ mode: 'readwrite', id: 'cp-download' });
-}
-
-function cpFinishDownload(res, action, extra) {
-  cbBusyHide();
-  extra = extra || {};
-  extra.count = res.done;
-  if (res.skipped) extra.note = 'уже были: ' + res.skipped;
-  if (res.failed.length) extra.failed = res.failed;
-  cpEvent(action, [], extra);
-  cbToast('Скачано: ' + res.done + (res.skipped ? ' · уже было: ' + res.skipped : '')
-    + (res.failed.length ? ' · ошибок: ' + res.failed.length + ' (повторите — докачаются только они)' : ''));
-  if (res.failed.length && window.console) console.error('[CP] download failed', res.failed);
-}
 
 /* ---------- скачивание ---------- */
 
@@ -2288,12 +2206,6 @@ function cpStartDownload(href) {
   setTimeout(function () { if (fr.parentNode) fr.parentNode.removeChild(fr); }, 120000);
 }
 
-/* старое имя — оставлено для совместимости */
-function cpNativeDownload(href, title, note) {
-  cpStartDownload(href);
-  cpDlCard(title || 'выгрузка', note, [{ href: href, label: 'Скачать ZIP' }], '');
-}
-
 /** Карточка скачивания слева внизу: части архива с кнопками и путь на Диске. */
 function cpDlCard(title, note, parts, progress, error) {
   var box = document.getElementById('cpDlCard');
@@ -2359,11 +2271,6 @@ function cpReportCard(title, text) {
   };
   box.appendChild(ta);
   box.appendChild(btn);
-}
-
-function cpStamp() {
-  var d = new Date();
-  return d.getFullYear() + '-' + cpPad(d.getMonth() + 1) + '-' + cpPad(d.getDate()) + ' ' + cpPad(d.getHours()) + '-' + cpPad(d.getMinutes());
 }
 
 /** Путь файла относительно съёмки. */

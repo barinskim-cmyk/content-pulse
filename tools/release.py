@@ -27,7 +27,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TSV = os.path.join(ROOT, 'tools', 'versions.tsv')
 TRAILER = ('\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n'
-           'Claude-Session: https://claude.ai/code/session_01XBZXsNBhar4okTBs7seNFi\n')
+           'Claude-Session: https://claude.ai/code/session_01XBZXsKwKaVg7cKVjvBaDMs\n')
 GIT = ['git', '-c', 'user.email=noreply@anthropic.com', '-c', 'user.name=Claude']
 
 

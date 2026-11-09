@@ -91,8 +91,6 @@ input.cb-color {
 }
 
 .cb-menu-wrap { position: relative; flex-shrink: 0; }
-/* desktop с нативным macOS-меню: HTML-меню прячется, работает системное */
-body.cb-native-menu .cb-appmenu { display: none; }
 .cb-menu-btn {
   border: none;
   background: none;
@@ -491,27 +489,6 @@ body.cb-resizing * { pointer-events: none; }
   font-size: 10px; color: #b2b2b1; margin-top: 10px;
 }
 
-/* ---------- Лаунчер: недавние проекты (как в Capture One) ---------- */
-#cbRecentList { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; }
-.cb-recent-item {
-  border: 1px solid #2a2a28;
-  background: #1a1a18;
-  border-radius: 4px;
-  text-align: left;
-  padding: 8px 10px;
-  white-space: normal;
-  cursor: pointer;
-}
-.cb-recent-item:hover { border-color: #c9956b; }
-.cb-recent-name { font-weight: 600; font-size: 12.5px; color: #f2f2f1; }
-.cb-recent-meta {
-  font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
-  font-size: 9px; color: #6d6d6c; margin-top: 2px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  max-width: 100%;
-}
-.cb-recent-empty { font-size: 11.5px; color: #6d6d6c; padding: 8px 2px; }
-
 /* ---------- Редактор шаблона v2 ---------- */
 #cbTplPanel { width: 880px; display: flex; gap: 22px; }
 .cb-te-left { width: 340px; flex-shrink: 0; }
@@ -634,13 +611,6 @@ body.cb-resizing * { pointer-events: none; }
   font-size: 9px; color: #6d6d6c; margin-top: 2px;
 }
 
-/* ---------- Справка ---------- */
-#cbInfoPanel { width: 560px; }
-#cbInfoBody { font-size: 12.5px; line-height: 1.65; color: #b2b2b1; }
-#cbInfoBody h3 { font-size: 12.5px; color: #f2f2f1; margin: 14px 0 4px; }
-#cbInfoBody a { color: #c9956b; }
-#cbInfoBody ol, #cbInfoBody ul { margin: 6px 0 6px 18px; }
-
 /* ---------- Дроп файлов ---------- */
 #cbDropOverlay {
   position: fixed; inset: 0;
@@ -698,21 +668,13 @@ body.cb-file-drag #cbDropOverlay { display: flex; }
   <div class="cb-menu-wrap cb-appmenu">
     <button class="cb-menu-btn" id="cbMenuFileBtn">Файл</button>
     <div id="cbMenuFile" class="cb-pop">
-      <button id="cbMenuNew">Новый проект<span class="cb-hotkey">⌘N</span></button>
-      <button id="cbBtnOpen">Открыть проект<span class="cb-hotkey">⌘O</span></button>
       <button id="cbBtnSave">Сохранить<span class="cb-hotkey">⌘S</span></button>
-      <button id="cbMenuRename">Переименовать проект</button>
       <div class="cb-pop-sep"></div>
-      <button id="cbBtnPick">Импорт фото<span class="cb-hotkey">⌘I</span></button>
       <button id="cbBtnPickRef">Импорт референсов</button>
-      <button id="cbBtnFolder" style="display:none">Импорт папки целиком</button>
-      <button id="cbBtnWatch" title="Хоткей в Capture One кладёт фото в папку — Cardboard подхватывает">Следить за папкой</button>
-      <button id="cbBtnLocate" title="Фото переехали или довыгружены? Пути обновятся по именам файлов">Подставить папку с фото...</button>
       <div class="cb-pop-sep"></div>
       <button id="cbBtnPdf">Экспорт PDF<span class="cb-hotkey">⌘E</span></button>
       <button id="cbBtnPrint">Печать...</button>
       <button id="cbBtnList">Экспорт списка (CSV + TXT)</button>
-      <button id="cbBtnSelected" style="display:none" title="Собрать все кадры из карточек и доп. контента в одну папку SELECTED">Собрать отбор в папку...</button>
       <div class="cb-pop-note"><span id="cbMode"></span></div>
     </div>
   </div>
@@ -722,18 +684,6 @@ body.cb-file-drag #cbDropOverlay { display: flex; }
     <div id="cbMenuTpl" class="cb-pop">
       <button id="cbMenuTplNew">Создать шаблон</button>
       <button id="cbMenuTplGallery">Галерея шаблонов</button>
-    </div>
-  </div>
-
-  <div class="cb-menu-wrap cb-appmenu">
-    <button class="cb-menu-btn" id="cbMenuHelpBtn">Справка</button>
-    <div id="cbMenuHelp" class="cb-pop">
-      <button id="cbMenuHelpGuide">Инструкция</button>
-      <button id="cbMenuHelpSync">Синхронизация с Capture One</button>
-      <button id="cbMenuHelpProducts">Другие продукты</button>
-      <div class="cb-pop-sep"></div>
-      <button id="cbMenuHelpUpdate">Проверить обновления</button>
-      <button id="cbMenuHelpTelemetry">Отчёты об ошибках (вкл/выкл)</button>
     </div>
   </div>
 
@@ -862,40 +812,8 @@ body.cb-file-drag #cbDropOverlay { display: flex; }
 
 <!-- Создание / переименование проекта -->
 <!-- Согласие на отправку логов (первый запуск) -->
-<div id="cbTelModal" class="cb-modal">
-  <div class="cb-panel" style="width:400px">
-    <h2>Отчёты об ошибках</h2>
-    <div class="cb-eyebrow">CARDBOARD · АНОНИМНО</div>
-    <div style="font-size:12.5px;line-height:1.6;color:#b2b2b1">
-      Разрешить Cardboard отправлять анонимные отчёты об ошибках?<br><br>
-      Что уходит: версия приложения и macOS, случайный номер установки, текст ошибки.<br>
-      Что НЕ уходит: фотографии, названия проектов, пути к файлам, что-либо личное.<br><br>
-      Решение можно изменить в Справке.
-    </div>
-    <div class="cb-te-foot">
-      <button class="cb-primary" id="cbTelYes">Разрешить</button>
-      <span class="cb-spacer"></span>
-      <button id="cbTelNo">Не отправлять</button>
-    </div>
-  </div>
-</div>
 
 <!-- Настройки экспорта PDF -->
-<div id="cbPdfModal" class="cb-modal">
-  <div class="cb-panel" style="width:360px">
-    <button class="cb-modal-x" data-close-modal="cbPdfModal" title="Закрыть">×</button>
-    <h2>Экспорт PDF</h2>
-    <div class="cb-eyebrow">CARDBOARD · A4 · 300 DPI</div>
-    <label class="cb-check" style="display:block;margin:6px 0 2px">
-      <input type="checkbox" id="cbPdfSkipEmpty" checked> убирать пустые слоты (чистый лист вместо плашек)
-    </label>
-    <div class="cb-te-foot">
-      <button class="cb-primary" id="cbPdfGo">Экспортировать</button>
-      <span class="cb-spacer"></span>
-      <button data-close-modal="cbPdfModal">Отмена</button>
-    </div>
-  </div>
-</div>
 
 <!-- Окно прогресса (импорт папки и другие долгие операции) -->
 <div id="cbBusy" class="cb-busy">
@@ -906,72 +824,19 @@ body.cb-file-drag #cbDropOverlay { display: flex; }
   </div>
 </div>
 
-<div id="cbProjModal" class="cb-modal">
-  <div class="cb-panel" style="width:420px">
-    <button class="cb-modal-x" data-close-modal="cbProjModal" title="Закрыть">×</button>
-    <h2 id="cbProjModalTitle">Новый проект</h2>
-    <div class="cb-eyebrow">CARDBOARD · ПРОЕКТ</div>
-    <div id="cbProjStep0" style="display:none">
-      <div class="cb-lbl">Недавние проекты</div>
-      <div id="cbRecentList"></div>
-      <div class="cb-te-foot" style="flex-direction:column;align-items:stretch;gap:6px">
-        <button class="cb-primary" id="cbProjLaunchNew">Новый проект</button>
-        <button id="cbProjLaunchOpen">Открыть другой...</button>
-      </div>
-    </div>
-    <div id="cbProjStep1">
-      <div class="cb-lbl">Бренд</div>
-      <input type="text" id="cbProjBrand" placeholder="Например: BRANDX" style="width:100%">
-      <div class="cb-lbl">Название съёмки</div>
-      <input type="text" id="cbProjShoot" placeholder="Например: осенняя коллекция" style="width:100%">
-      <div class="cb-lbl">Дата</div>
-      <input type="date" id="cbProjDate" style="width:100%">
-      <div class="cb-lbl">Название проекта</div>
-      <input type="text" id="cbProjNameInput" placeholder="Соберётся из полей выше — или впишите своё" style="width:100%">
-      <div class="cb-te-foot">
-        <button class="cb-primary" id="cbProjModalOk">Создать</button>
-        <span class="cb-spacer"></span>
-        <button id="cbProjModalCancel">Отмена</button>
-      </div>
-    </div>
-    <div id="cbProjStep2" style="display:none">
-      <div style="font-size:12.5px;line-height:1.6;color:#b2b2b1;margin-top:4px">
-        Файл проекта создан — всё будет сохраняться автоматически.<br>
-        Откуда брать фото?
-      </div>
-      <div id="cbProjStep2Path" class="cb-recent-meta" style="margin-top:6px"></div>
-      <div class="cb-te-foot" style="flex-direction:column;align-items:stretch;gap:6px">
-        <button class="cb-primary" id="cbProjWatch">Следить за папкой Capture One</button>
-        <button id="cbProjImportFolder">Импортировать папку с фото</button>
-        <button id="cbProjSkip">Позже — начать с пустого</button>
-      </div>
-    </div>
-  </div>
-</div>
-
 <!-- Справка -->
-<div id="cbInfoModal" class="cb-modal">
-  <div class="cb-panel" id="cbInfoPanel">
-    <button class="cb-modal-x" data-close-modal="cbInfoModal" title="Закрыть">×</button>
-    <h2 id="cbInfoTitle"></h2>
-    <div class="cb-eyebrow">CARDBOARD · CONTENT PULSE</div>
-    <div id="cbInfoBody"></div>
-    <div class="cb-te-foot"><span class="cb-spacer"></span><button id="cbInfoClose">Закрыть</button></div>
-  </div>
-</div>
 
 <div id="cbDropOverlay">Отпустите, чтобы добавить в активную вкладку галереи</div>
 <div id="cbToast"></div>
 <div id="cbPrint"></div>
 
 <input type="file" id="cbFileInput" accept="image/*" multiple style="display:none">
-<input type="file" id="cbProjInput" accept=".cardboard,.json" style="display:none">
 
 <script>
 /* ============================================================
    Cardboard — логика приложения. Чистый JS, префикс cb*.
 
-   Dual-mode: desktop (pywebview, фото по путям) / browser (встраивание).
+   Только браузер: кадры приходят с Яндекс Диска (cp-app.js), референсы встраиваются в отбор.
 
    Модель данных v3:
      App.photos[]     — {id, name, path|null, dataUrl|null, w, h, missing,
@@ -995,7 +860,6 @@ var App = {
   templates: [],
   nextId: 1,
   dirty: false,
-  projectPath: null,
   projectName: 'Новый проект',
   activeTab: 'cards',
   trayTab: 'photo',           /* активная вкладка галереи: photo | ref */
@@ -1017,8 +881,6 @@ var CANVAS_AR = { h: 297 / 210, v: 210 / 297 };
 
 /* ---------- Режим работы ---------- */
 
-function cbDesktop() { return !!(window.pywebview && window.pywebview.api); }
-function cbApi() { return window.pywebview.api; }
 
 /* ---------- Утилиты ---------- */
 
@@ -1063,25 +925,21 @@ function cbUsedIds() {
 
 function cbMarkDirty() {
   App.dirty = true;
-  if (cbDesktop()) cbApi().set_dirty(true);
   if (typeof cbHistoryPush === 'function') cbHistoryPush();
   cbScheduleAutosave();
 }
 function cbClearDirty() {
   App.dirty = false;
-  if (cbDesktop()) cbApi().set_dirty(false);
 }
 
 function cbSetProjectName(name) {
   App.projectName = name || 'Новый проект';
-  /* имя проекта живёт в заголовке окна (desktop: pywebview подхватит) */
   document.title = App.projectName + ' — Cardboard';
-  if (cbDesktop() && cbApi().set_title) cbApi().set_title(App.projectName + ' — Cardboard');
 }
 
 /* ---------- Автосохранение: после каждого изменения (debounce 1.5 c) ----------
-   Desktop: тихая перезапись .cardboard, если путь уже известен.
-   Browser: слепок в localStorage (фолбэк, ограничен квотой). */
+   Открыта съёмка — cp-app.js подменяет cbAutosaveNow и пишет отбор на Диск.
+   Здесь — только слепок в localStorage, когда съёмка не открыта. */
 var _autosaveTimer = null;
 
 function cbScheduleAutosave() {
@@ -1093,31 +951,19 @@ function cbAutosaveNow() {
   if (!App.dirty) return;
   var data = cbProjectData();
   var json = JSON.stringify(data);
-  if (cbDesktop()) {
-    if (!App.projectPath) return;   /* места ещё нет — сохранит ручной Cmd+S */
-    cbApi().save_project(data.name, json, false).then(function (path) {
-      if (path) {
-        cbClearDirty();
-        cbAutosaveBadge();
-        cbRecentAdd(data.name, path);   /* держим имя/дату в списке недавних свежими */
-      }
-    });
-  } else {
-    try {
-      localStorage.setItem('cardboard_autosave', json);
-      cbAutosaveBadge();
-    } catch (e) { /* квота localStorage — фото слишком большие */ }
-  }
+  try {
+    localStorage.setItem('cardboard_autosave', json);
+    cbAutosaveBadge();
+  } catch (e) { /* квота localStorage — фото слишком большие */ }
 }
 
 function cbAutosaveBadge() {
   var el = document.getElementById('cbMode');
-  var base = cbDesktop() ? 'desktop' : '';
-  el.textContent = (base ? base + ' · ' : '') + 'сохранено ' + new Date().toLocaleTimeString('ru-RU').slice(0, 5);
+  el.textContent = 'сохранено ' + new Date().toLocaleTimeString('ru-RU').slice(0, 5);
 }
 
 window.addEventListener('beforeunload', function (e) {
-  if (App.dirty && !cbDesktop()) { e.preventDefault(); e.returnValue = ''; }
+  if (App.dirty) { e.preventDefault(); e.returnValue = ''; }
 });
 
 function cbImgHtml(photo) {
@@ -1808,55 +1654,16 @@ function cbImportFilesEmbedded(files, kind) {
 
 var _pendingImportKind = 'photo';
 
-/* Строгий режим (как сессия Capture One): без файла проекта не работаем —
-   иначе нет ни автосохранения, ни кэша превью, и работу можно потерять */
-function cbRequireProject() {
-  if (cbDesktop() && !App.projectPath) {
-    cbToast('Сначала создайте или откройте проект');
-    cbProjModalOpen('launcher', true);
-    return true;
-  }
-  return false;
-}
-
 function cbImportPick(kind) {
-  if (cbRequireProject()) return;
   _pendingImportKind = kind;
-  if (cbDesktop()) {
-    cbApi().pick_photos().then(function (list) {
-      var added = cbAddPhotos(list || [], kind);
-      if (list && list.length) cbToast(added ? 'Добавлено: ' + added : 'Эти файлы уже добавлены');
-      if (kind === 'ref') cbTraySwitch('ref');
-    });
-  } else {
-    document.getElementById('cbFileInput').click();
-  }
+  document.getElementById('cbFileInput').click();
 }
 
-document.getElementById('cbBtnPick').onclick = function () { cbImportPick('photo'); };
 document.getElementById('cbBtnPickRef').onclick = function () { cbImportPick('ref'); };
 document.getElementById('cbFileInput').onchange = function () {
   if (this.files.length) cbImportFilesEmbedded(this.files, _pendingImportKind);
   this.value = '';
 };
-document.getElementById('cbBtnFolder').onclick = function () {
-  var kind = App.trayTab === 'ref' ? 'ref' : 'photo';
-  var api = cbApi();
-  if (api.pick_folder_paths) {
-    /* пути сразу, миниатюры батчами — окно прогресса, фото появляются по мере загрузки */
-    api.pick_folder_paths().then(function (paths) {
-      if (!paths) return;
-      if (!paths.length) { cbToast('В папке нет изображений'); return; }
-      cbImportBatched(paths, kind);
-    });
-  } else {
-    api.pick_folder().then(function (list) {
-      var added = cbAddPhotos(list || [], kind);
-      if (list && list.length) cbToast('Из папки добавлено: ' + added);
-    });
-  }
-};
-
 /* Окно прогресса */
 function cbBusyShow(text, frac) {
   document.getElementById('cbBusy').classList.add('cb-open');
@@ -1869,33 +1676,10 @@ function cbBusyHide() {
   document.getElementById('cbBusy').classList.remove('cb-open');
 }
 
-/* Батч-импорт по путям: прогресс + инкрементальное появление в галерее */
-function cbImportBatched(paths, kind) {
-  var total = paths.length;
-  var B = 20;
-  var idx = 0, added = 0;
-  cbBusyShow('Импорт фото: 0 / ' + total, 0);
-  function next() {
-    if (idx >= total) {
-      cbBusyHide();
-      cbToast('Из папки добавлено: ' + added);
-      return;
-    }
-    cbApi().import_dropped(paths.slice(idx, idx + B)).then(function (list) {
-      added += cbAddPhotos(list || [], kind);
-      idx += B;
-      var done = Math.min(idx, total);
-      cbBusyShow('Импорт фото: ' + done + ' / ' + total, done / total);
-      setTimeout(next, 0);   /* отдать кадр интерфейсу */
-    }).catch(function () {
-      idx += B;
-      setTimeout(next, 0);
-    });
-  }
-  next();
-}
-
-/* Drag-and-drop файлов: в активную вкладку галереи */
+/* Drag-and-drop файлов с компьютера. Content Pulse: кадры живут на Диске, поэтому
+   в галерею с компьютера попадают только референсы (вкладка «Референсы»). Окна
+   Content Pulse (витрина, сдача ретуши, загрузка съёмки) свои файлы принимают сами —
+   здесь их не трогаем, иначе картинки молча встраивались в файл отбора. */
 var dragDepth = 0;
 document.addEventListener('dragenter', function (e) {
   if (e.dataTransfer && e.dataTransfer.types.indexOf('Files') !== -1) {
@@ -1912,150 +1696,20 @@ document.addEventListener('drop', function (e) {
   dragDepth = 0;
   document.body.classList.remove('cb-file-drag');
   if (!e.dataTransfer || !e.dataTransfer.files.length) return;
-  if (cbRequireProject()) return;
-  var kind = App.trayTab === 'ref' ? 'ref' : 'photo';
-  if (cbDesktop()) {
-    var paths = [];
-    for (var i = 0; i < e.dataTransfer.files.length; i++) {
-      var fp = e.dataTransfer.files[i].pywebviewFullPath;
-      if (fp) paths.push(fp);
-    }
-    if (paths.length) {
-      cbApi().import_dropped(paths).then(function (list) {
-        var added = cbAddPhotos(list || [], kind);
-        cbToast(added ? 'Добавлено: ' + added : 'Новых файлов нет');
-      });
-      return;
-    }
+  var shelf = document.getElementById('cpShelf');
+  if ((shelf && shelf.classList.contains('cp-open')) || (e.target.closest && e.target.closest('[id^="cp"], [class^="cp-"]'))) return;
+  if (App.trayTab !== 'ref') {
+    cbToast('Кадры добавляются на Диск: «Догрузить» в панели съёмки на витрине. Сюда можно перетащить референсы — вкладка «Референсы».');
+    return;
   }
-  cbImportFilesEmbedded(e.dataTransfer.files, kind);
+  cbImportFilesEmbedded(e.dataTransfer.files, 'ref');
 });
-
-/* ---------- Слежение за папкой (Capture One hot key) ---------- */
-
-function cbWatchUi(on, label) {
-  var st = document.getElementById('cbWatchStatus');
-  st.style.display = on ? 'block' : 'none';
-  if (label) st.textContent = 'Слежу за папкой: ' + label;
-  document.getElementById('cbBtnWatch').textContent = on ? 'Остановить слежение' : 'Следить за папкой';
-}
-
-function cbWatchStart() {
-  if (cbDesktop()) {
-    cbApi().watch_pick().then(function (dir) {
-      if (!dir) return;
-      App.watch.timer = setInterval(function () {
-        cbApi().watch_scan().then(function (list) {
-          if (list && list.length) {
-            var added = cbAddPhotos(list, 'photo');
-            if (added) cbToast('Из папки: +' + added + ' фото');
-          }
-        });
-      }, 2000);
-      cbWatchUi(true, dir);
-      cbToast('Слежение включено');
-    });
-    return;
-  }
-  if (!window.showDirectoryPicker) {
-    cbToast('В браузере слежение работает в Chrome/Edge. Либо запустите desktop-версию');
-    return;
-  }
-  window.showDirectoryPicker().then(function (handle) {
-    App.watch.handle = handle;
-    App.watch.seen = {};
-    cbWatchScanBrowser();
-    App.watch.timer = setInterval(cbWatchScanBrowser, 2000);
-    cbWatchUi(true, handle.name);
-    cbToast('Слежение включено: ' + handle.name);
-  }).catch(function () { /* отменено */ });
-}
-
-function cbWatchStop() {
-  clearInterval(App.watch.timer);
-  App.watch.timer = null;
-  App.watch.handle = null;
-  if (cbDesktop()) cbApi().watch_stop();
-  cbWatchUi(false);
-  cbToast('Слежение остановлено');
-}
-
-function cbWatchScanBrowser() {
-  var h = App.watch.handle;
-  if (!h) return;
-  var fresh = [];
-  var it = h.values();
-  function step() {
-    it.next().then(function (r) {
-      if (r.done) {
-        if (!fresh.length) return;
-        var items = [], idx = 0;
-        (function next() {
-          if (idx >= fresh.length) {
-            var added = cbAddPhotos(items, 'photo');
-            if (added) cbToast('Из папки: +' + added + ' фото');
-            return;
-          }
-          cbImportFileEmbedded(fresh[idx++], function (item) { if (item) items.push(item); next(); });
-        })();
-        return;
-      }
-      var entry = r.value;
-      if (entry.kind === 'file' && IMG_EXT.test(entry.name) && !App.watch.seen[entry.name]) {
-        App.watch.seen[entry.name] = true;
-        entry.getFile().then(function (f) { fresh.push(f); step(); });
-        return;
-      }
-      step();
-    }).catch(function () { cbWatchStop(); });
-  }
-  step();
-}
-
-document.getElementById('cbBtnWatch').onclick = function () {
-  if (!App.watch.timer && cbRequireProject()) return;
-  if (App.watch.timer) cbWatchStop(); else cbWatchStart();
-};
-
-/* Locate (как в Capture One): пути фото обновляются по имени файла */
-function cbApplyLocateMap(names) {
-  var updated = 0;
-  App.photos.forEach(function (p) {
-    var np = names[p.name];
-    if (!np) return;
-    if (np !== p.path) {
-      p.path = np;
-      p.dataUrl = null;   /* перечитать превью с нового места */
-      p.missing = false;
-      updated++;
-    } else if (p.missing) {
-      p.missing = false;
-      p.dataUrl = null;
-      updated++;
-    }
-  });
-  return updated;
-}
-
-function cbLocatePhotos() {
-  if (cbRequireProject()) return;
-  if (!App.photos.length) { cbToast('В проекте нет фото'); return; }
-  cbApi().locate_scan().then(function (res) {
-    if (!res) return;
-    var updated = cbApplyLocateMap(res.names || {});
-    if (!updated) { cbToast('Совпадений по именам файлов нет: ' + res.folder); return; }
-    cbMarkDirty();
-    cbToast('Пути обновлены: ' + updated);
-    cbRehydrateThumbs();
-  });
-}
-document.getElementById('cbBtnLocate').onclick = cbLocatePhotos;
 
 /* ============================================================
    Меню-бар и попапы
    ============================================================ */
 
-var CB_POPS = ['cbMenuFile', 'cbMenuTpl', 'cbMenuHelp', 'cbPickerPop'];
+var CB_POPS = ['cbMenuFile', 'cbMenuTpl', 'cbPickerPop'];
 
 function cbPop(id, open) {
   var pop = document.getElementById(id);
@@ -2102,7 +1756,7 @@ function cbResetPopPos(pop) {
   pop.style.bottom = '';
 }
 
-[['cbMenuFileBtn', 'cbMenuFile'], ['cbMenuTplBtn', 'cbMenuTpl'], ['cbMenuHelpBtn', 'cbMenuHelp']].forEach(function (pair) {
+[['cbMenuFileBtn', 'cbMenuFile'], ['cbMenuTplBtn', 'cbMenuTpl']].forEach(function (pair) {
   document.getElementById(pair[0]).onclick = function (e) {
     e.stopPropagation();
     cbPop(pair[1]);
@@ -2126,239 +1780,15 @@ document.addEventListener('keydown', function (e) {
   if (!mod) return;
   var k = e.key.toLowerCase();
   if (k === 'n') { e.preventDefault(); cbProjModalOpen('new'); }
-  else if (k === 'o') { e.preventDefault(); document.getElementById('cbBtnOpen').click(); }
   else if (k === 's') { e.preventDefault(); cbSaveProject(); }
-  else if (k === 'i') { e.preventDefault(); cbImportPick('photo'); }
   else if (k === 'e') { e.preventDefault(); cbExportPdf(); }
   else if (k === 'z' && e.shiftKey) { e.preventDefault(); cbRedo(); }
   else if (k === 'z') { e.preventDefault(); cbUndo(); }
 });
 
-/* ---------- Окно создания / переименования проекта ---------- */
-
-var _projModalMode = 'new';
-var _projStartup = false;   /* открыто как лаунчер при запуске */
-
-/* Недавние проекты (лаунчер как в Capture One).
-   localStorage cardboard_recent: [{name, path, ts}], новые сверху, максимум 8. */
-function cbRecentsGet() {
-  try { return JSON.parse(localStorage.getItem('cardboard_recent') || '[]'); }
-  catch (e) { return []; }
-}
-
-function cbRecentAdd(name, path) {
-  if (!path) return;
-  var list = cbRecentsGet().filter(function (r) { return r.path !== path; });
-  list.unshift({ name: name || 'Проект', path: path, ts: Date.now() });
-  if (list.length > 8) list.length = 8;
-  try { localStorage.setItem('cardboard_recent', JSON.stringify(list)); } catch (e) { }
-}
-
-function cbRecentRemove(path) {
-  var list = cbRecentsGet().filter(function (r) { return r.path !== path; });
-  try { localStorage.setItem('cardboard_recent', JSON.stringify(list)); } catch (e) { }
-}
-
-function cbRecentDate(ts) {
-  if (!ts) return '';
-  var d = new Date(ts);
-  return d.toLocaleDateString('ru-RU') + ' ' + d.toLocaleTimeString('ru-RU').slice(0, 5);
-}
-
-function cbRenderRecents() {
-  var box = document.getElementById('cbRecentList');
-  var html = '';
-  if (cbDesktop()) {
-    var list = cbRecentsGet();
-    list.forEach(function (r) {
-      html += '<button class="cb-recent-item" data-path="' + cbEsc(r.path) + '">'
-        + '<div class="cb-recent-name">' + cbEsc(r.name) + '</div>'
-        + '<div class="cb-recent-meta">' + cbEsc(r.path) + ' · ' + cbRecentDate(r.ts) + '</div>'
-        + '</button>';
-    });
-    if (!list.length) html = '<div class="cb-recent-empty">Пока нет проектов — создайте первый.</div>';
-  } else {
-    /* браузер: единственный «недавний» — автосейв в localStorage */
-    var snap = null;
-    try { snap = JSON.parse(localStorage.getItem('cardboard_autosave') || 'null'); } catch (e) { }
-    if (snap && snap.app === 'cardboard') {
-      html = '<button class="cb-recent-item" data-autosave="1">'
-        + '<div class="cb-recent-name">' + cbEsc(snap.name || 'Проект') + '</div>'
-        + '<div class="cb-recent-meta">автосохранение в браузере</div>'
-        + '</button>';
-    } else {
-      html = '<div class="cb-recent-empty">Пока нет проектов — создайте первый.</div>';
-    }
-  }
-  box.innerHTML = html;
-  Array.prototype.forEach.call(box.querySelectorAll('.cb-recent-item'), function (btn) {
-    btn.onclick = function () { cbRecentOpen(btn.dataset.path, btn.dataset.autosave); };
-  });
-}
-
-function cbRecentOpen(path, autosave) {
-  if (autosave) {   /* браузерный автосейв */
-    try {
-      var data = JSON.parse(localStorage.getItem('cardboard_autosave'));
-      cbApplyProject(data);
-      document.getElementById('cbProjModal').classList.remove('cb-open');
-      cbToast('Проект восстановлен из автосохранения');
-    } catch (e) { cbToast('Не удалось восстановить автосохранение'); }
-    return;
-  }
-  cbApi().open_project_at(path).then(function (res) {
-    if (!res || !res.data) {
-      cbToast('Файл проекта не найден: ' + path);
-      cbRecentRemove(path);
-      cbRenderRecents();
-      return;
-    }
-    var data = JSON.parse(res.data);
-    if (data.app !== 'cardboard') { cbToast('Это не проект Cardboard'); return; }
-    App.projectPath = res.path;
-    cbApplyProject(data);
-    cbRehydrateThumbs();
-    cbRecentAdd(data.name, res.path);
-    document.getElementById('cbProjModal').classList.remove('cb-open');
-    cbToast('Проект открыт: ' + res.path);
-  });
-}
-
-function cbProjModalOpen(mode, startup) {
-  _projModalMode = mode;
-  _projStartup = !!startup;
-  var launcher = (mode === 'launcher');
-  /* строгий режим: пока проекта нет, окно не закрыть — работа без файла
-     проекта невозможна (нет автосейва и кэша превью) */
-  document.querySelector('#cbProjModal .cb-modal-x').style.display =
-    (cbDesktop() && !App.projectPath) ? 'none' : '';
-  document.getElementById('cbProjStep0').style.display = launcher ? '' : 'none';
-  document.getElementById('cbProjStep1').style.display = launcher ? 'none' : '';
-  document.getElementById('cbProjStep2').style.display = 'none';
-  document.getElementById('cbProjModalTitle').textContent =
-    launcher ? 'Проекты' : (mode === 'new') ? 'Новый проект' : 'Проект';
-  if (launcher) {
-    cbRenderRecents();
-    document.getElementById('cbProjModal').classList.add('cb-open');
-    return;
-  }
-  document.getElementById('cbProjModalOk').textContent = (mode === 'new') ? 'Создать' : 'Переименовать';
-  document.getElementById('cbProjNameInput').value = (mode === 'new') ? '' : App.projectName;
-  /* конструктор названия: бренд + название съёмки + дата */
-  _projNameManual = (mode !== 'new');   /* при переименовании имя не перетирать автосборкой */
-  var meta = App.projectMeta || {};
-  document.getElementById('cbProjBrand').value = (mode === 'new') ? '' : (meta.brand || '');
-  document.getElementById('cbProjShoot').value = (mode === 'new') ? '' : (meta.shoot || '');
-  document.getElementById('cbProjDate').value = (mode === 'new')
-    ? new Date().toISOString().slice(0, 10)
-    : (meta.date || '');
-  document.getElementById('cbProjModal').classList.add('cb-open');
-  setTimeout(function () { document.getElementById('cbProjBrand').focus(); }, 50);
-}
-
-/* Автосборка названия: BRANDX_NAME_YYYY-MM-DD; пустые части выпадают.
-   Ручной ввод в поле названия перебивает автосборку (пока поле не очищено). */
-var _projNameManual = false;
-
-function cbProjCompose() {
-  if (_projNameManual) return;
-  var brand = document.getElementById('cbProjBrand').value.trim();
-  var shoot = document.getElementById('cbProjShoot').value.trim();
-  var date = document.getElementById('cbProjDate').value;
-  if (!brand && !shoot) return;   /* одна дата названием не становится */
-  var parts = [];
-  if (brand) parts.push(brand);
-  if (shoot) parts.push(shoot);
-  if (date) parts.push(date);
-  document.getElementById('cbProjNameInput').value = parts.join('_');
-}
-['cbProjBrand', 'cbProjShoot', 'cbProjDate'].forEach(function (id) {
-  document.getElementById(id).addEventListener('input', cbProjCompose);
-  document.getElementById(id).addEventListener('change', cbProjCompose);
-});
-document.getElementById('cbProjNameInput').addEventListener('input', function () {
-  /* пользователь правит имя руками; очистил — автосборка снова работает */
-  _projNameManual = this.value.trim() !== '';
-  if (!_projNameManual) cbProjCompose();
-});
-
-/* шаг 2: проект создан — предложить источник фото */
-function cbProjModalStep2() {
-  document.getElementById('cbProjModalTitle').textContent = 'Проект создан';
-  document.getElementById('cbProjStep1').style.display = 'none';
-  document.getElementById('cbProjStep2').style.display = '';
-  /* показать, куда именно сохраняется проект */
-  document.getElementById('cbProjStep2Path').textContent =
-    App.projectPath ? App.projectPath : (cbDesktop() ? '' : 'автосохранение в браузере');
-}
-
-document.getElementById('cbProjModalOk').onclick = function () {
-  var name = document.getElementById('cbProjNameInput').value.trim();
-  if (!name) { cbToast('Дайте проекту название'); return; }
-  App.projectMeta = {
-    brand: document.getElementById('cbProjBrand').value.trim(),
-    shoot: document.getElementById('cbProjShoot').value.trim(),
-    date: document.getElementById('cbProjDate').value
-  };
-  if (_projModalMode === 'new') {
-    if (App.dirty && App.projectPath === null
-      && (App.cards.length || App.photos.length)
-      && !confirm('Текущий проект не сохранён. Начать новый?')) return;
-    App.photos = [];
-    App.cards = [];
-    App.containers = [];
-    App.projectPath = null;
-    cbSetProjectName(name);
-    cbClearDirty();
-    cbHistoryReset();
-    cbRenderTray(); cbRenderCards(); cbRenderConts();
-    if (cbDesktop()) {
-      /* сразу создаём файл проекта в выбранной папке — дальше автосейв */
-      var data = cbProjectData();
-      cbApi().save_project(name, JSON.stringify(data), true).then(function (path) {
-        if (path) { App.projectPath = path; cbAutosaveBadge(); cbRecentAdd(name, path); }
-        cbProjModalStep2();   /* шаг 2: откуда брать фото */
-      });
-    } else {
-      cbProjModalStep2();
-    }
-  } else {
-    document.getElementById('cbProjModal').classList.remove('cb-open');
-    cbSetProjectName(name);
-    cbMarkDirty();
-  }
-};
-document.getElementById('cbProjModalCancel').onclick = function () {
-  /* на старте «Отмена» возвращает в лаунчер, а не закрывает окно в пустоту */
-  if (_projStartup) { cbProjModalOpen('launcher', true); return; }
-  document.getElementById('cbProjModal').classList.remove('cb-open');
-};
-/* лаунчер: новый проект / открыть другой */
-document.getElementById('cbProjLaunchNew').onclick = function () {
-  cbProjModalOpen('new', _projStartup);
-};
-document.getElementById('cbProjLaunchOpen').onclick = function () {
-  document.getElementById('cbProjModal').classList.remove('cb-open');
-  document.getElementById('cbBtnOpen').click();
-};
-/* шаг 2: источник фото */
-document.getElementById('cbProjWatch').onclick = function () {
-  document.getElementById('cbProjModal').classList.remove('cb-open');
-  document.getElementById('cbBtnWatch').click();
-};
-document.getElementById('cbProjImportFolder').onclick = function () {
-  document.getElementById('cbProjModal').classList.remove('cb-open');
-  if (cbDesktop()) document.getElementById('cbBtnFolder').click();
-  else document.getElementById('cbBtnPick').click();
-};
-document.getElementById('cbProjSkip').onclick = function () {
-  document.getElementById('cbProjModal').classList.remove('cb-open');
-};
-document.getElementById('cbProjNameInput').addEventListener('keydown', function (e) {
-  if (e.key === 'Enter') document.getElementById('cbProjModalOk').click();
-});
-document.getElementById('cbMenuNew').onclick = function () { cbProjModalOpen('new'); };
-document.getElementById('cbMenuRename').onclick = function () { cbProjModalOpen('rename'); };
+/* Окно проектов Cardboard убрано: при запуске cp-app.js подменяет эту
+   функцию и открывает витрину съёмок. */
+function cbProjModalOpen(mode, startup) { }
 
 /* ---------- История изменений: Cmd+Z / Cmd+Shift+Z ----------
    Снапшот состояния после каждого изменения (карточки/контейнеры —
@@ -2400,7 +1830,6 @@ function cbHistoryApply(snap) {
   cbSetProjectName(snap.name);
   cbRenderTray(); cbRenderCards(); cbRenderConts();
   App.dirty = true;
-  if (cbDesktop()) cbApi().set_dirty(true);
   cbScheduleAutosave();
   History.restoring = false;
 }
@@ -2419,55 +1848,6 @@ function cbRedo() {
   cbHistoryApply(snap);
   cbToast('Возвращено');
 }
-
-/* ---------- Справка ---------- */
-
-var CB_HELP = {
-  guide: {
-    title: 'Инструкция',
-    body: '<h3>1. Проект</h3>При запуске — окно проектов: недавние (открываются в один клик) или новый. Название собирается из полей Бренд + Съёмка + Дата (или впишите своё). Проект устроен как сессия Capture One: папка, внутри файл .cardboard и previews с локальными превью до 1200px — открывается мгновенно и не зависит от исходников. Всё сохраняется автоматически после каждого изменения; без проекта работа не начнётся.'
-      + '<h3>2. Импорт</h3>Файл → Импорт фото (⌘I), «Импорт папки целиком» (с прогрессом) — или просто перетащите файлы в окно: они попадут в активную вкладку галереи (Фото или Референсы). Фото не копируются: Cardboard запоминает пути и держит превью в папке проекта. Если фото переехали или довыгружены позже — Файл → «Подставить папку с фото»: пути обновятся по именам файлов.'
-      + '<h3>3. Шаблон</h3>Шаблон → Создать шаблон: канвас A4 (горизонтальный/вертикальный), заглавное фото, слотов в ряду, пропорции (или «авто» — по фото), имена слотов. В Галерее шаблонов отметьте те, что предлагать при вёрстке. Кнопка «Шаблон» на карточке — заменить шаблон (фото останутся) или отредактировать его прямо из карточки.'
-      + '<h3>4. Вёрстка</h3>«+ Карточка» → выберите шаблон → перетаскивайте фото из галереи в слоты. Слоты меняются местами перетаскиванием. Референсы можно ставить в слоты как ТЗ — на них метка REF. Цвет фона карточки и контейнера — квадратик в шапке. Боковые панели сворачиваются полосами «Галерея» и «Навигация» по краям окна. ⌘Z / ⇧⌘Z — отмена и возврат.'
-      + '<h3>5. Экспорт</h3>Файл → Экспорт PDF (⌘E): многостраничный PDF-файл A4 300dpi, карточка = страница один в один; галочка «убирать пустые слоты» оставляет вместо них чистый лист. Файл → Печать: тот же макет через системный диалог. Экспорт списка — CSV/TXT: карточка → слот → файл → полный путь.',
-    links: []
-  },
-  sync: {
-    title: 'Синхронизация с Capture One',
-    body: '<ol><li>В Capture One создайте экспорт-рецепт: JPEG, любая папка, например <b>~/Pictures/cardboard-inbox</b>.</li>'
-      + '<li>Назначьте хоткей на «Export with recipe» (Edit → Edit Keyboard Shortcuts).</li>'
-      + '<li>В Cardboard: Файл → Следить за папкой — выберите эту папку.</li>'
-      + '<li>Дальше: выделили фото в Capture One → хоткей → через пару секунд они в галерее Cardboard.</li></ol>'
-      + 'Слежение опрашивает папку раз в 2 секунды и подхватывает только новые файлы.',
-    links: []
-  },
-  products: {
-    title: 'Другие продукты',
-    body: '<h3>Content Pulse</h3>Платформа для визуального продакшена: пайплайн съёмки, согласование с клиентом, ретушь — карточка товара в центре. Cardboard — её standalone-инструмент вёрстки.'
-      + '<h3>Rate Setter</h3>Быстрый отбор фото для Capture One: рейтинг и ключевые слова одним хоткеем, прямо в сессию.<br><br>'
-      + '<a href="https://github.com/barinskim-cmyk/content-pulse-rate-setter/releases" target="_blank">Rate Setter — скачать</a>',
-    links: []
-  }
-};
-
-function cbShowInfo(key) {
-  var info = CB_HELP[key];
-  document.getElementById('cbInfoTitle').textContent = info.title;
-  document.getElementById('cbInfoBody').innerHTML = info.body;
-  document.getElementById('cbInfoModal').classList.add('cb-open');
-}
-document.getElementById('cbMenuHelpGuide').onclick = function () { cbShowInfo('guide'); };
-document.getElementById('cbMenuHelpSync').onclick = function () { cbShowInfo('sync'); };
-document.getElementById('cbMenuHelpProducts').onclick = function () { cbShowInfo('products'); };
-document.getElementById('cbMenuHelpUpdate').onclick = function () { cbCheckUpdate(true); };
-document.getElementById('cbMenuHelpTelemetry').onclick = function () {
-  var on = localStorage.getItem('cardboard_telemetry') === '1';
-  try { localStorage.setItem('cardboard_telemetry', on ? '0' : '1'); } catch (e) { }
-  cbToast(on ? 'Отчёты об ошибках выключены' : 'Отчёты об ошибках включены — спасибо!');
-};
-document.getElementById('cbInfoClose').onclick = function () {
-  document.getElementById('cbInfoModal').classList.remove('cb-open');
-};
 
 /* ============================================================
    Вкладки: Карточки / Доп. контент + навигация
@@ -2592,7 +1972,7 @@ function cbRenderTray() {
   if (!all.length) {
     grid.innerHTML = '<div class="cb-tray-empty">' + (kind === 'ref'
       ? 'Соберите ракурсы-референсы:<br>Файл → Импорт референсов<br>или перетащите картинки сюда.<br>Рефами можно заполнить шаблон<br>как ТЗ на съёмку'
-      : 'Перетащите фото сюда,<br>Файл → Импорт фото (⌘I)<br>или включите слежение за папкой<br>экспорта Capture One') + '</div>';
+      : 'Кадры съёмки появятся здесь с Яндекс Диска') + '</div>';
   } else {
     grid.innerHTML = cbJustifiedHTML(
       list.length,
@@ -2940,100 +2320,6 @@ function cbTeApplyPerRow(t) {
   t.rows = (rest.length ? row + 1 : 1) + (cbHeroTakesRow(t) ? 1 : 0);
 }
 
-/* Перераспределение под канвас (Маша 05.07): при смене Г<->В ряды
-   пересобираются — перебираем число рядов, равномерно раскладываем
-   слоты, берём вариант с максимальным заполнением нового листа. */
-function cbTeReflow(t) {
-  var start = t.hasHero ? 1 : 0;
-  var rest = t.slots.slice(start);
-  if (!rest.length) return;
-  cbTeOptimize(t, null);   /* полный подбор числа рядов */
-}
-
-/* ЕДИНЫЙ оптимизатор распределения (Маша: результат не должен зависеть
-   от пути — смена канваса, +/- ряд и «Ровно» дают одно и то же).
-   fixedRest = зафиксированное число rest-рядов или null (подобрать). */
-function cbTeOptimize(t, fixedRest) {
-  var start = t.hasHero ? 1 : 0;
-  var rest = t.slots.slice(start);
-  if (!rest.length) return;
-  var heroRow = cbHeroTakesRow(t) ? 1 : 0;
-  var heroV = t.hasHero && t.slots.length && t.slots[0].orient !== 'h';
-  var n2 = rest.length;
-
-  /* кандидаты: [индекс ряда для каждого rest-слота], число рядов кандидата */
-  var candidates = [];
-  function addEven(n) {
-    var per = Math.ceil(n2 / n);
-    var a = [];
-    for (var i = 0; i < n2; i++) a.push(Math.min(n - 1, Math.floor(i / per)));
-    candidates.push(a);
-  }
-  /* колоночный вариант героя-V: справа по одной в 2 ряда, остальное внизу */
-  function addColumn(nBottom) {
-    if (!heroV || n2 < 3 || nBottom < 1 || nBottom > n2 - 2) return;
-    var a = [0, 1];
-    var perB = Math.ceil((n2 - 2) / nBottom);
-    for (var j = 0; j < n2 - 2; j++) a.push(2 + Math.min(nBottom - 1, Math.floor(j / perB)));
-    candidates.push(a);
-  }
-  if (fixedRest) {
-    addEven(Math.min(fixedRest, n2));
-    addColumn(fixedRest - 2);   /* колонка с тем же итоговым числом рядов */
-  } else {
-    var maxRows = Math.min(5, n2);
-    for (var n = 1; n <= maxRows; n++) addEven(n);
-    for (var k = 1; k <= Math.min(3, n2 - 2); k++) addColumn(k);
-  }
-
-  var best = null;
-  candidates.forEach(function (assign) {
-    var trial = JSON.parse(JSON.stringify(t));
-    var nRows = Math.max.apply(null, assign) + 1;
-    trial.rows = nRows + heroRow;   /* герой-H = отдельный ряд в счётчике */
-    trial.slots.slice(start).forEach(function (s, i) { s.row = assign[i]; });
-    var score = cbLayoutScore(cbManualBoxes(trial), t.hasHero, trial);
-    if (!best || score > best.score) best = { score: score, rows: nRows + heroRow, assign: assign };
-  });
-  if (best) {
-    t.rows = best.rows;
-    rest.forEach(function (s, i) { s.row = best.assign[i]; });
-  }
-}
-
-/* Оценка раскладки (критерии из коллаж-бенчмарков):
-   заполнение листа × равномерность размеров × штраф за ряды-одиночки */
-function cbLayoutScore(geom, hasHero, layout) {
-  var used = 0;
-  geom.boxes.forEach(function (b) { used += b.w * b.h; });
-  var fill = used / (geom.W * geom.H);
-  /* жёсткий штраф, если раскладка потеряла слоты (не влезли в лист) */
-  if (layout && layout.slots && geom.boxes.length < layout.slots.length) {
-    fill *= 0.1 * geom.boxes.length / layout.slots.length;
-  }
-  var rest = geom.boxes.filter(function (b) { return !(hasHero && b.slotIdx === 0); });
-  if (rest.length < 2) return fill;
-  /* равномерность: разброс площадей не-hero боксов */
-  var mean = 0;
-  rest.forEach(function (b) { mean += b.w * b.h; });
-  mean /= rest.length;
-  var varsum = 0;
-  rest.forEach(function (b) { varsum += Math.pow(b.w * b.h - mean, 2); });
-  var cv = Math.sqrt(varsum / rest.length) / mean;
-  /* штраф за ряды из одного слота (уродливые «колонки одиночек») */
-  var singles = 0;
-  if (layout && layout.slots && rest.length > 2) {
-    var counts = {};
-    layout.slots.forEach(function (s, i) {
-      if (hasHero && i === 0) return;
-      counts[s.row || 0] = (counts[s.row || 0] || 0) + 1;
-    });
-    Object.keys(counts).forEach(function (r) { if (counts[r] === 1) singles++; });
-  }
-  /* равномерность не-hero слотов — приоритетный критерий (Маша) */
-  return fill * (1 - Math.min(0.85, cv * 1.5)) * Math.pow(0.8, singles);
-}
-
 function cbTeAddSlot(orient) {
   cbTeCollectNames();
   TE.cur.slots.push({ orient: orient, row: 0, name: '' });
@@ -3311,7 +2597,6 @@ function cbPickerOpen(forCid, anchorEl) {
 
 document.getElementById('cbBtnAdd').onclick = function (e) {
   e.stopPropagation();
-  if (cbRequireProject()) return;
   if (App.activeTab === 'conts') { cbAddCont(); return; }
   cbPickerOpen(null);
 };
@@ -3843,68 +3128,12 @@ function cbPrintPdf() {
   document.title = oldTitle;
 }
 
-/* Спецификация страниц для PDF-файла: раскладка + фото каждой карточки.
-   skipEmpty — пустые слоты не попадают в PDF (чистый лист вместо плашек) */
-function cbPdfSpec(skipEmpty) {
-  var pages = [];
-  App.cards.forEach(function (card, ci) {
-    var geom, getPid;
-    if (card.mode === 'auto') {
-      var photos = (card.pids || []).map(function (pid) { return cbPhotoById(pid); });
-      var aspects = photos.map(function (p) { return (p && p.w > 0 && p.h > 0) ? p.w / p.h : 0.75; });
-      if (!aspects.length) return;   /* пустая авто-карточка — нечего класть */
-      geom = cbAutoBestGeom(card, aspects).geom;
-      getPid = function (i) { return card.pids[i] || null; };
-    } else {
-      geom = cbManualBoxes(card);
-      getPid = function (i) { return card.slots[i] ? card.slots[i].pid : null; };
-    }
-    var boxes = [];
-    geom.boxes.forEach(function (b) {
-      var pid = getPid(b.slotIdx);
-      var p = pid ? cbPhotoById(pid) : null;
-      if (skipEmpty && !p) return;   /* пустой слот → чистое место на листе */
-      boxes.push({
-        x: b.x, y: b.y, w: b.w, h: b.h,
-        path: (p && p.path) ? p.path : null,
-        dataUrl: (p && !p.path && p.dataUrl) ? p.dataUrl : null
-      });
-    });
-    var title = (ci + 1) + '. ' + (card.title || '');
-    if (card.category) title += ' · ' + card.category;
-    pages.push({ canvas: card.canvas, W: geom.W, H: geom.H, title: title, boxes: boxes,
-      bg: card.bg || '#ffffff' });
-  });
-  return pages;
-}
-
-/* Экспорт PDF в файл (desktop: Python+Pillow, A4 300dpi; браузер: печать).
-   Перед экспортом — окно настроек (галочка «убирать пустые слоты»). */
+/* Экспорт PDF: печать A4 через системный диалог («Сохранить как PDF»). */
 function cbExportPdf() {
   if (!App.cards.length) { cbToast('Нет карточек для экспорта'); return; }
-  if (!cbDesktop() || !cbApi().export_pdf) { cbPrintPdf(); return; }
-  var saved = localStorage.getItem('cardboard_pdf_skipempty');
-  document.getElementById('cbPdfSkipEmpty').checked = (saved === null) ? true : saved === '1';
-  document.getElementById('cbPdfModal').classList.add('cb-open');
-}
-
-function cbExportPdfGo() {
-  var skipEmpty = document.getElementById('cbPdfSkipEmpty').checked;
-  try { localStorage.setItem('cardboard_pdf_skipempty', skipEmpty ? '1' : '0'); } catch (e) { }
-  document.getElementById('cbPdfModal').classList.remove('cb-open');
-  var pages = cbPdfSpec(skipEmpty);
-  if (!pages.length) { cbToast('Нет карточек для экспорта'); return; }
-  cbBusyShow('Экспорт PDF: страниц ' + pages.length, 0.3);
-  cbApi().export_pdf(JSON.stringify({ name: App.projectName, pages: pages })).then(function (path) {
-    cbBusyHide();
-    if (path) cbToast('PDF сохранён: ' + path);
-  }).catch(function () {
-    cbBusyHide();
-    cbToast('Не удалось собрать PDF');
-  });
+  cbPrintPdf();
 }
 document.getElementById('cbBtnPdf').onclick = cbExportPdf;
-document.getElementById('cbPdfGo').onclick = cbExportPdfGo;
 
 /* Сворачивание боковых панелей: полосы по краям, состояние запоминается */
 (function cbInitPanels() {
@@ -3969,85 +3198,28 @@ function cbExportList() {
     });
     if (cont.text) txt += '  Комментарий: ' + cont.text + '\r\n';
   });
-  /* Desktop: WKWebView не умеет blob-загрузку (<a download>) — окно
-     зависало без диалога. Пишем файлы через Python и открываем TXT в
-     системном редакторе: дальше «Сохранить как…» в нужное место. */
-  if (cbDesktop()) {
-    cbApi().export_text_list(name, txt, csv).then(function (res) {
-      cbToast(res ? 'Список открыт в редакторе — сохраните куда нужно' : 'Не удалось выгрузить список');
-    }, function () { cbToast('Не удалось выгрузить список'); });
-    return;
-  }
   cbDownload(name + ' — список.csv', '﻿' + csv, 'text/csv;charset=utf-8');
   cbDownload(name + ' — список.txt', txt);
   cbToast('Список выгружен (CSV + TXT)');
 }
 document.getElementById('cbBtnList').onclick = cbExportList;
 
-/* Собрать отбор в папку SELECTED: все оригиналы фото, которые стоят в
-   карточках и доп. контенте (референсы не входят), копируются в папку
-   SELECTED внутри выбранной пользователем папки. Оригиналы не трогаются. */
-function cbCollectSelectedPaths() {
-  var seen = {}, out = [];
-  function add(pid) {
-    var p = pid ? cbPhotoById(pid) : null;
-    if (!p || (p.kind || 'photo') === 'ref') return;   /* рефы не берём */
-    if (!p.path) return;                                /* только реальные файлы на диске */
-    if (seen[p.path]) return;
-    seen[p.path] = 1;
-    out.push(p.path);
-  }
-  App.cards.forEach(function (card) {
-    if (card.mode === 'auto') (card.pids || []).forEach(add);
-    else (card.slots || []).forEach(function (s) { add(s.pid); });
-  });
-  App.containers.forEach(function (cont) {
-    (cont.photoIds || []).forEach(add);
-  });
-  return out;
-}
-
-function cbExportSelected() {
-  if (!cbDesktop()) {
-    cbToast('Сбор в папку доступен только в desktop-версии');
-    return;
-  }
-  var paths = cbCollectSelectedPaths();
-  if (!paths.length) {
-    cbToast('В карточках и доп. контенте нет фото с файлами на диске');
-    return;
-  }
-  cbToast('Копирую ' + paths.length + ' кадр(ов) в SELECTED...');
-  cbApi().export_selected(JSON.stringify(paths)).then(function (res) {
-    if (!res || !res.ok) {
-      if (res && res.error === 'cancel') return;   /* пользователь отменил выбор папки */
-      cbToast('Не удалось собрать отбор');
-      return;
-    }
-    var msg = 'Скопировано в SELECTED: ' + res.copied;
-    if (res.missing) msg += ' · пропущено (нет файла): ' + res.missing;
-    cbToast(msg);
-  }, function () { cbToast('Не удалось собрать отбор'); });
-}
-document.getElementById('cbBtnSelected').onclick = cbExportSelected;
-
 /* ============================================================
    Сохранение / загрузка проекта
    ============================================================ */
 
 function cbProjectData() {
-  var desktop = cbDesktop();
   return {
     app: 'cardboard',
     version: 3,
     name: App.projectName || 'Проект',
     savedAt: new Date().toISOString(),
-    mode: desktop ? 'paths' : 'embedded',
+    mode: 'embedded',
     nextId: App.nextId,
     photos: App.photos.map(function (p) {
       return {
         id: p.id, name: p.name, path: p.path, w: p.w, h: p.h, kind: p.kind || 'photo',
-        dataUrl: (desktop && p.path) ? null : p.dataUrl
+        dataUrl: p.dataUrl
       };
     }),
     cards: App.cards,
@@ -4057,23 +3229,8 @@ function cbProjectData() {
   };
 }
 
-function cbSaveProject() {
-  var data = cbProjectData();
-  var json = JSON.stringify(data);
-  if (cbDesktop()) {
-    cbApi().save_project(data.name, json, false).then(function (path) {
-      if (!path) return;
-      App.projectPath = path;
-      cbClearDirty();
-      cbRecentAdd(data.name, path);
-      cbToast('Сохранено: ' + path);
-    });
-  } else {
-    cbDownload(data.name + '.cardboard', json, 'application/json');
-    cbClearDirty();
-    cbToast('Проект сохранён: ' + data.name + '.cardboard');
-  }
-}
+/* «Сохранить» (⌘S): cp-app.js подменяет — отбор открытой съёмки пишется на Диск. */
+function cbSaveProject() { }
 
 /* Миграция карточек старых версий проекта (v1/v2: rows/cols + slots[pid]) */
 function cbMigrateCard(c) {
@@ -4143,120 +3300,11 @@ function cbApplyProject(data) {
   cbRenderTray(); cbRenderCards(); cbRenderConts();
 }
 
-function cbRehydrateThumbs(isRetry) {
-  var paths = [];
-  App.photos.forEach(function (p) { if (p.path && !p.dataUrl) paths.push(p.path); });
-  if (!paths.length) return;
-  if (paths.length > 30) cbBusyShow('Загрузка фото: ' + paths.length, 0.3);
-  cbApi().thumbs_for(paths).then(function (map) {
-    var missing = 0, denied = 0, deniedPath = null;
-    App.photos.forEach(function (p) {
-      if (!p.path || p.dataUrl) return;
-      var t = map[p.path];
-      if (t && t.dataUrl) { p.missing = false; p.dataUrl = t.dataUrl; p.w = t.w; p.h = t.h; }
-      else {
-        p.missing = true; missing++;
-        if (t && t.error === 'denied') { denied++; if (!deniedPath) deniedPath = p.path; }
-      }
-    });
-    cbBusyHide();
-    cbRenderTray(); cbRenderCards(); cbRenderConts();
-    if (denied && !isRetry) {
-      /* macOS (TCC) молча запретил чтение защищённой папки — выбор папки
-         в системном диалоге возвращает приложению право читать её */
-      var dir = deniedPath.slice(0, deniedPath.lastIndexOf('/'));
-      if (confirm('macOS не даёт приложению доступ к папке с фото:\n' + dir
-        + '\n\nОткрыть диалог и выбрать эту папку, чтобы вернуть доступ?')) {
-        cbApi().grant_folder_access(dir).then(function (ok) {
-          if (ok) cbRehydrateThumbs(true);
-        });
-      }
-    } else if (missing) {
-      if (denied) {
-        cbToast('Нет доступа к файлам: ' + denied + ' (macOS, Настройки → Конфиденциальность → Файлы и папки)');
-      } else if (!isRetry && confirm('Не найдено файлов: ' + missing
-        + '.\nФото переехали в другую папку?\n\nВыбрать её — пути обновятся по именам файлов.')) {
-        cbLocatePhotos();   /* Locate как в Capture One */
-      } else {
-        cbToast('Не найдено файлов: ' + missing + ' (Файл → Подставить папку с фото)');
-      }
-    }
-  }).catch(function () { cbBusyHide(); });
-}
-
-function cbOpenProjectBrowser(file) {
-  var reader = new FileReader();
-  reader.onload = function () {
-    try {
-      var data = JSON.parse(reader.result);
-      if (data.app !== 'cardboard') throw new Error('not cardboard');
-      cbApplyProject(data);
-      cbToast('Проект открыт: ' + (data.name || file.name));
-      if (data.mode === 'paths') cbToast('Проект сохранён в desktop-режиме — в браузере фото по путям недоступны');
-    } catch (err) {
-      cbToast('Не удалось открыть файл — это не проект Cardboard');
-    }
-  };
-  reader.readAsText(file);
-}
-
-document.getElementById('cbBtnSave').onclick = cbSaveProject;
-document.getElementById('cbBtnOpen').onclick = function () {
-  if (App.dirty && !confirm('Есть несохранённые изменения. Открыть другой проект?')) return;
-  if (cbDesktop()) {
-    cbApi().open_project().then(function (res) {
-      if (!res) return;
-      if (!res.data) { cbToast('Не удалось прочитать файл проекта'); return; }
-      var data = JSON.parse(res.data);
-      if (data.app !== 'cardboard') { cbToast('Это не проект Cardboard'); return; }
-      App.projectPath = res.path;
-      cbApplyProject(data);
-      cbRehydrateThumbs();
-      cbRecentAdd(data.name, res.path);
-      cbToast('Проект открыт: ' + res.path);
-    });
-  } else {
-    document.getElementById('cbProjInput').click();
-  }
-};
-document.getElementById('cbProjInput').onchange = function () {
-  if (this.files.length) cbOpenProjectBrowser(this.files[0]);
-  this.value = '';
-};
-
+/* через обёртку: функцию подменяет cp-app.js, прямая ссылка осталась бы на старую */
+document.getElementById('cbBtnSave').onclick = function () { cbSaveProject(); };
 /* ============================================================
    Инициализация
    ============================================================ */
-
-function cbInitDesktopUi() {
-  document.getElementById('cbBtnFolder').style.display = '';
-  document.getElementById('cbBtnSelected').style.display = '';
-  document.getElementById('cbMode').textContent = 'desktop';
-  /* нативное macOS-меню вместо HTML-меню в топбаре */
-  try {
-    cbApi().has_native_menu().then(function (yes) {
-      if (yes) document.body.classList.add('cb-native-menu');
-    });
-  } catch (e) { /* старый мост без метода */ }
-}
-
-/* Диспетчер нативного меню: пункты дёргают существующие обработчики */
-function cbMenuNative(action) {
-  var map = {
-    'new': 'cbMenuNew', 'open': 'cbBtnOpen', 'save': 'cbBtnSave', 'rename': 'cbMenuRename',
-    'pick': 'cbBtnPick', 'pickref': 'cbBtnPickRef', 'folder': 'cbBtnFolder', 'watch': 'cbBtnWatch',
-    'locate': 'cbBtnLocate',
-    'pdf': 'cbBtnPdf', 'print': 'cbBtnPrint', 'list': 'cbBtnList', 'selected': 'cbBtnSelected',
-    'tplnew': 'cbMenuTplNew', 'tplgal': 'cbMenuTplGallery',
-    'helpguide': 'cbMenuHelpGuide', 'helpsync': 'cbMenuHelpSync', 'helpprod': 'cbMenuHelpProducts',
-    'update': 'cbMenuHelpUpdate', 'telemetry': 'cbMenuHelpTelemetry'
-  };
-  var el = document.getElementById(map[action]);
-  if (el) el.click();
-}
-
-window.addEventListener('pywebviewready', function () { cbInitDesktopUi(); });
-if (cbDesktop()) cbInitDesktopUi();
 
 cbLoadTemplates();
 cbSetProjectName(App.projectName);
@@ -4266,178 +3314,22 @@ cbRenderConts();
 cbSwitchTab('cards');
 cbHistoryReset();
 /* при запуске сразу предлагаем создать (или открыть) проект */
-/* ============================================================
-   Телеметрия (опт-ин) и проверка обновлений — отдельный Supabase
-   проект инструментов Content Pulse. Без согласия ничего не уходит.
-   ============================================================ */
-var CB_VERSION = '1.3.1';
-var CB_TOOLS_DB = {
-  url: '',   /* https://<project>.supabase.co — проект инструментов */
-  key: ''    /* publishable/anon ключ (insert-only RLS, читать нельзя) */
-};
-
-function cbInstallId() {
-  var id = localStorage.getItem('cardboard_install_id');
-  if (!id) {
-    id = 'ins_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
-    try { localStorage.setItem('cardboard_install_id', id); } catch (e) { }
-  }
-  return id;
-}
-
-/* пути и имена проектов НЕ уходят: вырезаем всё похожее на путь */
-function cbTelSanitize(s) {
-  return String(s == null ? '' : s)
-    .replace(/\/(Users|Volumes|home)\/[^\s'")\]]+/g, '‹путь›')
-    .slice(0, 800);
-}
-
-function cbTelemetryOn() {
-  return localStorage.getItem('cardboard_telemetry') === '1'
-    && CB_TOOLS_DB.url && CB_TOOLS_DB.key;
-}
-
-function cbLogEvent(kind, msg) {
-  if (!cbTelemetryOn()) return;
-  var q = [];
-  try { q = JSON.parse(localStorage.getItem('cardboard_log_queue') || '[]'); } catch (e) { }
-  q.push({
-    install_id: cbInstallId(), app: 'cardboard', version: CB_VERSION,
-    os: cbTelSanitize(navigator.userAgent), kind: kind,
-    message: cbTelSanitize(msg), at: new Date().toISOString()
-  });
-  if (q.length > 50) q = q.slice(-50);   /* очередь не растёт бесконечно */
-  try { localStorage.setItem('cardboard_log_queue', JSON.stringify(q)); } catch (e) { }
-  cbLogFlush();
-}
-
-var _telFlushing = false;
-function cbLogFlush() {
-  if (_telFlushing || !cbTelemetryOn()) return;
-  var q = [];
-  try { q = JSON.parse(localStorage.getItem('cardboard_log_queue') || '[]'); } catch (e) { }
-  if (!q.length) return;
-  _telFlushing = true;
-  fetch(CB_TOOLS_DB.url + '/rest/v1/cardboard_logs', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      apikey: CB_TOOLS_DB.key,
-      Authorization: 'Bearer ' + CB_TOOLS_DB.key,
-      Prefer: 'return=minimal'
-    },
-    body: JSON.stringify(q)
-  }).then(function (r) {
-    _telFlushing = false;
-    if (r.ok) { try { localStorage.setItem('cardboard_log_queue', '[]'); } catch (e) { } }
-  }).catch(function () { _telFlushing = false; });   /* офлайн — попробуем позже */
-}
-
-window.addEventListener('error', function (e) {
-  cbLogEvent('js_error', (e.message || '') + ' @' + (e.filename || '').split('/').pop() + ':' + (e.lineno || 0));
-});
-window.addEventListener('unhandledrejection', function (e) {
-  cbLogEvent('bridge_error', String(e.reason && e.reason.message || e.reason || ''));
-});
-
-/* Проверка обновлений: таблица app_versions (только чтение) */
-function cbVersionNewer(a, b) {
-  var pa = String(a).split('.').map(Number), pb = String(b).split('.').map(Number);
-  for (var i = 0; i < 3; i++) {
-    if ((pa[i] || 0) > (pb[i] || 0)) return true;
-    if ((pa[i] || 0) < (pb[i] || 0)) return false;
-  }
-  return false;
-}
-
-function cbCheckUpdate(manual) {
-  /* desktop: спрашиваем GitHub Releases через Python (без CORS) */
-  if (cbDesktop() && cbApi().check_update) {
-    cbApi().check_update().then(function (v) {
-      if (v && cbVersionNewer(v, CB_VERSION)) cbUpdateOffer(v);
-      else if (manual) cbToast(v ? 'Вы на последней версии: ' + CB_VERSION : 'Не удалось проверить обновления');
-    });
-    return;
-  }
-  if (manual) cbToast('Проверка обновлений доступна в desktop-версии');
-}
-
-/* Предложение обновиться: mac — сам скачает и заменит; Windows — ссылка */
-function cbUpdateOffer(v) {
-  var isMac = /Mac/i.test(navigator.platform || '');
-  document.getElementById('cbInfoTitle').textContent = 'Доступна версия ' + v;
-  document.getElementById('cbInfoBody').innerHTML = isMac
-    ? ('У вас ' + CB_VERSION + '. Обновление скачается с GitHub (сборка с аттестацией) и приложение перезапустится. Проект сохранён автоматически.<br><br>'
-      + '<button class="cb-primary" id="cbUpdGo">Обновить сейчас</button> '
-      + '<a href="https://github.com/barinskim-cmyk/content-pulse-cardboard/releases/latest" target="_blank" style="margin-left:10px">страница релиза</a>')
-    : ('У вас ' + CB_VERSION + '. Скачайте новую версию со страницы релиза — установка поверх, проекты не трогаются.<br><br>'
-      + '<a href="https://github.com/barinskim-cmyk/content-pulse-cardboard/releases/latest" target="_blank">Открыть страницу релиза</a>');
-  document.getElementById('cbInfoModal').classList.add('cb-open');
-  if (!isMac) return;
-  document.getElementById('cbUpdGo').onclick = function () {
-    document.getElementById('cbInfoModal').classList.remove('cb-open');
-    cbAutosaveNow();
-    cbBusyShow('Обновление: скачивание с GitHub...', 0.4);
-    cbApi().install_update(true).then(function (res) {
-      cbBusyHide();
-      if (res && res.ok) {
-        cbBusyShow('Обновлено — перезапуск...', 1);
-        setTimeout(function () { cbApi().quit_app(); }, 800);
-      } else {
-        cbToast('Не удалось обновиться: ' + (res && res.error || 'неизвестная ошибка'));
-        cbLogEvent('update_failed', res && res.error || '');
-      }
-    }).catch(function () { cbBusyHide(); cbToast('Не удалось обновиться'); });
-  };
-}
-
-function cbMaybeCheckUpdate() {
-  if (!cbDesktop()) return;
-  var last = parseInt(localStorage.getItem('cardboard_update_check') || '0', 10);
-  if (Date.now() - last < 22 * 3600 * 1000) return;   /* раз в сутки */
-  try { localStorage.setItem('cardboard_update_check', String(Date.now())); } catch (e) { }
-  cbCheckUpdate(false);
-}
-
-/* Согласие: первый запуск → вопрос, потом лаунчер */
-document.getElementById('cbTelYes').onclick = function () {
-  try { localStorage.setItem('cardboard_telemetry', '1'); } catch (e) { }
-  document.getElementById('cbTelModal').classList.remove('cb-open');
-  cbLogEvent('app_start', 'consent_granted');
-  cbProjModalOpen('launcher', true);
-};
-document.getElementById('cbTelNo').onclick = function () {
-  try { localStorage.setItem('cardboard_telemetry', '0'); } catch (e) { }
-  document.getElementById('cbTelModal').classList.remove('cb-open');
-  cbProjModalOpen('launcher', true);
-};
-
-/* Лаунчер при запуске: недавние проекты или новый (как в Capture One).
-   Перед самым первым запуском — вопрос про отчёты об ошибках. */
-setTimeout(function () {
-  if (cbDesktop() && CB_TOOLS_DB.url && localStorage.getItem('cardboard_telemetry') === null) {
-    document.getElementById('cbTelModal').classList.add('cb-open');
-  } else {
-    cbProjModalOpen('launcher', true);
-  }
-  if (cbTelemetryOn()) cbLogEvent('app_start', 'v' + CB_VERSION);
-  cbLogFlush();
-  cbMaybeCheckUpdate();
-}, 150);
+/* при запуске — «лаунчер»: cp-app.js показывает вместо него витрину съёмок */
+setTimeout(function () { cbProjModalOpen('launcher', true); }, 150);
 </script>
-<script src="cp-disk.js?v=2.0.79"></script>
-<script src="cp-app.js?v=2.0.79"></script>
-<script src="cp-shelf.js?v=2.0.79"></script>
-<script src="cp-rules.js?v=2.0.79"></script>
-<script src="cp-guard.js?v=2.0.79"></script>
-<script src="cp-deliver.js?v=2.0.79"></script>
-<script src="cp-stages.js?v=2.0.79"></script>
-<script src="cp-accept.js?v=2.0.79"></script>
-<script src="cp-mirror.js?v=2.0.79"></script>
-<script src="cp-catalog.js?v=2.0.79"></script>
-<script src="cp-review.js?v=2.0.79"></script>
-<script src="cp-site.js?v=2.0.79"></script>
-<script src="cp-upload.js?v=2.0.79"></script>
-<script src="cp-speed.js?v=2.0.79"></script>
+<script src="cp-disk.js?v=2.0.80"></script>
+<script src="cp-app.js?v=2.0.80"></script>
+<script src="cp-shelf.js?v=2.0.80"></script>
+<script src="cp-rules.js?v=2.0.80"></script>
+<script src="cp-guard.js?v=2.0.80"></script>
+<script src="cp-deliver.js?v=2.0.80"></script>
+<script src="cp-stages.js?v=2.0.80"></script>
+<script src="cp-accept.js?v=2.0.80"></script>
+<script src="cp-mirror.js?v=2.0.80"></script>
+<script src="cp-catalog.js?v=2.0.80"></script>
+<script src="cp-review.js?v=2.0.80"></script>
+<script src="cp-site.js?v=2.0.80"></script>
+<script src="cp-upload.js?v=2.0.80"></script>
+<script src="cp-speed.js?v=2.0.80"></script>
 </body>
 </html>

@@ -37,8 +37,6 @@ function cpSiteDateName(nm) {
   if (m) return (m[3] ? (m[3].length === 2 ? '20' + m[3] : m[3]) : String(new Date().getFullYear())) + '-' + z(m[2]) + '-' + z(m[1]);
   return '';
 }
-/** Дата папки съёмки в «Сайте» (по её родителю). */
-function cpSiteDateOf(path) { return cpSiteDateName(cpFolderBase(String(path || '').slice(0, String(path || '').lastIndexOf('/')))); }
 function cpSiteFmt(date) { var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date || ''); return m ? m[3] + '.' + m[2] + '.' + m[1] : date || ''; }
 
 function cpSiteRecentFrom() {

@@ -150,14 +150,45 @@ cpParseSettings = (function (orig) {
   };
 })();
 
-/* ретушь в каталоге без папки ретуши — в КАТАЛОГ/03_РЕТУШЬ, а не внутрь съёмки в исходниках */
+/* ---------- нет папки этапа — сказать, а не уходить в старую схему ----------
+   Разбор кода 09.11.2026, пункт 3. Раньше без папки этапа в каталоге молча
+   включались старые пути: ретушь — в <съёмка>/Ретушь, сдача — в
+   <съёмка>/_приёмка, «Согласовать ретушь» — копией в «Сайт/дата/буква_номер».
+   Теперь в каталоге каждое действие этапа проверяет его папку: нет — тост
+   «создайте её: Исправить папки» и ничего не делается. Обычный архив (не
+   каталог) работает по-старому — для него эти пути и задуманы. */
+var CP_CAT_STAGE_ACTION = { approve: 'на согласование', retouch: 'на ретушь', retouched: 'сдача и проверка ретуши', site: 'на сайт' };
+
+/** true — каталог открыт, а папки этапа нет (тост уже показан, действие делать нельзя). */
+function cpCatStageMissing(setting) {
+  if (!cpCatalog() || (CP.settings || {})[setting]) return false;
+  var role = CP_CAT_ROLES.filter(function (r) { return r.setting === setting; })[0];
+  cbToast(!CP.catalogList
+    ? 'Каталог ещё не прочитан — вернитесь на витрину и повторите. Ничего не сделано.'
+    : 'В каталоге нет папки этапа «' + (role ? role.def : setting) + '» (' + (CP_CAT_STAGE_ACTION[setting] || '')
+      + '). Создайте её: «Исправить папки» на витрине. Ничего не сделано.');
+  return true;
+}
+
+/* ретушь: в каталоге — только в его папку ретуши; нет её — ошибка, а не <съёмка>/Ретушь */
 cpRetouchBase = (function (orig) {
   return function (shootPath, shootName) {
-    var cat = cpCatalog();
-    if (cat && CP.catalogList && !(CP.settings || {}).retouch) return cat + '/03_РЕТУШЬ/' + shootName;
+    if (cpCatalog()) {
+      var r = (CP.settings || {}).retouch;
+      if (!r) throw new Error('в каталоге нет папки ретуши (03) — «Исправить папки» на витрине');
+      return r + '/' + shootName;   /* как в cp-app.js: путь тот же, что ищет сверка */
+    }
     return orig.apply(this, arguments);
   };
 })(cpRetouchBase);
+
+/* окно «Сдать»: в каталоге без 04 не открываем (иначе — старая приёмка в <съёмка>/_приёмка) */
+cpAcceptOpen = (function (orig) {
+  return function () {
+    if (cpCatStageMissing('retouched')) return;
+    return orig.apply(this, arguments);
+  };
+})(cpAcceptOpen);
 
 /* фильтры витрины: только папки каталога, по их именам */
 cpStageList = (function (orig) {

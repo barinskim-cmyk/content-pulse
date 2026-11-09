@@ -384,6 +384,31 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   await page.waitForFunction(() => !App.dirty, null, { timeout: 8000 });
   check('общий файл отбора создан на Диске', FILES.has('disk:/Архив/LM-1043/_contentpulse.json'));
 
+  /* разбор кода 09.11, пункт 5: «Файл → Сохранить» был привязан к старой функции Cardboard (скачать .cardboard) */
+  {
+    const key = 'disk:/Архив/LM-1043/_contentpulse.json';
+    let dl = 0; const onDl = () => dl++; page.on('download', onDl);
+    const before = String(FILES.get(key));
+    await page.evaluate(() => { cpEvent('open', [], { note: 'тест кнопки Сохранить' }, true); document.getElementById('cbBtnSave').click(); });
+    await page.waitForFunction(() => !App.dirty && !CP.saving, null, { timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(300);
+    page.off('download', onDl);
+    check('«Файл → Сохранить» пишет отбор на Диск, а не скачивает файл .cardboard', dl === 0 && String(FILES.get(key)) !== before && /тест кнопки Сохранить/.test(String(FILES.get(key))), 'скачиваний ' + dl);
+  }
+  /* фото с компьютера, брошенное в галерею, больше не встраивается в файл отбора (кадры — только с Диска) */
+  {
+    const r = await page.evaluate(async () => {
+      var before = App.photos.length;
+      App.trayTab = 'photo';
+      var dt = new DataTransfer();
+      dt.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'local.png', { type: 'image/png' }));
+      document.getElementById('cbTrayGrid').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+      await new Promise(res => setTimeout(res, 400));
+      return [App.photos.length - before, document.getElementById('cbToast').textContent];
+    });
+    check('фото, брошенное в галерею, не встраивается в отбор — подсказка про «Догрузить»', r[0] === 0 && /Догрузить/.test(r[1]), JSON.stringify(r));
+  }
+
   /* карточка из шаблона + кадр в слот (через модель — drag&drop эмулировать дорого) */
   await page.evaluate(() => {
     var tpl = App.templates[0];
@@ -1653,6 +1678,27 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
       await page.click('[data-cp-stage=""]');
       if (!(await page.isVisible('#cpArchiveInput'))) await page.click('#cpGear');
     }
+    /* разбор кода 09.11, пункт 3: в каталоге нет папки этапа — предупреждение и ничего, без старых путей */
+    {
+      const r = await page.evaluate(() => {
+        var keep = Object.assign({}, CP.settings), out = {}, t = document.getElementById('cbToast');
+        delete CP.settings.retouched; delete CP.settings.retouch; delete CP.settings.approve;
+        var d = CP.shoots[0];
+        t.textContent = ''; cpAcceptOpen(d.path, d.name);
+        out.accept = t.textContent; out.acceptOpen = !!document.querySelector('#cpAccept.cp-open');
+        t.textContent = ''; cpRvApprove([]); out.approve = t.textContent;
+        t.textContent = ''; cpDoAction('retouch', ['нет-такого'], null); out.retouch = t.textContent;
+        t.textContent = ''; cpDoAction('approval', ['нет-такого'], null); out.approval = t.textContent;
+        try { cpRetouchBase(d.path, d.name); out.base = 'нет ошибки'; } catch (e) { out.base = e.message; }
+        CP.settings = keep;
+        out.siteOk = cpCatStageMissing('site') === false;
+        return out;
+      });
+      check('каталог без 04: «Сдать» не открывает старую приёмку — предупреждение', /04_ОТРЕТУШИРОВАНО/.test(r.accept) && !r.acceptOpen && /Исправить папки/.test(r.accept), JSON.stringify(r));
+      check('каталог без 04: «Согласовать ретушь» не копирует в старый «Сайт/дата/буква_номер»', /04_ОТРЕТУШИРОВАНО/.test(r.approve), r.approve);
+      check('каталог без 03 и 02: «На ретушь» и «На согласование» — предупреждение до статуса', /03_РЕТУШЬ/.test(r.retouch) && /02_ОТБОР/.test(r.approval) && !/Нет кадров/.test(r.retouch + r.approval), JSON.stringify(r));
+      check('каталог без 03: путь ретуши — ошибка, а не <съёмка>/Ретушь в исходниках', /нет папки ретуши/.test(r.base) && r.siteOk, r.base);
+    }
     await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-catalog.png') });
     await page.fill('#cpArchiveInput', 'Архив');
     await page.click('#cpArchiveApply');
@@ -1822,8 +1868,8 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await slow.goto(base);
     await slow.waitForFunction(() => window.CP && CP.booted, null, { timeout: 10000 });
     await slow.waitForTimeout(400);
-    check('медленная загрузка: открыта витрина, лаунчер «Проекты» закрыт', await slow.evaluate(() =>
-      document.getElementById('cpShelf').classList.contains('cp-open') && !document.getElementById('cbProjModal').classList.contains('cb-open')));
+    check('медленная загрузка: открыта витрина, окна «Проекты» нет', await slow.evaluate(() =>
+      document.getElementById('cpShelf').classList.contains('cp-open') && !document.getElementById('cbProjModal')));
     const fast = await ctx.newPage();
     let shelfLoads = 0;
     fast.on('request', rq => { if (/\/v1\/disk\/resources\?/.test(rq.url()) && /path=disk%3A%2F%D0%90%D1%80%D1%85%D0%B8%D0%B2&/.test(rq.url())) shelfLoads++; });
