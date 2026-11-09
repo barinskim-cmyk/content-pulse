@@ -474,10 +474,10 @@ function dosDateTime(d) {
   return { time, date };
 }
 
-function localHeader(nameBuf, crc, size, dt) {
+function localHeader(nameBuf, crc, size, dt, v45) {
   const h = Buffer.alloc(30);
   h.writeUInt32LE(0x04034b50, 0);
-  h.writeUInt16LE(20, 4);
+  h.writeUInt16LE(v45 ? 45 : 20, 4);
   h.writeUInt16LE(0x0800, 6);           /* имена в UTF-8 */
   h.writeUInt16LE(0, 8);                /* без сжатия */
   h.writeUInt16LE(dt.time, 10);
@@ -510,6 +510,60 @@ function centralHeader(nameBuf, crc, size, offset, dt) {
   h.writeUInt32LE(0, 38);
   h.writeUInt32LE(offset, 42);
   return Buffer.concat([h, nameBuf]);
+}
+
+/* ZIP64: архив больше 4 ГБ одним файлом (Маша, 08.11: «скачать всё — пилит на 30 частей»).
+   Каждый файл меньше 4 ГБ, поэтому локальные заголовки прежние; если смещение файла
+   дальше 4 ГБ — в оглавлении у него поле 0xFFFFFFFF и дополнительная запись ZIP64 с
+   настоящим смещением; в конце — запись ZIP64 об оглавлении и указатель на неё.
+   ZIP_FORCE64=1 — включить ZIP64 всегда (для проверки на маленьких архивах). */
+const Z64 = 0xFFFFFFFF;
+function needs64(offset) { return offset >= Z64 || process.env.ZIP_FORCE64 === '1'; }
+
+function cdEntryLen(nameLen, offset) { return 46 + nameLen + (needs64(offset) ? 12 : 0); }
+
+function centralHeader64(nameBuf, crc, size, offset, dt) {
+  if (!needs64(offset)) return centralHeader(nameBuf, crc, size, offset, dt);
+  const h = centralHeader(nameBuf, crc, size, 0, dt);
+  /* «сделано в Unix, версия 4.5» и права файла 644: так Info-ZIP и Архиватор macOS читают
+     русские имена у записей ZIP64 без предупреждений (с «MS-DOS» unzip ругался на имена) */
+  h.writeUInt16LE(0x032d, 4);
+  h.writeUInt16LE(45, 6);
+  h.writeUInt32LE(0x81a40000, 38);
+  h.writeUInt16LE(12, 30);              /* длина доп. поля */
+  h.writeUInt32LE(Z64, 42);
+  const x = Buffer.alloc(12);
+  x.writeUInt16LE(0x0001, 0);           /* ZIP64 extended information */
+  x.writeUInt16LE(8, 2);
+  x.writeBigUInt64LE(BigInt(offset), 4);
+  return Buffer.concat([h, x]);
+}
+
+function endLen(count, cdSize, cdOffset) {
+  return 22 + (count >= 0xFFFF || cdSize >= Z64 || needs64(cdOffset) ? 56 + 20 : 0);
+}
+
+function endRecord64(count, cdSize, cdOffset) {
+  if (!(count >= 0xFFFF || cdSize >= Z64 || needs64(cdOffset))) return endRecord(count, cdSize, cdOffset);
+  const r = Buffer.alloc(56);
+  r.writeUInt32LE(0x06064b50, 0);
+  r.writeBigUInt64LE(44n, 4);
+  r.writeUInt16LE(45, 12);
+  r.writeUInt16LE(45, 14);
+  r.writeUInt32LE(0, 16);
+  r.writeUInt32LE(0, 20);
+  r.writeBigUInt64LE(BigInt(count), 24);
+  r.writeBigUInt64LE(BigInt(count), 32);
+  r.writeBigUInt64LE(BigInt(cdSize), 40);
+  r.writeBigUInt64LE(BigInt(cdOffset), 48);
+  const loc = Buffer.alloc(20);
+  loc.writeUInt32LE(0x07064b50, 0);
+  loc.writeUInt32LE(0, 4);
+  loc.writeBigUInt64LE(BigInt(cdOffset + cdSize), 8);
+  loc.writeUInt32LE(1, 16);
+  const e = endRecord(Math.min(count, 0xFFFF), Math.min(cdSize, Z64), Z64);
+  if (count >= 0xFFFF) { e.writeUInt16LE(0xFFFF, 8); e.writeUInt16LE(0xFFFF, 10); }
+  return Buffer.concat([r, loc, e]);
 }
 
 function endRecord(count, cdSize, cdOffset) {
@@ -708,15 +762,16 @@ async function doZipPart(token, req, openPart) {
   if (!items.length && !req.final) return { status: 400, result: { error: 'Нет файлов' } };
   let dataLen = 0;
   for (const x of items) dataLen += 30 + x.name.length + x.size;
-  let cdLen = 0, prev = [];
+  if (items.some((x) => x.size >= Z64)) return { status: 413, result: { error: 'Файл больше 4 ГБ — такой отдаётся отдельной ссылкой' } };
+  let cdLen = 0, prev = [], tail = 0;
   if (req.final) {
     prev = (Array.isArray(req.done) ? req.done : []).map((d) => ({ name: Buffer.from(String(d.name).replace(/^\/+/, ''), 'utf8'), size: +d.size, crc: +d.crc >>> 0, offset: +d.offset }));
-    for (const d of prev) cdLen += 46 + d.name.length;
-    for (const x of items) cdLen += 46 + x.name.length;
-    if (prev.length + items.length >= 0xFFFF) return { status: 413, result: { error: 'В архиве больше 65 тысяч файлов' } };
+    for (const d of prev) cdLen += cdEntryLen(d.name.length, d.offset);
+    let off = start;
+    for (const x of items) { cdLen += cdEntryLen(x.name.length, off); off += 30 + x.name.length + x.size; }
+    tail = endLen(prev.length + items.length, cdLen, start + dataLen);
   }
-  const partLen = dataLen + (req.final ? cdLen + 22 : 0);
-  if (start + partLen >= 0xFFFFFFFF) return { status: 413, result: { error: 'Архив больше 4 ГБ' } };
+  const partLen = dataLen + (req.final ? cdLen + tail : 0);
   const out = await (openPart || ((len) => openS3Upload(req.key, len, { partNumber: String(req.n), uploadId: req.uploadId }, 'application/octet-stream')))(partLen);
   const AHEAD = 4;
   const pending = [];
@@ -744,22 +799,22 @@ async function doZipPart(token, req, openPart) {
         const n1 = await streamDiskFile(token, x.from, (b) => { c = crc32Update(c, b); });
         if (n1 !== x.size) throw new Error(x.from.split('/').pop() + ': размер изменился (' + n1 + ' вместо ' + x.size + '), обновите съёмку');
         crc = (c ^ -1) >>> 0;
-        await out.write(localHeader(x.name, crc, x.size, dt));
+        await out.write(localHeader(x.name, crc, x.size, dt, needs64(offset)));
         const n2 = await streamDiskFile(token, x.from, (b) => out.write(b));
         if (n2 !== x.size) throw new Error(x.from.split('/').pop() + ': файл изменился во время сборки');
       } else {
         if (buf.length !== x.size) throw new Error(x.from.split('/').pop() + ': размер изменился (' + buf.length + ' вместо ' + x.size + '), обновите съёмку');
         crc = crc32(buf);
-        await out.write(localHeader(x.name, crc, x.size, dt));
+        await out.write(localHeader(x.name, crc, x.size, dt, needs64(offset)));
         await out.write(buf);
       }
       mine.push({ name: x.name, size: x.size, crc, offset });
       offset += 30 + x.name.length + x.size;
     }
     if (req.final) {
-      const cd = Buffer.concat(prev.concat(mine).map((d) => centralHeader(d.name, d.crc, d.size, d.offset, dt)));
+      const cd = Buffer.concat(prev.concat(mine).map((d) => centralHeader64(d.name, d.crc, d.size, d.offset, dt)));
       await out.write(cd);
-      await out.write(endRecord(prev.length + mine.length, cd.length, offset));
+      await out.write(endRecord64(prev.length + mine.length, cd.length, offset));
     }
     const w = await out.end();
     if (w.status !== 201 || !w.etag) throw new Error('Хранилище не приняло кусок архива: HTTP ' + w.status + ' ' + String(w.body || '').slice(0, 200));

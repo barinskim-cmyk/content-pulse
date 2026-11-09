@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.64';
+var CP_VERSION = '2.0.65';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1853,15 +1853,17 @@ function cpHrefWhenReady(path) {
  *
  * Маша, 06.11: «выбрали карточки — разбил архив на два куска, а должен
  * одним». Теперь архив всегда один: прослойка собирает его за несколько
- * вызовов кусками одной загрузки в облако (cpZipOne). Несколько архивов —
- * только если выборка больше 4 ГБ (предел ZIP) или облака нет.
+ * вызовов кусками одной загрузки в облако (cpZipOne); больше 4 ГБ — ZIP64.
+ * Несколько архивов — только если облака нет.
  */
 CP.zipPartMin = 6 * 1024 * 1024;   /* кусок загрузки в облако, кроме последнего, — не меньше 5 МБ */
 
 function cpZipExport(name, entries, note) {
   entries = entries.filter(function (e) { return e.size > 0; });
   var total = entries.reduce(function (a, e) { return a + e.size; }, 0);
-  if (CPDisk.hasProxy() && total < CP_ZIP_FILE_MAX && entries.length < 60000) {
+  /* один архив любого размера: больше 4 ГБ прослойка пишет ZIP64 (Маша, 08.11: «скачать всё — пилит
+     на 30 частей, а нужно одним архивом на пачку») */
+  if (CPDisk.hasProxy() && entries.length < 60000) {
     return cpZipOne(name, entries, note).catch(function (e) {
       if (e && e.status === 501) return cpZipParts(name, entries, note);   /* облако не настроено */
       throw e;

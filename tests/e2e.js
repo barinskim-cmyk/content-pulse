@@ -442,12 +442,16 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('тег сразу нескольким: выбор появляется, когда отмечены папки', !!(await page.$('#cpAssignTag')) && /Отмеченным \(1\)/.test(await page.textContent('[data-cp-p="assign"]')));
   const st1 = JSON.parse(FILES.get('disk:/Архив/LM-1043/_contentpulse.json').toString());
   check('тег папки записан в отбор на Диске', (st1.meta.cp.folderTags.part2 || []).includes('Яна'));
-  await page.selectOption('#cpFTag', 'Яна');
+  /* фильтры — чипы над папками (Маша, 08.11) */
+  check('фильтры скачивания — чипами сверху панели, внизу выпадающих списков нет', !!(await page.$('#cpPanel .cp-fchips [data-cp-fchip="tag:Яна"]')) && !(await page.$('#cpFTag')) && !(await page.$('#cpFStatus'))
+    && await page.evaluate(() => { const c = document.querySelector('#cpPanel .cp-fchips'), f = document.querySelector('#cpPanel .cp-fold-all'); return !!c && !!f && (c.compareDocumentPosition(f) & Node.DOCUMENT_POSITION_FOLLOWING); }));
+  await page.click('[data-cp-fchip="tag:Яна"]');
   check('фильтр по тегу папки: только её кадры (наследование)', await page.evaluate(() => cpFiltered(CP.sel).length === 2 && cpFiltered(CP.sel).every(x => x.dir === 'part2')));
   await page.uncheck('[data-cp-fold="part2"]');
-  await page.selectOption('#cpFTag', '');
-  await page.selectOption('#cpFStatus', 'retouch');
-  check('фильтр по статусу «Ретушь»', await page.evaluate(() => cpFiltered(CP.sel).length === 2));
+  await page.click('[data-cp-fchip="tag:Яна"]');
+  await page.click('[data-cp-fchip="st:retouch"]');
+  check('фильтр по статусу «на ретуши» — чип отмечен, на кнопке — сколько скачается', await page.evaluate(() => cpFiltered(CP.sel).length === 2)
+    && /cp-on/.test(await page.getAttribute('[data-cp-fchip="st:retouch"]', 'class')) && /Скачать · 2/.test(await page.textContent('[data-cp-p="download"]')));
   await page.click('[data-cp-p="download"]');
   await page.waitForFunction(() => CP.sel && CP.sel.data && Object.keys(CP.sel.data.meta.cp.downloads).length === 2, null, { timeout: 10000 });
   const ex1 = ZIPS.get('disk:/_ContentPulse/выгрузки/LM-1043_Ретушь_1.zip') || [];
@@ -463,7 +467,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   await page.click('[data-cp-p="download"]');
   await page.waitForFunction(() => Object.values(CP.sel.data.meta.cp.downloads).every(d => d.n === 2), null, { timeout: 10000 });
   check('повторное скачивание разрешено: _2 и счётчик ×2', ZIPS.has('disk:/_ContentPulse/выгрузки/LM-1043_Ретушь_2.zip'));
-  await page.selectOption('#cpFStatus', '');
+  await page.click('[data-cp-fchip="st:retouch"]');
   await page.check('[data-cp-fold="part2"]');
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-panel.png') });
   await page.uncheck('[data-cp-fold="part2"]');
@@ -877,9 +881,9 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   await page.evaluate(() => cpShowShelf());
   await page.fill('#cpShelfSearch', 'МОДЕЛЬ');
   await page.click('.cp-shoot');
-  await page.waitForSelector('#cpPanel.cp-open #cpFAll', { timeout: 10000 });
+  await page.waitForSelector('#cpPanel.cp-open [data-cp-fchip="files"]', { timeout: 10000 });
   await page.evaluate(() => { CP.directMin = 400; CP.directPart = 200; });   /* clip.mp4 (500 байт) — «крупный» */
-  await page.selectOption('#cpFAll', 'all');
+  await page.click('[data-cp-fchip="files"]');
   await page.waitForFunction(() => CP.sel && CP.sel.allList && /других файлов: 1/.test(document.querySelector('#cpPanel .cp-sum').textContent), null, { timeout: 8000 });
   check('«Все файлы»: видео посчитано, мусор (.DS_Store) — нет', true);
   await page.click('[data-cp-p="download"]');
@@ -892,7 +896,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('«Все файлы»: кадры в архиве, видео в архив не попало', !zVid.some(n => /clip\.mp4$/.test(n)) && zVid.filter(n => /\.jpg$/.test(n)).length === 3, zVid.join(' | '));
 
   /* дерево папок на панели: раскрыть до последнего уровня, отметить одну вложенную, статусы вложенных */
-  await page.selectOption('#cpFAll', '');
+  await page.click('[data-cp-fchip="files"]');
   check('папки с вложенными — кнопка «папок: N», вложенные скрыты', await page.evaluate(() =>
     /папок: 3/.test(document.querySelector('[data-cp-exp="1"]').textContent) && !document.querySelector('[data-cp-fold="1/74595_модель"]')));
   await page.click('[data-cp-exp="1"]');
