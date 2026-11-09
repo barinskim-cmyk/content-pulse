@@ -124,7 +124,7 @@ cpAcceptUpload = function () {
     if (!ok.length) throw { message: 'ничего не загрузилось: ' + failed.slice(0, 3).join('; '), plain: true };
     var byCard = {};
     ok.forEach(function (j) { (byCard[j.card] = byCard[j.card] || []).push({ path: j.path, name: j.name, size: j.file.size }); });
-    var who = cpActor(), now = new Date().toISOString(), rows = [], oldDirs = [];
+    var who = cpActor(), now = new Date().toISOString(), rows = [], oldDirs = [], stale = {};
     var apply = function (data) {
       var m = data.meta.cp, rv = m.rv = m.rv || {};
       Object.keys(byCard).forEach(function (id) {
@@ -133,6 +133,9 @@ cpAcceptUpload = function () {
         /* новая версия после доработки: папка с доработкой больше не нужна */
         if (prev && prev.status === 'rework' && cpRvDirOf(prev) && cpRvDirOf(prev) !== dirOf[id]) oldDirs.push(cpRvDirOf(prev));
         if (prev && prev.status === 'review') prev.status = 'replaced';
+        /* прошлая версия в той же папке — её файлы, которых нет в новой, уберём (Маша, 09.11:
+           «ретушёр удалил один файл, загрузил — файл всё равно был») */
+        if (prev && prev.status !== 'approved' && cpRvDirOf(prev) === dirOf[id]) stale[id] = (prev.files || []).map(function (f) { return f.path; });
         var ver = { v: list.length + 1, batch: batch, letter: st.letter, n: st.n, date: cpToday(), by: who, ts: now, files: byCard[id], status: 'review', dir: dirOf[id] };
         list.push(ver);
         var card = (data.cards || []).filter(function (c) { return c.id === id; })[0];
@@ -154,6 +157,14 @@ cpAcceptUpload = function () {
       Object.keys(byCard).forEach(function (id) { CPDisk.proxyProps(dirOf[id], { cp_rt: st.letter, cp_rt_date: cpToday() }).catch(function () { }); });
       var jobs2 = [cpOutputAppend(rows)];
       if (oldDirs.length) jobs2.push(CPDisk.trash(oldDirs));
+      /* по списку прошлой версии, а не по папке: Диск показывает свежие файлы в списке не сразу */
+      var old = [];
+      Object.keys(stale).forEach(function (id) {
+        var keep = {};
+        byCard[id].forEach(function (f) { keep[f.path.toLowerCase()] = true; });
+        stale[id].forEach(function (pth) { if (!keep[pth.toLowerCase()] && old.indexOf(pth) === -1) old.push(pth); });
+      });
+      if (old.length) jobs2.push(CPDisk.trash(old).catch(function () { }));
       return Promise.all(jobs2);
     });
   }).then(function () {
@@ -752,6 +763,195 @@ cpRenderShoots = (function (orig) {
   };
 })(cpRenderShoots);
 
+/* ---------- новая версия прямо в карточку ----------
+   Маша, 09.11: «если попросили что-то поправить — чтобы можно было прямо в эту карточку
+   засунуть: когда отправляется на доработку, появляется кнопка „загрузить“ прямо в карточке,
+   ты карточку переделал и эти же фотки туда перетащил, переделанные. Они заменились».
+   И: «ретушёр мог догрузить недостающий кадр непосредственно в карточку, перетаскивает».
+   Файл с тем же именем (без «01_» и расширения) заменяет старый, новый — добавляется,
+   остальные файлы версии остаются. Получается следующая версия «на проверке»; папка
+   «_доработка» снова называется как артикул. */
+
+function cpRvCardUpload(id, files) {
+  files = (files || []).filter(function (x) { return x && x.file && !CP_JUNK_FILE.test(x.file.name); });
+  if (!files.length || !CP.shoot) return Promise.resolve();
+  var root = cpReviewRoot(), list = cpRv()[id], last = cpLastRv(list);
+  if (!root || !last || (last.status !== 'review' && last.status !== 'rework')) { cbToast('Загрузить в карточку можно, когда она на проверке или на доработке'); return Promise.resolve(); }
+  var card = cbCardById(id), idx = App.cards.indexOf(card), shoot = { path: CP.shoot.path, name: CP.shoot.name };
+  var base = root.replace(/\/+$/, '') + '/' + CPDisk.safeName(shoot.name);
+  var from = cpRvDirOf(last) || base + '/' + cpRvDirFor(card, idx);
+  var target = from.replace(/_доработка$/i, '');
+  var letter = last.letter || cpGet(CP_RT_LETTER, ''), wasRework = last.status === 'rework';
+  var used = {}, jobs = [];
+  files.forEach(function (x) {
+    var name = CPDisk.safeName(x.file.name), k = 2;
+    while (used[name.toLowerCase()]) name = name.replace(/(\.[^.]+)?$/, '_' + (k++) + '$1');
+    used[name.toLowerCase()] = true;
+    jobs.push({ file: x.file, name: name });
+  });
+  var olds = last.files.map(function (f) { return { path: f.path, name: f.name, size: f.size }; });
+  var replaced = {};
+  jobs.forEach(function (j) {
+    olds.forEach(function (o) { if (cpStem(o.name) === cpStem(j.name)) replaced[o.path] = true; });
+  });
+  var total = jobs.reduce(function (a, j) { return a + j.file.size; }, 0), loaded = {}, ok = [], failed = [], dir = target;
+  var mb = function (b) { return (b / 1048576).toFixed(b < 10485760 ? 1 : 0); };
+  var show = function (text, frac) {
+    cbBusyShow(text, frac);
+    var box = document.querySelector('[data-cp-rvup="' + id + '"] .cp-rv-prog');
+    if (box) box.innerHTML = '<div class="cp-acc-bar"><i style="width:' + Math.round(frac * 100) + '%"></i></div><div>' + cbEsc(text) + '</div>';
+  };
+  var prog = function () {
+    var sum = 0;
+    Object.keys(loaded).forEach(function (k) { sum += loaded[k]; });
+    var frac = total ? sum / total : 0;
+    show('Загружаю в карточку: файлов ' + ok.length + ' из ' + jobs.length + ' · ' + mb(sum) + ' из ' + mb(total) + ' МБ (' + Math.round(frac * 100) + '%)', 0.02 + 0.96 * frac);
+  };
+  show('Готовлю папку карточки...', 0.01);
+  /* папка на доработке снова называется как артикул */
+  var step = from !== target ? cpMoveFolder(from, target).catch(function () {
+    /* папки «_доработка» уже нет на Диске — старых файлов не сохранить, грузим новые */
+    olds = []; return CPDisk.ensureDir(target).then(function () { return target; });
+  }) : CPDisk.ensureDir(target).then(function () { return target; });
+  return step.then(function (d) {
+    dir = d;
+    olds.forEach(function (o) { if (o.path.indexOf(from + '/') === 0) { var np = dir + o.path.slice(from.length); if (replaced[o.path]) { replaced[np] = true; } o.path = np; } });
+    prog();
+    return cpPool(jobs, 3, function (j, i) {
+      return CPDisk.uploadBlob(dir + '/' + j.name, j.file, true, function (b) { loaded[i] = b; prog(); })
+        .then(function () { loaded[i] = j.file.size; ok.push(j); }, function (e) { loaded[i] = j.file.size; failed.push(j.name + ': ' + (e && (e.message || e.status))); })
+        .then(prog);
+    });
+  }).then(function () {
+    cbBusyHide();
+    if (!ok.length) throw { message: 'ничего не загрузилось: ' + failed.slice(0, 3).join('; '), plain: true };
+    var okNames = {};
+    ok.forEach(function (j) { okNames[cpStem(j.name)] = true; });
+    var newPaths = {};
+    ok.forEach(function (j) { newPaths[(dir + '/' + j.name).toLowerCase()] = true; });
+    /* заменяем только то, что действительно загрузилось */
+    var gone = olds.filter(function (o) { return replaced[o.path] && okNames[cpStem(o.name)]; });
+    var keep = olds.filter(function (o) { return gone.indexOf(o) === -1 && !newPaths[o.path.toLowerCase()]; });
+    var trash = gone.filter(function (o) { return !newPaths[o.path.toLowerCase()]; }).map(function (o) { return o.path; });
+    var who = cpActor(), now = new Date().toISOString(), row = null;
+    var nFiles = keep.concat(ok.map(function (j) { return { path: dir + '/' + j.name, name: j.name, size: j.file.size }; }));
+    var kind = wasRework ? 'новая версия после доработки' : 'догрузка в карточку';
+    var apply = function (data) {
+      var m = data.meta.cp, rv = m.rv = m.rv || {};
+      var l2 = rv[id] = rv[id] || [], p2 = cpLastRv(l2);
+      if (p2 && p2.status === 'review') p2.status = 'replaced';
+      var ver = { v: l2.length + 1, batch: cpToday() + '_' + letter + '_' + (last.n || '1'), letter: letter, n: last.n || '1', date: cpToday(), by: who, ts: now,
+        files: nFiles, status: 'review', dir: dir, kind: kind, added: ok.length - gone.length, replaced: gone.length };
+      l2.push(ver);
+      var c = (data.cards || []).filter(function (x) { return x.id === id; })[0];
+      row = cpOutputRow(ver, shoot.name, c, kind + ': заменено ' + gone.length + ', добавлено ' + Math.max(0, ok.length - gone.length));
+      (m.events = m.events || []).push({ ts: now, actor: who, action: 'rt_upload_card', items: ok.map(function (j) { return j.name; }),
+        card: c ? c.title : id, note: kind + ': файлов ' + ok.length + (failed.length ? ', не загрузилось ' + failed.length : '') });
+    };
+    var saved;
+    if (CP.shoot && CP.shoot.path === shoot.path) {
+      apply({ meta: { cp: cpMeta() }, cards: App.cards });
+      cbMarkDirty();
+      cbRenderCards();
+      cbRenderOutline();
+      saved = Promise.resolve();
+    } else saved = cpMutateState(shoot, apply);
+    return saved.then(function () {
+      CPDisk.proxyProps(dir, { cp_rt: letter, cp_rt_date: cpToday() }).catch(function () { });
+      return Promise.all([row ? cpOutputAppend([row]) : null, trash.length ? CPDisk.trash(trash).catch(function () { }) : null]);
+    }).then(function () {
+      cbToast((wasRework ? 'Новая версия загружена' : 'Загружено в карточку') + ': заменено ' + gone.length + ', добавлено ' + Math.max(0, ok.length - gone.length)
+        + (failed.length ? ', не загрузилось ' + failed.length : '') + ' — карточка снова на проверке');
+      if (failed.length && window.console) console.error('[CP] не загрузилось', failed);
+      cpReviewPresent(shoot.name, base);
+    });
+  }).catch(function (e) {
+    cbBusyHide();
+    var box = document.querySelector('[data-cp-rvup="' + id + '"] .cp-rv-prog');
+    if (box) box.textContent = '';
+    if (e && e.plain) { cbToast('Загрузить в карточку: ' + e.message); return; }
+    cpHandleError(e, 'Загрузка в карточку');
+  });
+}
+
+/* кнопка в карточке — выбор файлов */
+document.getElementById('cbCards').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-cp-rvpick]');
+  if (!b) return;
+  e.preventDefault(); e.stopPropagation();
+  var inp = b.parentNode.querySelector('[data-cp-rvfile]');
+  if (inp) inp.click();
+}, true);
+document.getElementById('cbCards').addEventListener('change', function (e) {
+  var inp = e.target.closest && e.target.closest('[data-cp-rvfile]');
+  if (!inp) return;
+  var id = inp.getAttribute('data-cp-rvfile');
+  var files = Array.prototype.slice.call(inp.files || []).map(function (f) { return { file: f, rel: f.name }; });
+  inp.value = '';
+  cpRvCardUpload(id, files);
+});
+
+/* перетаскивание файлов на карточку на проверке/доработке — в её версию, не в галерею */
+function cpRvDropCard(e) {
+  var dt = e.dataTransfer;
+  if (!dt || !dt.types || Array.prototype.indexOf.call(dt.types, 'Files') === -1) return null;
+  var el = e.target.closest && e.target.closest('.cb-card');
+  return el && el.querySelector('[data-cp-rvup]') ? el : null;
+}
+document.getElementById('cbCards').addEventListener('dragover', function (e) {
+  var el = cpRvDropCard(e);
+  Array.prototype.forEach.call(document.querySelectorAll('.cb-card.cp-rv-over'), function (x) { if (x !== el) x.classList.remove('cp-rv-over'); });
+  if (!el) { document.body.classList.remove('cp-rv-dragging'); return; }
+  e.preventDefault(); e.stopPropagation();
+  el.classList.add('cp-rv-over');
+  document.body.classList.add('cp-rv-dragging');
+}, true);
+document.getElementById('cbCards').addEventListener('dragleave', function (e) {
+  var el = e.target.closest && e.target.closest('.cb-card');
+  if (el && !(e.relatedTarget && el.contains(e.relatedTarget))) { el.classList.remove('cp-rv-over'); document.body.classList.remove('cp-rv-dragging'); }
+}, true);
+document.getElementById('cbCards').addEventListener('drop', function (e) {
+  var el = cpRvDropCard(e);
+  if (!el) return;
+  e.preventDefault(); e.stopPropagation();
+  el.classList.remove('cp-rv-over');
+  document.body.classList.remove('cp-rv-dragging');
+  if (typeof dragDepth !== 'undefined') dragDepth = 0;
+  document.body.classList.remove('cb-file-drag');
+  var id = el.querySelector('[data-cp-rvup]').getAttribute('data-cp-rvup');
+  cpDropFiles(e.dataTransfer).then(function (files) { return cpRvCardUpload(id, files); });
+}, true);
+
+/* ---------- в 04 и 05 — только загруженная версия, исходники скрыты ----------
+   Маша, 09.11: «важно, чтобы везде отображалась последняя загруженная версия и не
+   отображались исходники». Открыто из «Отретушировано» или «Сайта» — у карточки не видно
+   раскладки с исходными кадрами, только файлы последней версии (крупнее). Кнопка над
+   карточками показывает исходники обратно, если нужно сравнить. */
+CP.showSrc = false;
+cbRenderCards = (function (orig) {
+  return function () {
+    var r = orig.apply(this, arguments);
+    var key = CP.viewStage, root = document.getElementById('cbCards');
+    if (!CP.shoot || !root || (key !== 'review' && key !== 'site')) return r;
+    var rv = cpRv(), del = cpMeta().delivered || {};
+    Array.prototype.forEach.call(root.querySelectorAll('.cb-card'), function (el) {
+      var id = el.getAttribute('data-cid');
+      el.classList.toggle('cp-src-hidden', !CP.showSrc);
+      if (!cpLastRv(rv[id]) && !el.querySelector('.cp-rv-none')) {
+        var head = el.querySelector('.cb-card-head'), d = del[id];
+        if (head) head.insertAdjacentHTML('afterend', '<div class="cp-rv-none">Загруженной версии ретуши в отборе нет'
+          + (d && d.at ? ' · сдано в ' + cbEsc(d.at) : '') + (CP.showSrc ? '' : ' — исходные кадры скрыты') + '</div>');
+      }
+    });
+    var bar = document.getElementById('cpViewBar');
+    if (bar && !bar.querySelector('[data-cp-src]')) {
+      bar.insertAdjacentHTML('beforeend', '<button data-cp-src="1">' + (CP.showSrc ? 'Скрыть исходные кадры' : 'Показать исходные кадры') + '</button>');
+      bar.querySelector('[data-cp-src]').addEventListener('click', function () { CP.showSrc = !CP.showSrc; cbRenderCards(); });
+    }
+    return r;
+  };
+})(cbRenderCards);
+
 (function cpReviewCss() {
   var st = document.createElement('style');
   st.textContent = '.cp-viewbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px;color:#cfcac2;margin:0 0 10px;padding:8px 10px;border:1px solid #3a3a37;border-radius:4px;background:#1a1a18}'
@@ -759,6 +959,9 @@ cpRenderShoots = (function (orig) {
     + '.cp-acc-prog{font-size:12px;color:#cfcac2;display:flex;flex-direction:column;gap:6px;margin-top:10px}'
     + '.cp-acc-bar{height:8px;background:#232321;border-radius:4px;overflow:hidden}.cp-acc-bar i{display:block;height:100%;background:#C9956B;transition:width .2s}'
     + '.cp-rv-drop{grid-column:1/-1;border:2px dashed #3a3a37;border-radius:6px;padding:22px 16px;text-align:center;color:#a3a09a;font-size:13px;line-height:1.6}'
-    + '.cp-rv-drop.cp-over{border-color:#C9956B;color:#e7c9a8;background:#1d1a17}';
+    + '.cp-rv-drop.cp-over{border-color:#C9956B;color:#e7c9a8;background:#1d1a17}'
+    + '.cb-card.cp-src-hidden>.cb-page{display:none}'
+    + '.cb-card.cp-src-hidden .cp-rv-t{width:180px;height:180px}'
+    + '.cp-rv-none{margin:8px 0;font-size:12px;color:#a3a09a}';
   document.head.appendChild(st);
 })();

@@ -79,6 +79,53 @@ function cpStem(name) {
   return String(name).replace(/\.[^.]+$/, '').replace(/^\d{1,3}_/, '').toLowerCase();
 }
 
+/* ---------- не хватает кадра ----------
+   Маша, 09.11: «чтобы оно ругалось, когда какой-то фотки нет — алярм: в карточке не хватает
+   кадра, потеряли по дороге». Кадры карточки, ушедшие на ретушь, сверяются с файлами версии
+   по имени (без «01_» и расширения; «a_ret.tif» — тоже кадр «a.jpg»). Имена совсем другие —
+   сверяем хотя бы число файлов. */
+
+/** Кадры карточки, которые ждём от ретушёра: на ретуши (если ни один не отмечен — все), без референсов. */
+function cpRvExpected(card, photosById, status) {
+  var pids = cpCardPids(card).filter(function (pid) { var p = photosById[pid]; return p && (p.kind || 'photo') !== 'ref'; });
+  var rt = pids.filter(function (pid) { return status && status[pid] && status[pid].s === 'retouch'; });
+  return (rt.length ? rt : pids).map(function (pid) { return photosById[pid]; });
+}
+
+function cpRvSameFrame(a, b) {
+  if (a === b) return true;
+  var s = a.length < b.length ? a : b, l = a.length < b.length ? b : a;
+  return s.length >= 2 && l.indexOf(s) === 0 && /[^0-9a-zа-яё]/i.test(l.charAt(s.length));
+}
+
+/** {count, names, of, got}: каких кадров нет среди файлов (names пусто — имена не сверить, только число). */
+function cpRvMissing(frames, files) {
+  var stems = (files || []).map(function (f) { return cpStem(f.name); });
+  var found = frames.filter(function (p) { var st = cpStem(p.name); return stems.some(function (s) { return cpRvSameFrame(st, s); }); });
+  var res = { count: 0, names: [], of: frames.length, got: stems.length };
+  if (!found.length) { res.count = Math.max(0, frames.length - stems.length); return res; }
+  frames.forEach(function (p) { if (found.indexOf(p) === -1) res.names.push(p.name); });
+  res.count = res.names.length;
+  return res;
+}
+
+/** То же для открытой съёмки: карточка и её последняя версия. */
+function cpRvMissingOf(id, ver) {
+  var card = cbCardById(id);
+  if (!card || !ver) return null;
+  var byId = {};
+  App.photos.forEach(function (p) { byId[p.id] = p; });
+  var frames = cpRvExpected(card, byId, cpMeta().status);
+  return frames.length ? cpRvMissing(frames, ver.files) : null;
+}
+
+function cpRvMissingText(miss) {
+  if (!miss || !miss.count) return '';
+  return miss.names.length
+    ? 'Не хватает кадр' + (miss.count > 1 ? 'ов (' + miss.count + ')' : 'а') + ': ' + miss.names.slice(0, 8).join(', ') + (miss.names.length > 8 ? '…' : '')
+    : 'Не хватает кадров: загружено ' + miss.got + ' из ' + miss.of;
+}
+
 /**
  * files: [{file, rel}], data: отбор съёмки. ->
  * {letter, n, groups: {cardId: [{file, name}]}, unmatched: [rel], top}
@@ -191,6 +238,8 @@ function cpAcceptPlan() {
     st.n = String(max + 1);
   }
   var cards = st.data.cards || [];
+  var photosById = {};
+  (st.data.photos || []).forEach(function (p) { photosById[p.id] = p; });
   var ids = Object.keys(plan.groups);
   var bytes = 0, count = 0;
   ids.forEach(function (id) { plan.groups[id].forEach(function (f) { bytes += f.file.size; count++; }); });
@@ -202,8 +251,10 @@ function cpAcceptPlan() {
   html += '<div class="cp-acc-list">' + ids.map(function (id) {
     var c = cards.filter(function (x) { return x.id === id; })[0];
     var last = cpLastRv(rv[id]);
+    var miss = c ? cpRvMissing(cpRvExpected(c, photosById, meta.status), plan.groups[id]) : null;
     return '<div><b>' + cbEsc(c ? c.title || 'карточка' : id) + '</b> · файлов ' + plan.groups[id].length
-      + (last ? ' <small>сейчас версия ' + last.v + ' · ' + (last.status === 'approved' ? 'согласована' : last.status === 'rework' ? 'на доработке' : 'на проверке') + '</small>' : '') + '</div>';
+      + (last ? ' <small>сейчас версия ' + last.v + ' · ' + (last.status === 'approved' ? 'согласована' : last.status === 'rework' ? 'на доработке' : 'на проверке') + '</small>' : '')
+      + (miss && miss.count ? ' <span class="cp-acc-warn">' + cbEsc(cpRvMissingText(miss)) + '</span>' : '') + '</div>';
   }).join('') + '</div>';
   if (plan.unmatched.length) {
     html += '<div class="cp-acc-warn">Не нашлась карточка (' + plan.unmatched.length + '), эти файлы не загрузятся: '
@@ -360,12 +411,23 @@ cbRenderCards = (function (orig) {
       var state = last.status === 'approved' ? '<span class="cp-rv-ok">согласовано · ' + cbEsc(last.rby || '') + '</span>'
         : last.status === 'rework' ? '<span class="cp-rv-bad">на доработке' + (last.note ? ': ' + cbEsc(last.note) : '') + ' — ждёт новой версии</span>'
           : '<span class="cp-rv-wait">на проверке</span>';
+      var open = last.status === 'review' || last.status === 'rework';
+      var miss = open ? cpRvMissingOf(id, last) : null;
+      /* загрузить прямо в карточку (Маша, 09.11): на доработке — «Загрузить новую версию», на проверке — догрузить */
+      var canUp = open && typeof cpReviewRoot === 'function' && !!cpReviewRoot();
       var html = '<div class="cp-rv" data-cp-rv="' + id + '"><div class="cp-rv-head"><b>Ретушь v' + last.v + '</b> · ' + cbEsc(last.letter + '_' + last.n)
         + ' · ' + cbEsc(cpFmtDate(last.ts)) + ' · файлов ' + last.files.length + ' · ' + state + '<span class="cp-sp"></span>'
         + (last.status === 'review' ? '<button class="cb-primary" data-cp-rva="approve">Согласовать ретушь</button><button data-cp-rva="rework">На доработку</button>' : '')
-        + '</div><div class="cp-rv-thumbs">' + last.files.map(function (f, i) {
+        + '</div>'
+        + (miss && miss.count ? '<div class="cp-rv-miss">' + cbEsc(cpRvMissingText(miss)) + ' — потеряли по дороге?' + (canUp ? ' Перетащите недостающие файлы прямо на карточку.' : '') + '</div>' : '')
+        + '<div class="cp-rv-thumbs">' + last.files.map(function (f, i) {
           return '<button class="cp-rv-t" data-cp-rvt="' + i + '" title="' + cbEsc(f.name) + '"><img data-cp-rvsrc="' + cbEsc(f.path) + '" alt=""></button>';
-        }).join('') + '</div></div>';
+        }).join('') + '</div>'
+        + (canUp ? '<div class="cp-rv-up" data-cp-rvup="' + id + '">'
+          + (last.status === 'rework' ? '<button class="cb-primary" data-cp-rvpick="1">Загрузить новую версию</button>' : '<button data-cp-rvpick="1">Догрузить или заменить файлы</button>')
+          + '<span>или перетащите файлы на карточку: файл с тем же именем заменится, новый добавится</span>'
+          + '<input type="file" multiple hidden data-cp-rvfile="' + id + '"><div class="cp-rv-prog"></div></div>' : '')
+        + '</div>';
       if (head) head.insertAdjacentHTML('afterend', html);
     });
     cpRvLoadThumbs();
@@ -513,6 +575,8 @@ cbRenderOutline = (function (orig) {
       var btn = ck.parentNode.querySelector('.cb-outline-item');
       if (!last || !btn || btn.querySelector('.cp-oi-rv')) return;
       btn.insertAdjacentHTML('beforeend', '<span class="cp-oi-rv cp-oi-rv-' + last.status + '">' + (last.status === 'review' ? 'проверка' : last.status === 'rework' ? 'доработка' : 'v' + last.v + ' ок') + '</span>');
+      var miss = last.status === 'review' || last.status === 'rework' ? cpRvMissingOf(ck.getAttribute('data-cp-ck'), last) : null;
+      if (miss && miss.count) btn.insertAdjacentHTML('beforeend', '<span class="cp-oi-rv cp-oi-rv-miss" title="' + cbEsc(cpRvMissingText(miss)) + '">не хватает ' + miss.count + '</span>');
     });
     var bar = document.getElementById('cpObar');
     if (bar && !bar.querySelector('[data-cp-o="accept"]')) bar.insertAdjacentHTML('beforeend', '<button data-cp-o="accept" title="Загрузить отретушированное на приёмку">Сдать ретушь</button>');
@@ -542,6 +606,12 @@ document.getElementById('cbOutline').addEventListener('click', function (e) {
     + '.cp-rv-ok{color:#9fc2a3}.cp-rv-bad{color:#f2b8a0}.cp-rv-wait{color:#e7c9a8}'
     + '.cp-rv-thumbs{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}'
     + '.cp-rv-t{padding:0;border:1px solid #2f2f2c;background:#232321;width:96px;height:96px;cursor:zoom-in}.cp-rv-t img{width:100%;height:100%;object-fit:contain;display:block}'
+    + '.cp-rv-miss{margin-top:8px;padding:6px 8px;border:1px solid #8a4a32;border-radius:4px;background:#2a1a14;color:#f2b8a0;font-size:12px}'
+    + '.cp-rv-up{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;font-size:12px;color:#a3a09a}'
+    + '.cp-rv-prog{width:100%;font-size:12px;color:#cfcac2}.cp-rv-prog:empty{display:none}'
+    + '.cb-card.cp-rv-over{outline:2px dashed #C9956B;outline-offset:2px}'
+    + 'body.cp-rv-dragging #cbDropOverlay{display:none!important}'
+    + '.cp-oi-rv-miss{color:#f2b8a0;border-color:#8a4a32}'
     + '.cp-oi-rv{font-size:10px;margin-left:6px;border-radius:8px;padding:0 5px;border:1px solid #3a3a37}'
     + '.cp-oi-rv-review{color:#e7c9a8;border-color:#5a4632}.cp-oi-rv-rework{color:#f2b8a0;border-color:#8a4a32}.cp-oi-rv-approved{color:#9fc2a3;border-color:#3d5a40}';
   var st = document.createElement('style');

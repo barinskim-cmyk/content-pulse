@@ -855,6 +855,14 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     const v1 = await vis();
     check('открыто из 04: видны только карточки на проверке, полоска «только карточки этого этапа»', v1.length === 2 && v1.includes(ids.a) && v1.includes(ids.b)
       && /Открыто из 04_ОТРЕТУШИРОВАНО/.test(await page.textContent('#cpViewBar')), JSON.stringify(v1));
+    check('в 04 исходные кадры скрыты — видна только загруженная версия; кнопка «Показать исходные кадры»', await page.evaluate(i => {
+      const el = document.querySelector('.cb-card[data-cid="' + i + '"]'), pg = el.querySelector(':scope > .cb-page');
+      return el.classList.contains('cp-src-hidden') && (!pg || getComputedStyle(pg).display === 'none') && !!el.querySelector('.cp-rv-t')
+        && /Показать исходные кадры/.test(document.getElementById('cpViewBar').textContent); }, ids.a));
+    await page.click('[data-cp-src]');
+    check('«Показать исходные кадры» — раскладка с исходниками снова видна', await page.evaluate(i => {
+      const pg = document.querySelector('.cb-card[data-cid="' + i + '"] > .cb-page'); return !!pg && getComputedStyle(pg).display !== 'none'; }, ids.a));
+    await page.click('[data-cp-src]');
     /* в ретуши лежит копия 74596 — после «На сайт» она сразу уходит в Корзину */
     const RT3 = 'disk:/Архив/РЕТУШЬ/' + SN;
     [RT3, RT3 + '/1', RT3 + '/1/74596_модель'].forEach(d => DIRS.add(d));
@@ -875,6 +883,45 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     await page.waitForFunction(i => cpMeta().rv[i].slice(-1)[0].status === 'rework', ids.a, { timeout: 5000 }).catch(() => {});
     check('«На доработку»: папка в 04 с припиской «_доработка», заметка на карточке', inRv('manekin.tif').some(k => /_доработка\/manekin\.tif$/.test(k))
       && await page.evaluate(i => { const l = cpMeta().rv[i].slice(-1)[0]; return l.status === 'rework' && l.note === 'тени' && /_доработка$/.test(l.dir); }, ids.a), JSON.stringify(inRv('manekin.tif')));
+    /* новая версия прямо в карточку (Маша, 09.11): на доработке — кнопка «Загрузить новую версию»,
+       тот же файл заменяется, папка «_доработка» снова называется как артикул */
+    check('на доработке в карточке — кнопка «Загрузить новую версию»', /Загрузить новую версию/.test(await page.textContent('[data-cp-rvup="' + ids.a + '"]')));
+    const dirA = await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].dir.replace(/_доработка$/, ''), ids.a);
+    await page.setInputFiles('[data-cp-rvfile="' + ids.a + '"]', { name: 'manekin.tif', mimeType: 'image/tiff', buffer: Buffer.from('RT2-manekin.tif') });
+    await page.waitForFunction(i => { const l = cpMeta().rv[i].slice(-1)[0]; return l.status === 'review' && !/_доработка$/.test(l.dir); }, ids.a, { timeout: 8000 }).catch(() => {});
+    check('новая версия в карточку: файл заменён, папка снова без «_доработка», версия на проверке', String(FILES.get(dirA + '/manekin.tif') || '') === 'RT2-manekin.tif'
+      && !inRv('manekin.tif').some(k => /_доработка\//.test(k)) && await page.evaluate(i => { const l = cpMeta().rv[i]; const v = l[l.length - 1];
+        return v.status === 'review' && v.kind === 'новая версия после доработки' && v.files.length === 1 && l[l.length - 2].status === 'rework'; }, ids.a),
+      JSON.stringify([inRv('manekin.tif'), await page.evaluate(i => cpMeta().rv[i], ids.a)]));
+    /* не хватает кадра: в карточке есть кадр, которого нет среди загруженных — тревога; догрузили перетаскиванием — тревоги нет */
+    const pid2 = await page.evaluate(i => { const p = App.photos.find(x => x.name === 'manekin2.jpg'); const c = cbCardById(i);
+      if (c.mode === 'auto') c.pids.push(p.id); else c.slots.push({ pid: p.id });
+      if (!cpMeta().status[p.id]) cpMeta().status[p.id] = { s: 'retouch' };
+      cbRenderCards(); cbRenderOutline(); return p.id; }, ids.a);
+    const missA = await page.evaluate(i => cpRvMissingOf(i, cpMeta().rv[i].slice(-1)[0]), ids.a);
+    check('в карточке не хватает кадра — красная строка «Не хватает кадр…: …manekin2.jpg» и метка в списке', /Не хватает кадр[^:]*:[^—]*manekin2\.jpg/.test(await page.textContent('[data-cp-rv="' + ids.a + '"]'))
+      && new RegExp('не хватает ' + missA.count).test(await page.textContent('#cbOutline')), await page.textContent('[data-cp-rv="' + ids.a + '"]'));
+    await page.evaluate(([i, names]) => {
+      const dt = new DataTransfer(); names.forEach(n => dt.items.add(new File(['RT-' + n], n.replace(/\.jpg$/i, '.tif'), { type: 'image/tiff' })));
+      const el = document.querySelector('.cb-card[data-cid="' + i + '"] .cp-rv-thumbs');
+      el.dispatchEvent(new DragEvent('dragover', { dataTransfer: dt, bubbles: true, cancelable: true }));
+      window.__ov = document.querySelector('.cb-card[data-cid="' + i + '"]').classList.contains('cp-rv-over');
+      el.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+    }, [ids.a, missA.names]);
+    const nA = 1 + missA.names.length;
+    await page.waitForFunction(([i, n]) => cpMeta().rv[i].slice(-1)[0].files.length === n, [ids.a, nA], { timeout: 8000 }).catch(() => {});
+    check('перетащили недостающие кадры на карточку — добавлены в версию (не в галерею), тревоги нет', await page.evaluate(([i, n]) => window.__ov && cpMeta().rv[i].slice(-1)[0].files.length === n
+      && cpMeta().rv[i].slice(-2)[0].status === 'replaced' && !document.querySelector('[data-cp-rv="' + i + '"] .cp-rv-miss') && !App.photos.some(p => p.name === 'manekin2.tif'), [ids.a, nA])
+      && FILES.has(dirA + '/manekin2.tif'), JSON.stringify([missA, await page.evaluate(i => cpMeta().rv[i].slice(-1)[0], ids.a)]));
+    await page.evaluate(([i, pid]) => { const c = cbCardById(i); if (c.mode === 'auto') c.pids = c.pids.filter(x => x !== pid); else c.slots = c.slots.filter(s => s.pid !== pid); cbRenderCards(); }, [ids.a, pid2]);
+    /* сдача той же карточки папкой — это новая версия целиком: файл прошлой версии, которого нет в новой, уходит в Корзину */
+    await up([['готово/74595', 'manekin.tif']]);
+    for (let i = 0; i < 60 && FILES.has(dirA + '/manekin2.tif'); i++) await page.waitForTimeout(100);
+    check('сдали папкой без файла — в 04 его больше нет (только последняя версия)', !FILES.has(dirA + '/manekin2.tif') && FILES.has(dirA + '/manekin.tif'),
+      JSON.stringify([TRASHED.slice(-3), await page.evaluate(i => cpMeta().rv[i].slice(-2), ids.a)]));
+    page.once('dialog', d => d.accept('тени ещё'));
+    await page.click('[data-cp-rv="' + ids.a + '"] [data-cp-rva="rework"]');
+    for (let i = 0; i < 60 && !inRv('manekin.tif').some(k => /_доработка\//.test(k)); i++) await page.waitForTimeout(100);
     await up([['готово/74595', 'manekin.tif']]);
     for (let i = 0; i < 60 && !TRASHED.some(p => /_доработка$/.test(p)); i++) await page.waitForTimeout(100);
     check('новая версия после доработки — рядом, папка с доработкой ушла в Корзину', inRv('manekin.tif').length === 1 && !/_доработка/.test(inRv('manekin.tif')[0]) && TRASHED.some(p => /_доработка$/.test(p))
@@ -884,7 +931,8 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     check('всё на сайте — папка съёмки в 04 опустела и ушла в Корзину', FILES.has(ST + '/' + today + '/' + SN + '/74595/manekin.tif') && TRASHED.includes(RV + '/' + SN), JSON.stringify(TRASHED.slice(-4)));
     for (let i = 0; i < 40 && !/принято[\s\S]*принято/.test((FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString()); i++) await page.waitForTimeout(100);
     const out = (FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString();
-    check('выработка: таблица в служебной папке — сдано ×3, доработка, принято ×2, с буквой и датой', /^\uFEFFдата;время;ретушёр/.test(out) && (out.match(/;сдано;/g) || []).length === 3
+    check('выработка: таблица в служебной папке — сдано ×4, доработка, в карточку, принято ×2, с буквой и датой', /^\uFEFFдата;время;ретушёр/.test(out) && (out.match(/;сдано;/g) || []).length === 4
+      && /;новая версия после доработки: заменено 1, добавлено 0;/.test(out) && /;догрузка в карточку: заменено 0, добавлено \d;/.test(out)
       && (out.match(/;принято;/g) || []).length === 2 && /;доработка: тени;/.test(out) && out.split('\n').some(l => l.indexOf(today + ';') === 0 && /;U;/.test(l)), out);
     await page.click('[data-cp-view-all]');
     check('«Показать все карточки» — снова все, полоски нет', !(await page.$('#cpViewBar')) && (await vis()).length > 2);
