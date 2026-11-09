@@ -473,11 +473,21 @@ function cpPhotoIndex(sel) {
    остались внутри (sel.statuses / sel.tags), в панели их нет. */
 function cpOn(map) { return Object.keys(map || {}).filter(function (k) { return map[k]; }); }
 
+/* Видео в исходниках (Маша, 08.11): «тег „только видео“ и тег „без видео“ — тыкнуть, чтобы
+   скачать либо только видео, либо без видео; ничего не стоит — скачать всё». sel.media: '' | 'video' | 'novideo'. */
+function cpIsVideo(name) { return typeof CP_VIDEO_RE !== 'undefined' && CP_VIDEO_RE.test(name || ''); }
+
 function cpFilteredOthers(sel) {
   if (!sel || !sel.allFiles || !sel.allList || cpOn(sel.statuses).length || sel.inCards || sel.dl) return [];
+  var media = sel.media || '';
   var meta = cpSelMeta(sel.data || {});
   var folders = Object.keys(sel.folders).filter(function (k) { return sel.folders[k]; });
-  return sel.allList.filter(function (f) { return !CPDisk.isPhoto(f.name); }).map(function (f) {
+  return sel.allList.filter(function (f) {
+    if (CPDisk.isPhoto(f.name)) return false;
+    if (media === 'video') return cpIsVideo(f.name);
+    if (media === 'novideo') return !cpIsVideo(f.name);
+    return true;
+  }).map(function (f) {
     var rel = cpRelOf(sel.path, f.path);
     var dir = rel.indexOf('/') === -1 ? '' : rel.slice(0, rel.lastIndexOf('/'));
     var tags = {};
@@ -495,6 +505,7 @@ function cpFilteredOthers(sel) {
 
 /** Кадры, проходящие фильтры панели. */
 function cpFiltered(sel) {
+  if (sel && sel.media === 'video') return [];   /* «только видео» — кадров нет */
   var idx = cpPhotoIndex(sel);
   var folders = Object.keys(sel.folders).filter(function (k) { return sel.folders[k]; });
   return Object.keys(idx).map(function (k) { return idx[k]; }).filter(function (x) {
@@ -627,6 +638,9 @@ function cpRenderPanel() {
   var untagAttr = function (html, fp) { return html.replace(/data-cp-untag=/g, 'data-cp-fold-untag="' + cbEsc(fp) + '" data-cp-untag='); };
   var plus = function (fp) { return '<button class="cp-addtag" data-cp-addtag="' + cbEsc(fp) + '" title="Добавить тег">+</button>'; };
 
+  /* видео: «только видео» / «без видео»; ничего не отмечено — всё */
+  body += cpMediaChips(sel, idx);
+
   /* вся съёмка: что внутри и теги */
   body += '<div class="cp-fold cp-fold-all"><span class="cp-fold-name">Вся съёмка <small>· ' + Object.keys(idx).length + '</small></span>'
     + '<span class="cp-fold-props">' + cpStateChips(cpFolderState(idx, null))
@@ -691,9 +705,47 @@ function cpRenderPanel() {
     + '<div class="cp-panel-actions"><div class="cp-sum">' + sum + '</div>'
     + '<button data-cp-p="open">Открыть</button>'
     + '<button class="cb-primary" data-cp-p="download"' + (items.length || others.length ? '' : ' disabled') + '>'
-    + (nChecked ? 'Скачать отмеченные папки' : 'Скачать всё из ' + cbEsc(cpSourceLabel())) + ' · ' + (items.length + others.length) + '</button></div>';
+    + (nChecked ? 'Скачать отмеченные папки' : sel.media === 'video' ? 'Скачать только видео' : sel.media === 'novideo' ? 'Скачать без видео' : 'Скачать всё из ' + cbEsc(cpSourceLabel()))
+    + ' · ' + (items.length + others.length) + '</button></div>';
   if (keepScroll) panel.querySelector('.cp-panel-body').scrollTop = keepScroll;
 }
+
+function cpMediaChips(sel, idx) {
+  var nPhoto = Object.keys(idx).length, nVideo = 0, nOther = 0;
+  (sel.allList || []).forEach(function (f) {
+    if (CPDisk.isPhoto(f.name)) return;
+    if (cpIsVideo(f.name)) nVideo++; else nOther++;
+  });
+  var ready = !!sel.allList;
+  if (ready && !nVideo && !sel.media) return '';   /* видео в съёмке нет — и выбирать нечего */
+  var chip = function (key, label, n) {
+    return '<button class="cp-fchip' + (sel.media === key ? ' cp-on' : '') + '" data-cp-media="' + key + '">' + label + ' <small>' + (ready ? n : '…') + '</small></button>';
+  };
+  return '<div class="cp-fchips"><span class="cp-fchips-l">' + (sel.media ? 'Скачать:' : 'Скачается всё. Или отметьте:') + '</span>'
+    + chip('video', 'только видео', nVideo) + chip('novideo', 'без видео', nPhoto + nOther) + '</div>';
+}
+
+document.getElementById('cpPanel').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-cp-media]');
+  var sel = CP.sel;
+  if (!b || !sel || sel.stage) return;
+  e.preventDefault();
+  var k = b.getAttribute('data-cp-media');
+  sel.media = sel.media === k ? '' : k;
+  cpRenderPanel();
+});
+
+(function cpMediaChipCss() {
+  if (document.getElementById('cpStageChipCss') || document.getElementById('cpMediaChipCss')) return;
+  var st = document.createElement('style');
+  st.id = 'cpMediaChipCss';
+  st.textContent = '.cp-fchips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 14px;padding-bottom:12px;border-bottom:1px solid #2a2a28}'
+    + '.cp-fchips-l{font-size:12px;color:#a3a09a;width:100%}'
+    + '.cp-fchip{font:inherit;font-size:12px;padding:3px 9px;border-radius:12px;border:1px solid #3a3a37;background:transparent;color:#cfcac2;cursor:pointer}'
+    + '.cp-fchip small{color:#8a877f;margin-left:2px}'
+    + '.cp-fchip.cp-on{border-color:#C9956B;background:#2b231c;color:#f2e2cf}.cp-fchip.cp-on small{color:#e7c9a8}';
+  document.head.appendChild(st);
+})();
 
 /* ---------- изменения отбора с витрины (чтение-правка-запись) ---------- */
 

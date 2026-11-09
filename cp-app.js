@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.66';
+var CP_VERSION = '2.0.67';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1877,7 +1877,7 @@ function cpZipOne(name, entries, note) {
   var total = entries.reduce(function (a, e) { return a + e.size; }, 0);
   var target = cpExportsDir() + '/' + name + '.zip';
   var res = { parts: [], files: 0, bytes: 0 };
-  var up = null, parts = [], done = [], offset = 0, n = 0, i = 0, ts = Date.now();
+  var up = null, parts = [], done = [], offset = 0, n = 0, i = 0, ts = Date.now(), skipped = [];
   cpDlCard(name, note, [], 'Собираю архив...');
   function nextChunk() {
     var chunk = [], bytes = 0;
@@ -1902,11 +1902,26 @@ function cpZipOne(name, entries, note) {
       done: final ? done : undefined
     };
     /* сеть оборвалась посреди куска (Яндекс: «terminated») — тот же кусок ещё раз:
-       облако примет его под тем же номером поверх недописанного */
+       облако примет его под тем же номером поверх недописанного.
+       Яндекс не отдаёт конкретный файл (Маша, 08.11: «ПустоеИмя_2.jpg: файл не отдан,
+       HTTP 500» — прослойка уже повторила его трижды) — собираем кусок без него и
+       пишем в карточке, что не попало. */
     var tries = 0;
     var call = function () {
       return CPDisk.proxyZipPart(body).catch(function (e) {
-        var txt = String((e && (e.body || e.message)) || e);
+        var txt = String((e && (e.body || e.message)) || e), j = null;
+        try { j = JSON.parse(e && e.body); } catch (x) { }
+        if (j && j.from && /не отдан|не выдана|terminated|нет ответа/.test(j.error || '') && skipped.length < 30) {
+          var bad = null;
+          chunk = chunk.filter(function (c) { if (!bad && c.from === j.from) { bad = c; return false; } return true; });
+          if (bad) {
+            skipped.push({ name: bad.name, why: j.error });
+            bytes -= bad.size;
+            body.entries = body.entries.filter(function (x) { return x.from !== j.from; });
+            if (!body.entries.length && !final) return null;   /* кусок опустел — его номер возьмёт следующий */
+            return call();
+          }
+        }
         if (tries >= 2 || /размер изменился|изменился во время|больше 4 ГБ|65 тысяч/.test(txt)) throw e;
         tries++;
         msg = 'Сеть оборвалась, повторяю кусок ' + n + ' (' + tries + ' из 2)... · ' + cpMb(res.bytes) + ' из ' + cpMb(total);
@@ -1916,6 +1931,7 @@ function cpZipOne(name, entries, note) {
     };
     return call().then(function (r) {
       clearInterval(tick);
+      if (r === null) { n--; return final ? null : nextChunk(); }
       if (!r || !r.etag || !Array.isArray(r.done) || r.done.length !== chunk.length) throw new Error('кусок архива ' + n + ' собран не полностью');
       parts.push({ n: r.n, etag: r.etag });
       done = done.concat(r.done);
@@ -1933,11 +1949,13 @@ function cpZipOne(name, entries, note) {
   }).then(function () {
     return CPDisk.proxyMpu({ op: 'done', key: up.key, uploadId: up.uploadId, parts: parts, filename: name + '.zip' });
   }).then(function (out) {
-    if (res.files !== entries.length) throw new Error('в архив попало ' + res.files + ' файлов из ' + entries.length);
+    if (res.files + skipped.length !== entries.length) throw new Error('в архив попало ' + res.files + ' файлов из ' + entries.length);
     res.parts.push({ path: target, href: out.url, files: res.files, bytes: res.bytes, label: 'Скачать ZIP', cloud: true });
+    res.skipped = skipped;
     cbBusyHide();
     cpStartDownload(out.url);
-    cpDlCard(name, note, res.parts, '');
+    cpDlCard(name, note + (skipped.length ? ' Не попали — Яндекс не отдаёт файл (проверьте его на Диске): '
+      + skipped.map(function (x) { return x.name.split('/').pop(); }).slice(0, 10).join(', ') + (skipped.length > 10 ? '…' : '') + '.' : ''), res.parts, '');
     return res;
   }).catch(function (e) {
     cbBusyHide();

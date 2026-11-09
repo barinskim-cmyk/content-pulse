@@ -392,17 +392,113 @@ cpSelectShoot = (function (orig) {
     cpMarkSelected();
     cpRenderPanel();
     var sel = CP.sel;
-    Promise.all(sel.stagePaths.map(function (p) {
-      return CPDisk.walkPhotos(p, false, 4, true).then(function (files) { return { root: p, files: files, dirs: files.dirs || [] }; },
-        function (e) { return { root: p, files: [], dirs: [], error: e }; });
-    })).then(function (list) {
+    sel.stageTags = {};
+    Promise.all([
+      Promise.all(sel.stagePaths.map(function (p) {
+        return CPDisk.walkPhotos(p, false, 4, true).then(function (files) { return { root: p, files: files, dirs: files.dirs || [] }; },
+          function (e) { return { root: p, files: [], dirs: [], error: e }; });
+      })),
+      /* отбор съёмки — чьи это карточки (теги ретушёров и прочие) */
+      CPDisk.readState(path).then(function (st) { return st.data; }, function () { return null; }),
+      cpLoadDict().catch(function () { return null; })
+    ]).then(function (r) {
       if (CP.sel !== sel) return;
-      sel.stageFiles = list;
+      sel.stageFiles = r[0];
+      sel.data = r[1];
       sel.loading = false;
+      cpStageTagIndex(sel);
       cpRenderPanel();
     });
   };
 })(cpSelectShoot);
+
+/* Теги в папке этапа (Маша, 08.11: «в ретуши — сверху теги, которые есть: тыкнуть тег и
+   скачать по тегу; проставлено моё имя — скачала с именем, или всё, что без имени»).
+   У каждого файла этапа — теги его карточки (по кадру отбора: путь внутри съёмки или имя)
+   и буква ретушёра из имени папки («Y_74595_…»). */
+var CP_NO_RT = '__без_ретушёра__';
+
+function cpStageTagIndex(sel) {
+  var data = sel.data || {}, photos = data.photos || [], cards = data.cards || [];
+  var src = String(sel.path || '').replace(/\/+$/, '') + '/';
+  var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  var byRel = {}, byStem = {}, tagsOf = {};
+  photos.forEach(function (p) {
+    if (!p.disk) return;
+    var rel = p.disk.indexOf(src) === 0 ? p.disk.slice(src.length) : p.name;
+    byRel[rel.toLowerCase()] = p.id;
+    var st = cpStem(p.name || rel.split('/').pop());
+    (byStem[st] = byStem[st] || []).push(p.id);
+  });
+  cards.forEach(function (c) {
+    var pids = c.mode === 'auto' ? (c.pids || []) : (c.slots || []).map(function (x) { return x.pid; }).filter(Boolean);
+    pids.forEach(function (pid) { (tagsOf[pid] = tagsOf[pid] || {}); (c.tags || []).forEach(function (t) { tagsOf[pid][t] = true; }); });
+  });
+  sel.stageFiles.forEach(function (x) {
+    x.files.forEach(function (f) {
+      var rel = f.path.indexOf(x.root + '/') === 0 ? f.path.slice(x.root.length + 1) : f.name;
+      var segs = rel.split('/'), name = segs.pop(), tags = {};
+      segs = segs.map(function (sg) {
+        var m = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(sg);
+        if (m && letters.indexOf(m[1]) !== -1) { tags[m[1]] = true; return m[2]; }
+        return sg.replace(/_доработка$/i, '');
+      });
+      var pid = byRel[segs.concat([name]).join('/').toLowerCase()];
+      if (!pid) { var c = byStem[cpStem(name)] || []; if (c.length === 1) pid = c[0]; }
+      if (pid && tagsOf[pid]) Object.keys(tagsOf[pid]).forEach(function (t) { tags[t] = true; });
+      if (letters.length && !Object.keys(tags).some(function (t) { return letters.indexOf(t) !== -1; })) tags[CP_NO_RT] = true;
+      f.cpTags = Object.keys(tags);
+    });
+  });
+}
+
+/** Файл этапа проходит отмеченные теги (отмечено несколько — подходит любой). */
+function cpStageTagOk(sel, f) {
+  var on = Object.keys(sel.stageTags || {}).filter(function (k) { return sel.stageTags[k]; });
+  return !on.length || (f.cpTags || []).some(function (t) { return on.indexOf(t) !== -1; });
+}
+
+function cpStageChips(sel) {
+  var n = {}, letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  sel.stageFiles.forEach(function (x) { x.files.forEach(function (f) { (f.cpTags || []).forEach(function (t) { n[t] = (n[t] || 0) + 1; }); }); });
+  var keys = Object.keys(n);
+  if (!keys.length) return '';
+  var order = (CP.dict || []).map(function (d) { return d.tag; });
+  keys.sort(function (a, b) {
+    var ra = letters.indexOf(a) !== -1 ? 0 : a === CP_NO_RT ? 1 : 2, rb = letters.indexOf(b) !== -1 ? 0 : b === CP_NO_RT ? 1 : 2;
+    var ia = order.indexOf(a), ib = order.indexOf(b);
+    return ra - rb || (ia < 0 ? 1e6 : ia) - (ib < 0 ? 1e6 : ib) || a.localeCompare(b);
+  });
+  var any = Object.keys(sel.stageTags || {}).some(function (k) { return sel.stageTags[k]; });
+  return '<div class="cp-fchips"><span class="cp-fchips-l">' + (any ? 'Скачать с тегами (любой из отмеченных):' : 'Теги — отметьте, чтобы скачать только их:') + '</span>'
+    + keys.map(function (t) {
+      return '<button class="cp-fchip' + (sel.stageTags[t] ? ' cp-on' : '') + '" data-cp-stag="' + cbEsc(t) + '">' + cbEsc(t === CP_NO_RT ? 'без ретушёра' : t) + ' <small>' + n[t] + '</small></button>';
+    }).join('') + (any ? '<a href="#" data-cp-stag-reset="1">сбросить</a>' : '') + '</div>';
+}
+
+document.getElementById('cpPanel').addEventListener('click', function (e) {
+  var sel = CP.sel;
+  if (!sel || !sel.stage) return;
+  var b = e.target.closest('[data-cp-stag]'), r = e.target.closest('[data-cp-stag-reset]');
+  if (!b && !r) return;
+  e.preventDefault();
+  if (r) sel.stageTags = {};
+  else { var t = b.getAttribute('data-cp-stag'); sel.stageTags[t] = !sel.stageTags[t]; }
+  cpRenderPanel();
+});
+
+(function cpStageChipCss() {
+  if (document.getElementById('cpStageChipCss') || document.getElementById('cpMediaChipCss')) return;
+  var st = document.createElement('style');
+  st.id = 'cpStageChipCss';
+  st.textContent = '.cp-fchips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 14px;padding-bottom:12px;border-bottom:1px solid #2a2a28}'
+    + '.cp-fchips-l{font-size:12px;color:#a3a09a;width:100%}'
+    + '.cp-fchip{font:inherit;font-size:12px;padding:3px 9px;border-radius:12px;border:1px solid #3a3a37;background:transparent;color:#cfcac2;cursor:pointer}'
+    + '.cp-fchip small{color:#8a877f;margin-left:2px}'
+    + '.cp-fchip.cp-on{border-color:#C9956B;background:#2b231c;color:#f2e2cf}.cp-fchip.cp-on small{color:#e7c9a8}'
+    + '.cp-fchips a{font-size:12px;color:#C9956B}';
+  document.head.appendChild(st);
+})();
 
 /** Дерево папки этапа: {kids: {путь: [дети]}, agg: {путь: {n, bytes}}, files, bytes}. */
 function cpStageTree(sel) {
@@ -463,7 +559,9 @@ cpRenderPanel = (function (orig) {
       return;
     }
     var t = cpStageTree(sel);
-    var body = '<div class="cp-fold cp-fold-all"><span class="cp-fold-name">' + cbEsc(label) + ' <small>· файлов ' + t.files + ' · ' + cpMb(t.bytes) + '</small></span></div>';
+    var picked = 0, pickedBytes = 0, anyTag = Object.keys(sel.stageTags || {}).some(function (k) { return sel.stageTags[k]; });
+    sel.stageFiles.forEach(function (x) { x.files.forEach(function (f) { if (f.name !== CPDisk.STATE_FILE && cpStageTagOk(sel, f)) { picked++; pickedBytes += f.size || 0; } }); });
+    var body = cpStageChips(sel) + '<div class="cp-fold cp-fold-all"><span class="cp-fold-name">' + cbEsc(label) + ' <small>· файлов ' + t.files + ' · ' + cpMb(t.bytes) + '</small></span></div>';
     var top = t.kids[''] || [];
     if (!top.length) body += '<div class="cp-note">' + (t.files ? 'Вложенных папок нет — файлы лежат прямо в папке съёмки.' : 'Папка пустая.') + '</div>';
     var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
@@ -486,8 +584,9 @@ cpRenderPanel = (function (orig) {
     if (errs.length) body += '<div class="cp-note cp-warn">Не прочиталось: ' + errs.map(function (x) { return cbEsc(CPDisk.showPath(x.root)); }).join(', ') + '</div>';
     body += '<div class="cp-note">' + sel.stagePaths.map(function (p) { return cbEsc(CPDisk.showPath(p)); }).join('<br>') + '</div>';
     panel.setAttribute('data-path', sel.path);
-    panel.innerHTML = head + '<div class="cp-panel-body">' + body + '</div><div class="cp-panel-actions"><div class="cp-sum">Здесь файлов: <b>' + t.files + '</b> · ' + cpMb(t.bytes) + '</div>'
-      + acts + '<button class="cb-primary" data-cp-stdl="1"' + (t.files ? '' : ' disabled') + '>Скачать всё из ' + cbEsc(label) + ' · ' + t.files + '</button></div>';
+    panel.innerHTML = head + '<div class="cp-panel-body">' + body + '</div><div class="cp-panel-actions"><div class="cp-sum">Здесь файлов: <b>' + t.files + '</b> · ' + cpMb(t.bytes)
+      + (anyTag ? ' · с отмеченными тегами: <b>' + picked + '</b> · ' + cpMb(pickedBytes) : '') + '</div>'
+      + acts + '<button class="cb-primary" data-cp-stdl="1"' + (picked ? '' : ' disabled') + '>' + (anyTag ? 'Скачать по тегам' : 'Скачать всё из ' + cbEsc(label)) + ' · ' + picked + '</button></div>';
   };
 })(cpRenderPanel);
 
@@ -501,11 +600,12 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
     var par = cpParentDir(x.root);
     var pre = many ? (par.indexOf(stageRoot + '/') === 0 ? par.slice(stageRoot.length + 1) : par.split('/').pop()) + '/' : '';
     x.files.forEach(function (f) {
-      if (f.name === CPDisk.STATE_FILE) return;
+      if (f.name === CPDisk.STATE_FILE || !cpStageTagOk(sel, f)) return;
       entries.push({ from: f.path, size: f.size, name: pre + (f.path.indexOf(x.root + '/') === 0 ? f.path.slice(x.root.length + 1) : f.name) });
     });
   });
-  var name = CPDisk.safeName(sel.name) + '_' + CPDisk.safeName(cpStageLabel(sel.stage)) + '_' + cpToday();
+  var on = Object.keys(sel.stageTags || {}).filter(function (k) { return sel.stageTags[k]; }).map(function (t) { return t === CP_NO_RT ? 'без ретушёра' : t; });
+  var name = CPDisk.safeName(sel.name) + '_' + CPDisk.safeName(cpStageLabel(sel.stage)) + (on.length ? '_' + CPDisk.safeName(on.join('+')) : '') + '_' + cpToday();
   cpExportBundle(name, entries, cpStageLabel(sel.stage) + ': файлов ' + entries.length + '.').catch(function (err) { cpHandleError(err, 'Скачивание'); });
 });
 

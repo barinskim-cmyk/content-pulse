@@ -59,7 +59,7 @@ const PREVIEW_CALLS = { single: 0, batch: 0, big: 0 };
 if (process.env.BLOCK_PREVIEW) for (const k of [...FILES.keys()]) FILES.set(k, png(60, 40));
 const md5 = (b) => require('crypto').createHash('md5').update(b).digest('hex');
 const TRASHED = [], MOVED = [], ZIPPART_CALLS = [];
-let ZIPPART_FAIL_ONCE = null;   /* оборвать один кусок архива — страница должна повторить */   /* что ушло в Корзину Диска / перенесено между этапами */
+let ZIPPART_FAIL_ONCE = null, ZIPPART_BAD = null;   /* ZIPPART_BAD — файл, который Яндекс не отдаёт (HTTP 500) */   /* оборвать один кусок архива — страница должна повторить */   /* что ушло в Корзину Диска / перенесено между этапами */
 const PROPS = new Map();   /* custom_properties папок (сводка съёмки) */
 const meta = (p) => {
   const name = p.split('/').pop();
@@ -214,6 +214,8 @@ async function route(r) {
         if (FILES.get(e.from).length !== e.size) return json(422, { error: 'размер изменился ' + e.from });
       }
       if (b.n !== (u.calls || 0) + 1 || b.offset !== (u.next || 0)) return json(400, { error: 'кусок не по порядку' });
+      const bad = b.entries.find(e => e.from === ZIPPART_BAD);
+      if (bad) return json(422, { error: bad.from.split('/').pop() + ': файл не отдан, HTTP 500', from: bad.from });
       if (ZIPPART_FAIL_ONCE && !ZIPPART_FAIL_ONCE.done) { ZIPPART_FAIL_ONCE.done = true; return json(422, { error: 'IMG_0101.jpg: terminated' }); }
       ZIPPART_CALLS.push(b.n);
       u.zip = true; u.target = b.target; u.calls = b.n; u.names = (u.names || []).concat(b.entries.map(e => e.name));
@@ -400,6 +402,16 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   check('один архив скачивается', DOWNLOADS.some(p => /выгрузки\/LM-1043_вся съёмка_1\.zip$/.test(p)), DOWNLOADS.join(' | '));
   check('кусок архива оборвался — повторён, архив всё равно собран целиком', ZIPPART_FAIL_ONCE.done && allNames.length === 4);
   ZIPPART_FAIL_ONCE = null;
+  /* Яндекс не отдаёт один файл (HTTP 500) — архив собирается без него, в карточке сказано, какой */
+  ZIPPART_BAD = 'disk:/Архив/LM-1043/part2/c.jpg';
+  await page.evaluate(() => { CP.zipTarget = 250; CP.zipPartMin = 100; document.getElementById('cpMenuDlAll').click(); });
+  for (let i = 0; i < 80 && !ZIPS.has('disk:/_ContentPulse/выгрузки/LM-1043_вся съёмка_2.zip'); i++) await page.waitForTimeout(100);
+  const zBad = ZIPS.get('disk:/_ContentPulse/выгрузки/LM-1043_вся съёмка_2.zip') || [];
+  await page.waitForFunction(() => /Не попали/.test((document.getElementById('cpDlCard') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => {});
+  check('файл, который Яндекс не отдаёт, — архив без него, в карточке «Не попали: c.jpg»', zBad.length === 3 && !zBad.some(n => /c\.jpg$/.test(n))
+    && /Не попали[^.]*c\.jpg/.test(await page.textContent('#cpDlCard')), JSON.stringify(zBad) + ' ' + await page.textContent('#cpDlCard'));
+  ZIPPART_BAD = null;
+  await page.evaluate(() => { CP.zipTarget = 400 * 1024 * 1024; CP.zipPartMin = 6 * 1024 * 1024; });
   await page.evaluate(() => { CP.zipTarget = 400 * 1024 * 1024; CP.zipPartMin = 6 * 1024 * 1024; CP.directMin = 48 * 1024 * 1024; });
 
   /* повторное открытие той же съёмки: отбор читается с Диска */
@@ -891,6 +903,15 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   /* из исходников скачивается всё — видео и прочие файлы считаются сами */
   await page.waitForFunction(() => CP.sel && CP.sel.allList && /других файлов: 1/.test(document.querySelector('#cpPanel .cp-sum').textContent), null, { timeout: 8000 });
   check('«Все файлы»: видео посчитано, мусор (.DS_Store) — нет', true);
+  /* видео: «только видео» / «без видео», ничего не отмечено — всё */
+  check('сверху — «только видео 1» и «без видео»; ничего не отмечено — «Скачать всё из Архив»', await page.evaluate(() =>
+    /только видео 1/.test(document.querySelector('[data-cp-media="video"]').textContent) && !!document.querySelector('[data-cp-media="novideo"]')
+    && /Скачать всё из Архив/.test(document.querySelector('[data-cp-p="download"]').textContent)));
+  await page.click('[data-cp-media="video"]');
+  check('«только видео» — кадров нет, кнопка «Скачать только видео · 1»', /Скачать только видео · 1/.test(await page.textContent('[data-cp-p="download"]')) && await page.evaluate(() => cpFiltered(CP.sel).length === 0));
+  await page.click('[data-cp-media="novideo"]');
+  check('«без видео» — видео не скачивается', /Скачать без видео/.test(await page.textContent('[data-cp-p="download"]')) && await page.evaluate(() => cpFilteredOthers(CP.sel).every(x => !/\.mp4$/.test(x.file.name)) && cpFiltered(CP.sel).length > 0));
+  await page.click('[data-cp-media="novideo"]');
   await page.click('[data-cp-p="download"]');
   await page.waitForFunction(() => [...document.querySelectorAll('#cpDlCard a.cp-dlcard-btn')].some(a => a.textContent === 'clip.mp4'), null, { timeout: 10000 });
   for (let i = 0; i < 30 && !DOWNLOADS.some(p => /видео\/clip\.mp4$/.test(p)); i++) await page.waitForTimeout(100);
@@ -1275,6 +1296,16 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     const pan = await page.textContent('#cpPanel');
     check('панель в фильтре 03_РЕТУШЬ: структура папки этапа — Y_74001_модель (забрал Y), 74002_модель, файлов 2; не исходники', /в папке 03_РЕТУШЬ/.test(pan)
       && /Y_74001_модель/.test(pan) && /забрал Y/.test(pan) && /74002_модель/.test(pan) && /Здесь файлов: 2/.test(pan) && !/k1\.jpg · 1/.test(pan) && /Скачать всё из 03_РЕТУШЬ · 2/.test(pan), pan.slice(0, 400));
+    /* теги сверху: буква ретушёра из имени папки и «без ретушёра»; отметил тег — скачивается только он */
+    check('панель этапа: сверху теги — Y 1, «без ретушёра» 1', await page.evaluate(() => {
+      const t = [...document.querySelectorAll('#cpPanel [data-cp-stag]')].map(b => b.textContent.trim());
+      return t.includes('Y 1') && t.includes('без ретушёра 1'); }), await page.evaluate(() => [...document.querySelectorAll('#cpPanel [data-cp-stag]')].map(b => b.textContent.trim()).join(' | ')));
+    await page.click('#cpPanel [data-cp-stag="Y"]');
+    check('отметила тег Y — кнопка «Скачать по тегам · 1»', /Скачать по тегам · 1/.test(await page.textContent('[data-cp-stdl]')), await page.textContent('[data-cp-stdl]'));
+    await page.click('[data-cp-stdl]');
+    await page.waitForFunction(() => /Архив готов/.test((document.getElementById('cpDlCard') || {}).textContent || ''), null, { timeout: 10000 }).catch(() => {});
+    const zY = [...ZIPS.entries()].filter(([k]) => /2026-11-06_SV_КАТ_03_РЕТУШЬ_Y_/.test(k)).flatMap(([, v]) => v);
+    check('скачалось только с тегом Y — папка Y_74001_модель, без 74002', zY.length === 1 && /Y_74001_модель\/k1\.jpg$/.test(zY[0]), JSON.stringify([...ZIPS.keys()].slice(-2)) + ' ' + zY.join(' | '));
     await page.click('[data-cp-p="close"]');
     /* удалили папку съёмки из этапа на Диске — при следующей сверке (сама, раз в 45 с) съёмка из фильтра пропадает */
     DIRS.delete(K + '/02_ОТБОР/2026-11-06_SV_КАТ'); FILES.delete(K + '/02_ОТБОР/2026-11-06_SV_КАТ/k1.jpg');

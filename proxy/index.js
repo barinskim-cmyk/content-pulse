@@ -809,13 +809,15 @@ async function doZipPart(token, req, openPart) {
       pending.push(p);
     }
   }
-  let offset = start;
+  let offset = start, cur = '';
   const mine = [];
   try {
     pump();
     for (let i = 0; i < items.length; i++) {
       const x = items[i];
+      cur = '';
       if (Date.now() - t0 > ZIP_BUDGET_MS) throw new Error('Яндекс отдаёт файлы слишком медленно: за ' + Math.round((Date.now() - t0) / 1000) + ' с прочитано ' + i + ' из ' + items.length);
+      cur = x.from;   /* ошибка дальше — про этот файл: страница может собрать кусок без него */
       const buf = await pending.shift();
       pump();
       let crc;
@@ -848,7 +850,7 @@ async function doZipPart(token, req, openPart) {
   } catch (e) {
     out.abort();
     console.log(JSON.stringify({ ev: 'zippart_error', error: String(e && e.message || e), ms: Date.now() - t0 }));
-    return { status: 422, result: { error: String(e && e.message || e) } };
+    return { status: 422, result: { error: String(e && e.message || e), from: cur || undefined } };
   }
 }
 
