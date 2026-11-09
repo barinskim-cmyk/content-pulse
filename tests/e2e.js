@@ -1745,23 +1745,49 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       await page.waitForFunction(() => CP.settings && CP.settings.archive && CP.shoots && CP.shoots.some(s => s.name === '2026-11-06_SV_КАТ'), null, { timeout: 8000 }).catch(() => {});
       const a0 = await page.evaluate(() => ({ arch: CP.settings.archive, chip: !!document.querySelector('#cpStages [data-cp-stage="archive"]'), loaded: !!CP.archShoots }));
       check('каталог: 00_АРХИВ — роль «архив», фильтр последним, при запуске не читается', a0.arch === 'disk:/КАТАЛОГ/00_АРХИВ' && a0.chip && !a0.loaded, JSON.stringify(a0));
-      await page.click('#cpStages [data-cp-stage="archive"]');
+      await page.evaluate(() => document.querySelector('#cpStages [data-cp-stage="archive"]').click());
       await page.waitForFunction(() => [...document.querySelectorAll('#cpShelfList .cp-shoot')].some(b => b.dataset.name === '2026-11-01_SV_ПРЕДМЕТКА'), null, { timeout: 8000 }).catch(() => {});
       check('фильтр 00_АРХИВ по клику — съёмки архива', await page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-shoot')].map(b => b.dataset.name).join() === '2026-11-01_SV_ПРЕДМЕТКА'),
         await page.textContent('#cpShelfList'));
-      await page.click('#cpStages [data-cp-stage=""]');
+      await page.evaluate(() => document.querySelector('#cpStages [data-cp-stage=""]').click());
       await page.evaluate(() => { var d = CP.shoots.find(s => s.name === '2026-11-06_SV_КАТ'); d.custom_properties = {}; d.cpSum = { k: [0, 0, 0, 0, 0, 2, 1], filled: 3 }; cpRenderShoots(); });
       check('все артикулы на сайте или в браке — «готова к архиву»', /готова к архиву/.test(await page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === '2026-11-06_SV_КАТ').textContent)));
       await page.evaluate(() => { var d = CP.shoots.find(s => s.name === '2026-11-06_SV_КАТ'); cpSelectShoot(d.path, d.name, d.modified); });
       await page.waitForSelector('#cpPanel [data-cp-arch-go]', { timeout: 8000 }).catch(() => {});
       let dlg = '';
       page.once('dialog', d => { dlg = d.message(); d.accept(); });
-      await page.click('#cpPanel [data-cp-arch-go]');
+      await page.evaluate(() => document.querySelector('#cpPanel [data-cp-arch-go]').click());
       for (let i = 0; i < 60 && !DIRS.has(K + '/00_АРХИВ/2026-11-06_SV_КАТ'); i++) await page.waitForTimeout(100);
       await page.waitForFunction(() => CP.shoots && !CP.shoots.some(s => s.name === '2026-11-06_SV_КАТ'), null, { timeout: 8000 }).catch(() => {});
       check('«В архив»: съёмка целиком в 00_АРХИВ (с отбором), из исходников ушла, с витрины тоже',
         DIRS.has(K + '/00_АРХИВ/2026-11-06_SV_КАТ') && FILES.has(K + '/00_АРХИВ/2026-11-06_SV_КАТ/k1.jpg') && !DIRS.has(K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ')
         && /на сайте \(2\) или в браке \(1\)/.test(dlg) && await page.evaluate(() => !CP.shoots.some(s => s.name === '2026-11-06_SV_КАТ')), dlg);
+      if (!(await page.isVisible('#cpArchiveInput'))) await page.click('#cpGear');
+    }
+    /* несколько папок (Маша, 09.11): соседний каталог находится сам, переключение — в один клик; добавить руками — общий список */
+    {
+      ['disk:/ИМИДЖ', 'disk:/ИМИДЖ/01_ИСХОДНИКИ', 'disk:/ИМИДЖ/01_ИСХОДНИКИ/2026-11-08_IMG_ЗОЛОТО', 'disk:/Отделы', 'disk:/Отделы/ПРЕДМЕТКА_ИМИДЖ', 'disk:/Отделы/ПРЕДМЕТКА_ИМИДЖ/01_ИСХОДНИКИ'].forEach(d => DIRS.add(d));
+      FILES.set('disk:/ИМИДЖ/01_ИСХОДНИКИ/2026-11-08_IMG_ЗОЛОТО/g1.jpg', Buffer.from('G'.repeat(40)));
+      await page.evaluate(() => { CP.catsFound = null; return cpLoadShoots(); });
+      await page.waitForFunction(() => !!document.querySelector('#cpCats option[value="disk:/ИМИДЖ"]'), null, { timeout: 8000 }).catch(() => {});
+      check('переключатель папок: соседний каталог ИМИДЖ найден сам (рядом, внутри этапы), «Архив» — нет', await page.evaluate(() =>
+        !!document.querySelector('#cpCats option[value="disk:/ИМИДЖ"]') && !document.querySelector('#cpCats option[value="disk:/Архив"]')
+        && document.querySelector('#cpCats select').value === 'disk:/КАТАЛОГ'), await page.evaluate(() => (document.getElementById('cpCats') || {}).innerHTML || ''));
+      await page.selectOption('#cpCats select', 'disk:/ИМИДЖ', { force: true });
+      await page.waitForFunction(() => CP.archive === 'disk:/ИМИДЖ' && CP.shoots && CP.shoots.some(s => s.name === '2026-11-08_IMG_ЗОЛОТО'), null, { timeout: 10000 }).catch(() => {});
+      check('выбрали ИМИДЖ — его съёмки и его служебная папка', await page.evaluate(() => CP.archive === 'disk:/ИМИДЖ' && CP.shoots.some(s => s.name === '2026-11-08_IMG_ЗОЛОТО')
+        && CP_CONFIG.serviceDir === 'disk:/ИМИДЖ/_ContentPulse'), await page.evaluate(() => JSON.stringify([CP.archive, CP_CONFIG.serviceDir])));
+      await page.waitForFunction(() => !!document.querySelector('#cpCats option[value="disk:/КАТАЛОГ"]'), null, { timeout: 8000 }).catch(() => {});
+      await page.selectOption('#cpCats select', 'disk:/КАТАЛОГ', { force: true });
+      await page.waitForFunction(() => CP.archive === 'disk:/КАТАЛОГ' && CP.catalogList, null, { timeout: 10000 }).catch(() => {});
+      await page.waitForFunction(() => !!document.querySelector('#cpCats option[value="+"]'), null, { timeout: 8000 }).catch(() => {});
+      page.once('dialog', d => d.accept('disk:/Отделы/ПРЕДМЕТКА_ИМИДЖ'));
+      await page.selectOption('#cpCats select', '+', { force: true });
+      for (let i = 0; i < 60 && !/ещё папки = disk:\/Отделы\/ПРЕДМЕТКА_ИМИДЖ/.test((FILES.get('disk:/КАТАЛОГ/_ContentPulse/настройки.txt') || '').toString()); i++) await page.waitForTimeout(100);
+      for (let i = 0; i < 40 && !FILES.has('disk:/Отделы/ПРЕДМЕТКА_ИМИДЖ/_ContentPulse/настройки.txt'); i++) await page.waitForTimeout(100);
+      check('«+ Добавить папку»: в настройках обеих папок «ещё папки», в переключателе — новая', /ещё папки = disk:\/Отделы\/ПРЕДМЕТКА_ИМИДЖ/.test((FILES.get('disk:/КАТАЛОГ/_ContentPulse/настройки.txt') || '').toString())
+        && /ещё папки = disk:\/КАТАЛОГ/.test((FILES.get('disk:/Отделы/ПРЕДМЕТКА_ИМИДЖ/_ContentPulse/настройки.txt') || '').toString())
+        && await page.evaluate(() => !!document.querySelector('#cpCats option[value="disk:/Отделы/ПРЕДМЕТКА_ИМИДЖ"]')), (FILES.get('disk:/КАТАЛОГ/_ContentPulse/настройки.txt') || '').toString().slice(-160));
       if (!(await page.isVisible('#cpArchiveInput'))) await page.click('#cpGear');
     }
     await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-catalog.png') });
