@@ -28,7 +28,11 @@
    открытии сверяет: доехало — вычёркивает, не вышло — просит Диск ещё раз, на
    съёмке — «едет на Диск: N из M». Напрямую на Диск — тоже 4 потока (8 МБ/с
    против 2 в один поток), кадры, потом видео.
+   Выбора способа в окне нет (Маша, 09.11: «галка не нужна, мы просто выбираем
+   оптимальный способ»): всегда через Облако; Облако недоступно — сами напрямую.
    ============================================================ */
+
+CP.srcVia = '';   /* '' — сами (Облако, если есть прослойка); 'disk' — только напрямую (проверки) */
 
 var CP_IMAGE_RE = /\.(jpe?g|png|tiff?|heic|heif|webp|psd|dng|cr2|cr3|nef|arw|raf|orf|rw2|srw|pef|3fr|iiq|x3f)$/i;
 
@@ -77,12 +81,7 @@ function cpSrcOpen(target) {
       }
       else if (act === 'reset') { CP.srcUp.files = []; CP.srcUp.plan = null; cpSrcRender(); }
       else if (act === 'go') cpSrcUpload();
-      else if (act === 'via-cloud' || act === 'via-disk') {
-        if (CP.srcUp.busy) return;
-        CP.srcUp.via = act === 'via-cloud' ? 'cloud' : 'disk';
-        cpSet('cp_src_via', CP.srcUp.via);
-        cpSrcRender();
-      }
+
     });
     box.addEventListener('change', function (e) {
       var inp = e.target;
@@ -101,7 +100,7 @@ function cpSrcOpen(target) {
     });
   }
   CP.srcUp = { target: target || null, files: [], plan: null, busy: false,
-    via: CPDisk.hasProxy() && cpGet('cp_src_via', 'cloud') !== 'disk' ? 'cloud' : 'disk' };
+    via: CPDisk.hasProxy() && CP.srcVia !== 'disk' ? 'cloud' : 'disk' };
   box.classList.add('cp-open');
   cpSrcRender();
 }
@@ -222,13 +221,8 @@ function cpSrcRender() {
     if (st.plan.loose.length) h += '<div class="cp-acc-warn">Отдельные файлы без папки съёмки не загрузятся (' + st.plan.loose.length + '): перетащите папку съёмки или нажмите «Догрузить» в панели нужной съёмки.</div>';
     if (st.busy || st.done) h += '<div class="cp-acc-prog" id="cpSrcProg">' + (st.progress || '') + '</div>';
     if (st.done) h += '<div class="cp-acc-done">' + cbEsc(st.done) + '</div>';
-    if (!st.busy && !st.done && CPDisk.hasProxy()) {
-      h += '<div class="cp-su-via"><span>Как грузить:</span>'
-        + '<button class="cp-fchip' + (st.via === 'cloud' ? ' cp-on' : '') + '" data-cp-su="via-cloud">Через Облако — быстрее</button>'
-        + '<button class="cp-fchip' + (st.via === 'disk' ? ' cp-on' : '') + '" data-cp-su="via-disk">Напрямую на Диск</button></div>'
-        + '<div class="cp-note">' + (st.via === 'cloud'
-          ? 'Файлы быстро уходят в Облако, а Диск забирает их оттуда сам. Когда здесь будет «всё в Облаке», компьютер можно выключать: на Диск доедет без него.'
-          : 'Прямо на Диск — медленнее, но без Облака; компьютер должен быть включён до конца.') + '</div>';
+    if (!st.busy && !st.done && st.via === 'cloud') {
+      h += '<div class="cp-note">Файлы быстро уходят в Облако, а Диск забирает их оттуда сам. Когда здесь будет «всё в Облаке», компьютер можно выключать: на Диск доедет без него.</div>';
     }
     if (st.transit) h += '<div class="cp-acc-prog">' + st.transit + '</div>';
     if (!st.busy && !st.done) {
@@ -303,7 +297,15 @@ function cpSrcUpload() {
   };
   mk.then(function () {
     show();
-    if (st.via === 'cloud' && CPDisk.hasProxy()) return cpSrcViaCloud(st, jobs, loaded, ok, failed, show, function (t) { now = t; });
+    if (st.via === 'cloud' && CPDisk.hasProxy()) {
+      return cpSrcViaCloud(st, jobs, loaded, ok, failed, show, function (t) { now = t; }).catch(function (e) {
+        /* Облако не взялось (ещё ничего не ушло) — грузим напрямую на Диск */
+        if (!e || !e.cloudStart) throw e;
+        if (window.console) console.warn('[CP] Облако недоступно, грузим напрямую', e.cause);
+        st.via = 'disk';
+        return direct();
+      });
+    }
     return direct();
   }).then(function () {
     cbBusyHide();
@@ -372,7 +374,7 @@ function cpSrcViaCloud(st, jobs, loaded, ok, failed, show, setNow) {
     return CPDisk.proxyCloudUp({ op: 'start', files: bt.map(function (j) { return { size: j.file.size }; }) }).then(function (r) {
       bt.forEach(function (j, i) { j.cloud = r.files[i]; });
     });
-  }).then(function () {
+  }).catch(function (e) { throw { cloudStart: true, cause: e }; }).then(function () {
     var units = [];
     jobs.forEach(function (j) {
       var c = j.cloud;
@@ -609,9 +611,6 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
     + '.cp-src-drop.cp-over{border-color:#C9956B;color:#e7c9a8;background:#1d1a17}'
     + '.cp-su-group{border:1px solid #2f2f2c;border-radius:4px;padding:8px 10px;margin:6px 0;font-size:13px;display:flex;flex-direction:column;gap:4px}'
     + '.cp-su-new{color:#9fc2a3}.cp-su-part{color:#e7c9a8}.cp-su-counts{color:#cfcac2;font-size:12px}'
-    + '.cp-su-via{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:10px 0 4px;font-size:12px;color:#a3a09a}'
-    + '.cp-su-via .cp-fchip{font:inherit;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #3a3a37;background:transparent;color:#cfcac2;cursor:pointer}'
-    + '.cp-su-via .cp-fchip.cp-on{border-color:#C9956B;background:#2b231c;color:#f2e2cf}'
     + '.cp-transit{margin-top:6px;font-size:12px;color:#e7c9a8}';
   document.head.appendChild(st);
 })();

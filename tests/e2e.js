@@ -51,7 +51,8 @@ const DOWNLOADS_REFERER = [];
 const ZIPS = new Map();
 const SPEED_PUTS = [], SPEED_GETS = [], SPEED_OBJ = new Map();
 /* загрузка через Облако: части многочастной загрузки, операции Диска «забрать по ссылке» */
-const CLOUD_PARTS = new Map(), OPS = new Map(), CLOUD_FETCH = [], CLOUD_FETCH_FAIL = new Set(), REMOVED = [];   /* пробные файлы проверки скорости в Облаке */
+const CLOUD_PARTS = new Map(), OPS = new Map(), CLOUD_FETCH = [], CLOUD_FETCH_FAIL = new Set(), REMOVED = [];
+let CLOUD_START_FAIL = false;   /* пробные файлы проверки скорости в Облаке */
 const UPLOADS = [];   /* что и в каком порядке залито на Диск */
 const FRESH = new Map();   /* как у Яндекса: новый файл появляется в списке папки не сразу */
 const CLOUD = new Map();
@@ -220,6 +221,7 @@ async function route(r) {
     if (q.a === 'cloudup' && m === 'POST') {
       const b = JSON.parse(req.postData() || '{}'), base = 'https://storage.yandexcloud.net/content-pulse-exports-test/';
       if (b.op === 'start') {
+        if (CLOUD_START_FAIL) return json(501, { error: 'Хранилище не настроено' });
         const dir = 'exports/in_' + Math.random().toString(16).slice(2) + '/', PART = 100;   /* в тесте «большой» — больше 100 байт */
         return json(200, { files: b.files.map((f, i) => {
           const key = dir + i;
@@ -1661,7 +1663,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
 
   /* загрузка в исходники (Маша, 09.11): папкой, как на Диск; «…_2» — часть той же съёмки; сначала кадры, потом видео */
   {
-    await page.evaluate(() => { CP.stageFilter = ''; cpSet('cp_src_via', 'disk'); cpRenderShoots(); });
+    await page.evaluate(() => { CP.stageFilter = ''; CP.srcVia = 'disk'; cpRenderShoots(); });
     check('исходники: сверху полоска «Загрузить съёмку»', /Загрузить съёмку/.test(await page.textContent('#cpSrcDrop').catch(() => '')));
     /* перетащили отдельный файл — окно открылось, файл без папки съёмки не загрузится */
     await page.evaluate(() => {
@@ -1723,7 +1725,7 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
   /* загрузка через Облако (Маша, 09.11: Облако 38 МБ/с против 8 у Диска): в бакет в 4 потока (большие — кусками),
      Диск забирает сам по ссылке; «всё в Облаке» — компьютер можно выключать; витрина доследит */
   {
-    await page.evaluate(() => cpSet('cp_src_via', 'cloud'));
+    await page.evaluate(() => { CP.srcVia = ''; });
     const CS = '2026-11-09_SV_ОБЛАКО', put0 = SPEED_PUTS.length;
     CLOUD_FETCH_FAIL.add('disk:/Архив/' + CS + '/1/b.jpg');   /* первый раз Диск не забрал — попросит ещё раз */
     await page.evaluate(n => {
@@ -1732,9 +1734,8 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
         .map(x => ({ file: new File([x[1]], x[0].split('/').pop()), rel: x[0] })));
     }, CS);
     await page.waitForFunction(() => /кадров 2/.test((document.getElementById('cpSrcUp') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => {});
-    check('в окне — «Через Облако — быстрее» (выбрано) и «Напрямую на Диск», про выключенный компьютер', await page.evaluate(() =>
-      /Через Облако/.test(document.querySelector('#cpSrcUp [data-cp-su="via-cloud"]').textContent) && document.querySelector('#cpSrcUp [data-cp-su="via-cloud"]').classList.contains('cp-on')
-      && /компьютер можно выключать/.test(document.getElementById('cpSrcUp').textContent)));
+    check('выбора способа нет — сами через Облако; в окне про выключенный компьютер', await page.evaluate(() =>
+      !document.querySelector('#cpSrcUp [data-cp-su^="via"]') && CP.srcUp.via === 'cloud' && /компьютер можно выключать/.test(document.getElementById('cpSrcUp').textContent)));
     await page.click('[data-cp-su="go"]');
     await page.waitForFunction(() => /Всё в Облаке: файлов 3/.test((document.getElementById('cpSrcUp') || {}).textContent || ''), null, { timeout: 10000 }).catch(() => {});
     const puts = SPEED_PUTS.slice(put0);
@@ -1759,7 +1760,16 @@ let FAIL_COPY = null;   /* копирование этих путей «пада
     for (let i = 0; i < 30 && FILES.has(MAN); i++) await page.waitForTimeout(100);
     check('следующая сверка: доехало — «в пути» удалено, метки нет', !FILES.has(MAN) && String(FILES.get(LATE) || '') === 'L'.repeat(33) && !/едет на Диск/.test(await page.textContent('#cpShelfList')),
       JSON.stringify([FILES.has(MAN), await page.textContent('#cpShelfList')]));
-    await page.evaluate(() => cpSet('cp_src_via', 'disk'));
+    /* Облако не взялось — сами грузим напрямую на Диск, без вопросов */
+    CLOUD_START_FAIL = true;
+    await page.evaluate(() => { CP.srcVia = ''; cpSrcOpen(null); cpSrcAdd([{ file: new File(['F'.repeat(40)], 'f.jpg'), rel: '2026-11-09_SV_ЗАПАС/f.jpg' }]); });
+    await page.waitForFunction(() => /кадров 1/.test((document.getElementById('cpSrcUp') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => {});
+    await page.click('[data-cp-su="go"]');
+    await page.waitForFunction(() => /Загружено файлов: 1/.test((document.getElementById('cpSrcUp') || {}).textContent || ''), null, { timeout: 10000 }).catch(() => {});
+    check('Облако недоступно — загрузилось напрямую на Диск', UPLOADS.includes('disk:/Архив/2026-11-09_SV_ЗАПАС/f.jpg') && /Загружено файлов: 1/.test(await page.textContent('#cpSrcUp')), await page.textContent('#cpSrcUp'));
+    CLOUD_START_FAIL = false;
+    await page.click('[data-cp-su="close"]');
+    await page.evaluate(() => { CP.srcVia = 'disk'; });
   }
 
   /* проверка скорости (Маша, 09.11): по очереди Диск 1 и 4 потока, Облако 4 и 8; итог — сколько займут 15 ГБ */
