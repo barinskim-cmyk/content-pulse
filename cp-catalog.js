@@ -233,28 +233,54 @@ function cpCountStageArts() {
     Object.keys(w).forEach(function (low) { if (known[low]) jobs.push({ key: key, low: low, name: known[low], paths: w[low] }); });
   });
   var fresh = {};
+  var oldOf = (CP.siteOldFor === archive && CP.siteOldOf) || {}, oldCache = (CP.siteOldFor === archive && CP.siteOld) || {}, oldDirty = false;
   return cpPool(jobs, 4, function (j) {
     var type = typeof cpShootType === 'function' ? cpShootType(j.name) : null;
     var codes = {}, found = false;
-    function walk(paths, depth) {
-      if (!paths.length || depth > 4) return Promise.resolve();
-      return cpPool(paths, 4, function (p) { return cpListDirs(p); }).then(function (lists) {
-        var next = [];
-        lists.forEach(function (ds) {
-          (ds || []).forEach(function (x) {
-            if (x.name.charAt(0) === '_') return;
-            var name = x.name.replace(/^(!|\d{1,2})_(?=\D)/, ''), letter = '';
-            var lm = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(name);
-            if (lm && letters.indexOf(lm[1]) !== -1) { letter = lm[1]; name = lm[2]; }
-            var code = cpArtCode(type, name);   /* папка-дата — не артикул: идём внутрь */
-            if (code) { found = true; codes[code] = codes[code] || letter; }
-            else next.push(x.path);
+    var take = function (c) { if (!c) return; found = true; Object.keys(c).forEach(function (k) { codes[k] = codes[k] || c[k]; }); };
+    /* одна папка съёмки на этапе -> {код: буква} или null (артикулов не нашлось) */
+    function walkOne(root) {
+      var c = {}, any = false;
+      function walk(paths, depth) {
+        if (!paths.length || depth > 4) return Promise.resolve();
+        return cpPool(paths, 4, function (p) {
+          return CPDisk.listDir(p).then(null, function (e) { if (e && e.status === 404) return []; throw e; });
+        }).then(function (lists) {
+          var next = [];
+          lists.forEach(function (items) {
+            var here = 0, files = [];
+            (items || []).forEach(function (x) {
+              if (x.type !== 'dir') { files.push(x.name); return; }
+              if (x.name.charAt(0) === '_') return;
+              var name = x.name.replace(/^(!|\d{1,2})_(?=\D)/, ''), letter = '';
+              var lm = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(name);
+              if (lm && letters.indexOf(lm[1]) !== -1) { letter = lm[1]; name = lm[2]; }
+              var code = cpArtCode(type, name);   /* папка-дата и папка партии («Y_1») — не артикул: идём внутрь */
+              if (code) { any = true; here++; c[code] = c[code] || letter; }
+              else next.push(x.path);
+            });
+            /* «Сайт»: папок артикулов нет, файлы лежат россыпью — артикул по началу имени файла («74595_1.jpg») */
+            if (j.key === 'site' && !here) files.forEach(function (n) { var fc = cpArtCode(type, n); if (fc) { any = true; if (c[fc] === undefined) c[fc] = ''; } });
           });
+          return walk(next, depth + 1);
         });
-        return walk(next, depth + 1);
-      });
+      }
+      return walk([root], 1).then(function () { return any ? c : null; });
     }
-    return walk(j.paths, 1).then(function () {
+    /* папки в старых датах «Сайта» — из запомненного, без запросов к Диску */
+    var live = [];
+    j.paths.forEach(function (p) {
+      var ent = j.key === 'site' && oldOf[p] ? oldCache[oldOf[p]] : null;
+      if (ent && ent.arts && ent.arts[p] !== undefined) take(ent.arts[p]);
+      else live.push(p);
+    });
+    return cpPool(live, 2, function (p) {
+      return walkOne(p).then(function (c) {
+        take(c);
+        var ent = j.key === 'site' && oldOf[p] ? oldCache[oldOf[p]] : null;
+        if (ent) { (ent.arts = ent.arts || {})[p] = c; oldDirty = true; }
+      });
+    }).then(function () {
       (fresh[j.key] = fresh[j.key] || {})[j.low] = found ? codes : null;
     }, function () {
       /* папка не прочиталась — оставляем прошлый счёт, а не «есть» без числа */
@@ -263,6 +289,7 @@ function cpCountStageArts() {
     });
   }).then(function () {
     if (run !== _cpArtsRun || CP.archive !== archive) return;
+    if (oldDirty && typeof cpSiteOldSave === 'function') cpSiteOldSave(archive, oldCache);
     CP.stageArts = fresh;
     CP.stageArtsFor = archive;
     if (typeof cpStageRecentApply === 'function') cpStageRecentApply();   /* только что отправленное — в счёте, пока Диск не покажет сам */

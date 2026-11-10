@@ -213,6 +213,21 @@ function cpSiteTooOld(name) {
 }
 
 /** Какие съёмки лежат в папках этапов: по одному обходу на этап (до 3 уровней). */
+/* запомненное про старые даты «Сайта» — в браузере, отдельно для каждой папки исходников */
+function cpSiteOldKey(archive) { return 'cp_site_old:' + archive; }
+function cpSiteOldCache(archive) {
+  if (CP.siteOld && CP.siteOldFor === archive) return CP.siteOld;
+  try { return JSON.parse(localStorage.getItem(cpSiteOldKey(archive)) || '{}') || {}; } catch (e) { return {}; }
+}
+function cpSiteOldSave(archive, cache) {
+  try { localStorage.setItem(cpSiteOldKey(archive), JSON.stringify(cache)); } catch (e) { if (window.console) console.warn('[CP] старые даты «Сайта» не запомнились', e && e.message); }
+}
+/** «Обновить» на витрине: старые даты «Сайта» читаются заново. */
+function cpSiteOldReset() {
+  CP.siteOld = null; CP.siteOldOf = {}; CP.siteOldFor = '';
+  try { localStorage.removeItem(cpSiteOldKey(CP.archive)); } catch (e) { }
+}
+
 /* ---------- что программа только что сделала сама — видно сразу ----------
    Маша, 10.11.2026: «перемещала предметку из исходников в ретушь — не переместилась… переместилось,
    нужно было подождать, пока прогрузится. Надо с этим лагом что-то сделать». Витрина узнавала о
@@ -270,29 +285,68 @@ function cpScanStages() {
     var root = s[CP_STAGE_SETTING[key]];
     if (!root) return Promise.resolve([key, null]);
     var names = {}, where = {}, info = {};
-    var level = function (paths, depth) {
-      if (!paths.length || depth > 3) return Promise.resolve();
+    /* «Сайт» читаем в том виде, как туда сдают сейчас (Маша, 10.11.2026: «структура шибанутая — дата /
+       буква / номер / съёмка / партия; на время тестирования её сохраняем, программа должна уметь
+       читать и её, и ту, которую хотим»): папка съёмки ищется на любом уровне до пятого. */
+    var maxDepth = key === 'site' ? 5 : 3;
+    var oldDates = [];
+    var level = function (paths, depth, into, inOld) {
+      if (!paths.length || depth > maxDepth) return Promise.resolve();
       return cpPool(paths, 4, function (p) { return cpListDirs(p); }).then(function (lists) {
         var next = [];
         lists.forEach(function (ds) {
           (ds || []).forEach(function (x) {
             var bare = x.name.replace(/^(!|\d{1,2})_/, '');
             if (known[bare.toLowerCase()] || shootLike.test(bare)) {
-              names[bare.toLowerCase()] = true;
-              (where[bare.toLowerCase()] = where[bare.toLowerCase()] || []).push(x.path);
-              info[x.path] = { props: x.custom_properties || {}, modified: x.modified || '' };   /* метки папки (скачано из «Сайта» и т. п.) */
+              into.names[bare.toLowerCase()] = true;
+              (into.where[bare.toLowerCase()] = into.where[bare.toLowerCase()] || []).push(x.path);
+              into.info[x.path] = { props: x.custom_properties || {}, modified: x.modified || '' };   /* метки папки (скачано из «Сайта» и т. п.) */
             }
             else if (x.name.charAt(0) !== '_') {
-              /* «Сайт»: в папки дат старше 7 дней не заходим (Маша, 10.11) — сданное раньше видно по отметкам программы */
-              if (key === 'site' && cpSiteTooOld(x.name)) return;
+              /* «Сайт»: папки дат старше 7 дней каждый раз не перечитываем (Маша, 10.11) — берём запомненное, см. ниже */
+              if (key === 'site' && !inOld && cpSiteTooOld(x.name)) { oldDates.push({ x: x, depth: depth }); return; }
               next.push(x.path);
             }
           });
         });
-        return level(next, depth + 1);
+        return level(next, depth + 1, into, inOld);
       });
     };
-    return level([root], 1).then(function () { return [key, names, where, info]; }, function (e) { return [key, 'fail', e]; });
+    var cur = { names: names, where: where, info: info };
+    /* Старые даты «Сайта»: что там лежит, нужно знать (сдано ли всё — можно ли съёмку в архив), но
+       перечитывать их каждые 40 секунд незачем. Читаем один раз и запоминаем в браузере; папка даты
+       изменилась (или нажали «Обновить») — читаем её заново. */
+    var readOld = function () {
+      if (key !== 'site' || !oldDates.length) return;
+      var cache = cpSiteOldCache(archive), dirty = false;
+      var todo = oldDates.filter(function (o) { var c = cache[o.x.path]; return !(c && c.mod === (o.x.modified || '')); });
+      return cpPool(todo, 2, function (o) {
+        var part = { names: {}, where: {}, info: {} };
+        return level([o.x.path], o.depth + 1, part, true).then(function () {
+          cache[o.x.path] = { mod: o.x.modified || '', where: part.where, info: part.info };
+          dirty = true;
+        }, function () { });
+      }).then(function () {
+        var alive = {};
+        oldDates.forEach(function (o) { alive[o.x.path] = true; });
+        Object.keys(cache).forEach(function (k) { if (!alive[k]) { delete cache[k]; dirty = true; } });
+        var of = {};
+        oldDates.forEach(function (o) {
+          var c = cache[o.x.path];
+          if (!c) return;
+          Object.keys(c.where || {}).forEach(function (low) {
+            names[low] = true;
+            c.where[low].forEach(function (pth) { if ((where[low] = where[low] || []).indexOf(pth) === -1) where[low].push(pth); of[pth] = o.x.path; });
+          });
+          Object.keys(c.info || {}).forEach(function (pth) { info[pth] = c.info[pth]; });
+        });
+        CP.siteOld = cache;        /* дата -> что в ней; cp-catalog.js дописывает сюда артикулы */
+        CP.siteOldOf = of;         /* папка съёмки в старой дате -> папка даты */
+        CP.siteOldFor = archive;
+        if (dirty) cpSiteOldSave(archive, cache);
+      });
+    };
+    return level([root], 1, cur, false).then(readOld).then(function () { return [key, names, where, info]; }, function (e) { return [key, 'fail', e]; });
   })).then(function (pairs) {
     if (CP.archive !== archive) return;
     /* Папка этапа не прочиталась (сеть, Диск ответил ошибкой или «слишком много запросов») — это не
@@ -496,7 +550,7 @@ cpLoadShoots = (function (orig) {
   };
 })(cpLoadShoots);
 /* кнопка «Обновить» была привязана к старой функции */
-document.getElementById('cpShelfRefresh').onclick = function () { cpLoadShoots(); };
+document.getElementById('cpShelfRefresh').onclick = function () { cpSiteOldReset(); cpLoadShoots(); };   /* «Обновить» — и старые даты «Сайта» заново */
 
 (function cpStagesCss() {
   var css = ''

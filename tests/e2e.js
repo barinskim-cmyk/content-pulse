@@ -1790,6 +1790,36 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     check('папка ретуши не прочиталась с Диска — «03_РЕТУШЬ 2» под съёмкой и фильтр остаются (раньше пропадали), об ошибке сказано; прочиталась — как было',
       JSON.stringify(sc0.slice(0, 5)) === '[true,2,true,"",true]' && JSON.stringify(sc1.slice(0, 5)) === '[true,2,true,"retouch",true]' && /Не прочиталась папка этапа: 03_РЕТУШЬ/.test(sc1[5])
       && JSON.stringify(sc2.slice(0, 5)) === '[true,2,true,"",true]', JSON.stringify([sc0, sc1, sc2]));
+    /* 2.0.103: «Сайт» как туда сдают сейчас — дата / буква / номер / съёмка / партия; старые даты читаются один раз и запоминаются */
+    {
+      const SITE = K + '/04_САЙТ', SH = '2026-11-06_SV_КАТ';
+      const D1 = SITE + '/02.10.26/Y/1/' + SH, D2 = SITE + '/03.10.26/U/2/' + SH;
+      [SITE + '/02.10.26', SITE + '/02.10.26/Y', SITE + '/02.10.26/Y/1', D1, D1 + '/Y_1', D1 + '/Y_1/74001_модель',
+        SITE + '/03.10.26', SITE + '/03.10.26/U', SITE + '/03.10.26/U/2', D2, D2 + '/U_2'].forEach(d => DIRS.add(d));
+      FILES.set(D1 + '/Y_1/74001_модель/k1.jpg', Buffer.from('S'.repeat(40)));
+      FILES.set(D2 + '/U_2/74002_1.jpg', Buffer.from('S'.repeat(41)));      /* без папки артикула — артикул по имени файла */
+      const siteNow = () => page.evaluate(async () => {
+        await cpScanStages(); await cpCountStageArts();
+        const d = CP.shoots.find(s => s.name === '2026-11-06_SV_КАТ'), low = d.name.toLowerCase(), ph = cpArtPhys(d) || [];
+        const sumWas = d.cpSum, propsWas = d.custom_properties;
+        d.custom_properties = {}; d.cpSum = { k: [0, 2, 0, 0, 0, 0, 0], filled: 2 };
+        const arch = cpArchCount(d), ready = cpArchReady(d);
+        d.cpSum = sumWas; d.custom_properties = propsWas;
+        return { pres: !!(CP.stagePresence.site || {})[low], codes: Object.keys((CP.stageArts.site || {})[low] || {}).sort().join(), paths: ((CP.stagePaths.site || {})[low] || []).length,
+          site: (ph.find(x => x.key === 'site') || {}).n, retouch: ph.some(x => x.key === 'retouch'), arch, ready, cached: Object.keys(JSON.parse(localStorage.getItem('cp_site_old:' + CP.archive) || '{}')).length };
+      });
+      const s1 = await siteNow();
+      check('«Сайт» в виде «дата / буква / номер / съёмка / партия» читается: оба артикула на сайте (один — по имени файла), из ретуши они ушли, съёмка «готова к архиву» по самой папке сайта',
+        s1.pres && s1.codes === '74001,74002' && s1.paths === 2 && s1.site === 2 && !s1.retouch && s1.ready && s1.arch.site === 2 && s1.arch.rest === 0, JSON.stringify(s1));
+      /* старые даты второй раз с Диска не читаются — взяты из запомненного (списки их папок «не отдаются») */
+      LIST_FAIL = /04_САЙТ\/0[23]\.10\.26\//;
+      const s2 = await siteNow();
+      LIST_FAIL = null;
+      check('старые даты «Сайта» запомнены в браузере: при следующей сверке их папки не перечитываются, картина та же', s2.cached >= 2 && s2.codes === '74001,74002' && s2.site === 2 && s2.ready, JSON.stringify(s2));
+      [D1 + '/Y_1/74001_модель/k1.jpg', D2 + '/U_2/74002_1.jpg'].forEach(f => FILES.delete(f));
+      [...DIRS].filter(d => d.indexOf(SITE + '/02.10.26') === 0 || d.indexOf(SITE + '/03.10.26') === 0).forEach(d => DIRS.delete(d));
+      await page.evaluate(async () => { cpSiteOldReset(); await cpScanStages(); await cpCountStageArts(); });
+    }
     RID_GEN.delete(KRT + '/74002_модель/k2.jpg');
     FILES.delete(KSTATE); PROPS.delete(K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ');
     await page.click('[data-cp-p="close"]');
@@ -2344,12 +2374,17 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         CP.siteDatesAt = 0;
         await cpSiteRefresh(true); out.forced = pass.slice().sort(); pass = [];
         out.names = names;
-        /* обход папок этапов: в старые даты «Сайта» не заходим */
+        /* обход папок этапов: в старые даты «Сайта» заходим один раз и запоминаем (2.0.103), дальше — только последние 7 дней */
         out.listed = [];
         CP.shoots = CP.shoots || [];
+        cpSiteOldReset();
         await cpScanStages();
         out.stage = out.listed.filter(p => p.indexOf(root + '/') === 0).map(p => p.split('/').pop()).sort();
+        out.listed = [];
+        await cpScanStages();
+        out.stage2 = out.listed.filter(p => p.indexOf(root + '/') === 0).map(p => p.split('/').pop()).sort();
         out.presence = Object.keys((CP.stagePresence || {}).site || {});
+        cpSiteOldReset();
         CP.settings = keep.settings; window.cpListDirs = keep.ld; window.cpSiteScanDate = keep.sd; CP.shoots = keep.shoots; CP.stageFilter = keep.sf; window.cpRenderShoots = keep.rs; window.cpCountStageArts = keep.ca;
         CP.siteDates = null; CP.siteScan = {}; CP.siteDatesAt = 0; CP.stagePresence = {}; CP.stagePaths = {};
         return out;
@@ -2357,7 +2392,8 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       const nm = sr.names;
       check('«Сайт»: первый раз читаются все даты, дальше сами перечитываются только последние 7 дней', sr.first.length === 4 && sr.second.join() === [nm[0], nm[1]].sort().join(), JSON.stringify([sr.first, sr.second]));
       check('«Сайт»: «Обновить» перечитывает и старые даты', sr.forced.length === 4, JSON.stringify(sr.forced));
-      check('витрина: при опросе папок этапов в даты «Сайта» старше 7 дней не заходим', sr.stage.join() === [nm[0], nm[1]].sort().join() && sr.presence.length === 1, JSON.stringify([sr.stage, sr.presence]));
+      check('витрина: в даты «Сайта» старше 7 дней заходим один раз и запоминаем; при следующих сверках читаются только последние 7 дней',
+        sr.stage.length === 4 && sr.stage2.join() === [nm[0], nm[1]].sort().join() && sr.presence.length === 1, JSON.stringify([sr.stage, sr.stage2, sr.presence]));
     }
     /* переключили папку на витрине — открытая съёмка из прежней папки закрывается (иначе её этапы ушли бы в чужую папку) */
     {

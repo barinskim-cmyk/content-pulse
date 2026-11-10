@@ -32,7 +32,12 @@ function cpArchCount(d) {
   var sum = d && cpSumOf(d);
   if (!sum || !sum.k) return null;
   var n = sum.k.reduce(function (a, b) { return a + b; }, 0);
-  return { n: n, site: sum.k[5] || 0, brak: sum.k[6] || 0, rest: n - (sum.k[5] || 0) - (sum.k[6] || 0) };
+  var site = sum.k[5] || 0, brak = sum.k[6] || 0;
+  /* Сдают на сайт пока руками, без отметок программы (Маша, 10.11.2026) — считаем и по самой папке
+     сайта: сколько артикулов съёмки там лежит (все даты; cp-catalog.js). Берём большее из двух. */
+  var phys = typeof cpCatalog === 'function' && cpCatalog() && CP.stageArtsFor === CP.archive ? (CP.stageArts.site || {})[d.name.toLowerCase()] : null;
+  if (phys) site = Math.max(site, Math.min(Math.max(0, n - brak), Object.keys(phys).length));
+  return { n: n, site: site, brak: brak, rest: n - site - brak };
 }
 function cpArchReady(d) { var c = cpArchCount(d); return !!(c && c.n > 0 && c.rest === 0); }
 

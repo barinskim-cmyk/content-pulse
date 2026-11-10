@@ -48,11 +48,12 @@ CP_SETTING_KEYS['отретушировано'] = 'retouched';
 function cpStatusRank(s) { return { approval: 1, retouch: 2 }[s] || 0; }
 
 /** Найти папки съёмки внутри этапа: на первом уровне, иначе глубже (до 3), не заходя в чужие съёмки. */
-function cpFindShootIn(root, shootName) {
+function cpFindShootIn(root, shootName, maxDepth) {
+  maxDepth = maxDepth || 3;
   var want = shootName.toLowerCase(), found = [];
   var shootLike = /^\d{4}-\d{2}-\d{2}_./;
   function level(paths, depth) {
-    if (!paths.length || depth > 3) return Promise.resolve();
+    if (!paths.length || depth > maxDepth) return Promise.resolve();
     return cpPool(paths, 4, function (p) { return cpListDirs(p); }).then(function (lists) {
       var next = [];
       lists.forEach(function (ds) {
@@ -89,7 +90,12 @@ function cpMirrorSync(quiet) {
   var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
   if (!quiet) cbBusyShow('Сверяю с Диском: папки этапов...', 0.2);
   return cpPool(roots, 2, function (r) {
-    var dirs = r.fixed ? Promise.resolve([{ path: r.fixed, name: RETOUCH_DIR_NAME(), prio: '' }]) : cpFindShootIn(r.root, shoot.name);
+    /* «Сайт»: дата / буква / номер / съёмка — искать по всей папке сайта при каждом открытии съёмки долго;
+       витрина уже нашла, где лежит эта съёмка (и в старых датах тоже), — берём её список */
+    var seen = r.stage.key === 'site' && CP.stageFor === CP.archive ? ((CP.stagePaths || {}).site || {})[shoot.name.toLowerCase()] : null;
+    var dirs = r.fixed ? Promise.resolve([{ path: r.fixed, name: RETOUCH_DIR_NAME(), prio: '' }])
+      : seen && seen.length ? Promise.resolve(seen.map(function (pth) { var nm = pth.split('/').pop(); return { path: pth, name: nm, prio: (CP_PRIO_RE.exec(nm) || [])[1] || '' }; }))
+        : cpFindShootIn(r.root, shoot.name, r.stage.key === 'site' ? 5 : 3);
     return dirs.then(function (found) {
       return cpPool(found, 2, function (f) {
         return CPDisk.walkPhotos(f.path, false, 4, true).then(function (files) { f.files = files; return f; }, function (e) {
