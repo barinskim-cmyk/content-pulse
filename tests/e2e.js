@@ -1999,6 +1999,41 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       check('«Не скачано» — дат, где всё скачано, нет', JSON.stringify(await tiles()) === JSON.stringify([today, '01.11']), JSON.stringify([await tiles(), await chips()]));
       await page.click('[data-cp-site-sub=""]');
       await page.click('[data-cp-stage=""]');
+      /* 2.0.107: перенос в архив оборвался (до 2.0.106) — часть в архиве, часть в исходниках: «Доперенести в архив» */
+      if (!global.__split107) {
+        global.__split107 = true;
+        const SN = '2026-11-05_SV_РАЗОРВАНА', SRC = K + '/01_ИСХОДНИКИ/' + SN, DST = K + '/00_АРХИВ/' + SN;
+        [SRC, SRC + '/1', SRC + '/2', DST, DST + '/1'].forEach(x => DIRS.add(x));
+        FILES.set(DST + '/1/a.jpg', Buffer.from('A1')); FILES.set(SRC + '/1/a.jpg', Buffer.from('A1'));      /* та же копия — лишняя */
+        FILES.set(SRC + '/1/b.jpg', Buffer.from('B1'));                                                       /* не доехал */
+        FILES.set(SRC + '/2/c.jpg', Buffer.from('C1'));                                                       /* папка не доехала */
+        FILES.set(DST + '/1/d.jpg', Buffer.from('D1')); FILES.set(SRC + '/1/d.jpg', Buffer.from('D2'));      /* разные — не трогаем */
+        await page.evaluate(() => cpLoadShoots());
+        await page.waitForFunction(n => !![...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === n && /перенос в архив не закончен/.test(b.textContent)), SN, { timeout: 8000 }).catch(() => {});
+        const badge = await page.evaluate(n => !![...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === n && /перенос в архив не закончен/.test(b.textContent)), SN);
+        await page.evaluate(n => { const d = CP.shoots.find(s => s.name === n); cpSelectShoot(d.path, d.name, d.modified); }, SN);
+        await page.waitForSelector('#cpPanel [data-cp-arch-finish]', { timeout: 8000 }).catch(() => {});
+        const noGo = await page.evaluate(() => !document.querySelector('#cpPanel [data-cp-arch-go]'));
+        page.once('dialog', d => d.accept());
+        await page.evaluate(() => document.querySelector('#cpPanel [data-cp-arch-finish]').click());
+        for (let i = 0; i < 60 && !FILES.has(DST + '/2/c.jpg'); i++) await page.waitForTimeout(100);
+        await page.waitForFunction(() => /Доперенесено в архив/.test(document.getElementById('cbToast').textContent), null, { timeout: 8000 }).catch(() => {});
+        const toast = await page.evaluate(() => document.getElementById('cbToast').textContent);
+        check('разорванная съёмка (часть в архиве, часть в исходниках): на витрине «перенос в архив не закончен», вместо «В архив» — «Доперенести в архив»', badge && noGo);
+        check('«Доперенести»: недоехавшее — в архив, та же копия — в Корзину, разные файлы с одним именем не тронуты и названы',
+          FILES.get(DST + '/1/b.jpg') + '' === 'B1' && FILES.get(DST + '/2/c.jpg') + '' === 'C1' && !FILES.has(SRC + '/1/a.jpg') && TRASHED.includes(SRC + '/1/a.jpg')
+          && FILES.get(DST + '/1/d.jpg') + '' === 'D1' && FILES.get(SRC + '/1/d.jpg') + '' === 'D2' && /Доперенесено в архив: 2, лишних копий в Корзину: 1/.test(toast) && /d\.jpg/.test(toast), toast);
+        FILES.delete(SRC + '/1/d.jpg');
+        page.once('dialog', d => d.accept());
+        await page.evaluate(n => { const d = CP.shoots.find(s => s.name === n); if (d) { cpSelectShoot(d.path, d.name, d.modified); } }, SN);
+        await page.waitForSelector('#cpPanel [data-cp-arch-finish]', { timeout: 8000 }).catch(() => {});
+        await page.evaluate(() => { const b = document.querySelector('#cpPanel [data-cp-arch-finish]'); if (b) b.click(); });
+        for (let i = 0; i < 60 && DIRS.has(SRC); i++) await page.waitForTimeout(100);
+        check('в исходниках не осталось файлов — пустая папка съёмки уходит в Корзину', !DIRS.has(SRC) && TRASHED.includes(SRC), TRASHED.slice(-3).join(', '));
+        for (const k of [...FILES.keys()]) if (k.indexOf(DST + '/') === 0 || k.indexOf(SRC + '/') === 0) FILES.delete(k);
+        for (const d of [...DIRS]) if (d === DST || d.indexOf(DST + '/') === 0 || d === SRC || d.indexOf(SRC + '/') === 0) DIRS.delete(d);
+        await page.evaluate(() => { CP.archShoots = null; return cpLoadShoots(); });
+      }
       if (!(await page.isVisible('#cpArchiveInput'))) await page.click('#cpGear');
     }
     /* разбор кода 09.11, пункт 3: в каталоге нет папки этапа — предупреждение и ничего, без старых путей */
@@ -2058,6 +2093,41 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         FILES.get(K + '/00_АРХИВ/' + AN + '/Готово/02.11.26_Y_1/Y_1/74001_1.jpg') + '' === 's1' && FILES.has(K + '/00_АРХИВ/' + AN + '/Готово/2026-11-10/74001/k1.jpg') && FILES.has(AS + '/Y_1/74001_1.jpg')
         && FILES.has(K + '/00_АРХИВ/' + AN + '/Брак/k9.jpg') && !DIRS.has(AB) && !DIRS.has(AP) && rtWas > 0 && !DIRS.has(K + '/03_РЕТУШЬ/' + AN)
         && TRASHED.includes(AP) && /Готово|готовое/.test(dlg) && /Корзин/.test(dlg), JSON.stringify([FILES.has(K + '/00_АРХИВ/' + AN + '/Готово/02.11.26_Y_1/Y_1/74001_1.jpg'), FILES.has(AS + '/Y_1/74001_1.jpg'), FILES.has(K + '/00_АРХИВ/' + AN + '/Брак/k9.jpg'), DIRS.has(AB), DIRS.has(AP), rtWas, DIRS.has(K + '/03_РЕТУШЬ/' + AN), TRASHED.slice(-4), [...FILES.keys(), ...DIRS].filter(k => /Готово/.test(k))]) + ' ' + dlg.replace(/\n/g, ' / '));
+      /* 2.0.107: перенос в архив оборвался (до 2.0.106) — часть в архиве, часть в исходниках: «Доперенести в архив» */
+      if (!global.__split107) {
+        global.__split107 = true;
+        const SN = '2026-11-05_SV_РАЗОРВАНА', SRC = K + '/01_ИСХОДНИКИ/' + SN, DST = K + '/00_АРХИВ/' + SN;
+        [SRC, SRC + '/1', SRC + '/2', DST, DST + '/1'].forEach(x => DIRS.add(x));
+        FILES.set(DST + '/1/a.jpg', Buffer.from('A1')); FILES.set(SRC + '/1/a.jpg', Buffer.from('A1'));      /* та же копия — лишняя */
+        FILES.set(SRC + '/1/b.jpg', Buffer.from('B1'));                                                       /* не доехал */
+        FILES.set(SRC + '/2/c.jpg', Buffer.from('C1'));                                                       /* папка не доехала */
+        FILES.set(DST + '/1/d.jpg', Buffer.from('D1')); FILES.set(SRC + '/1/d.jpg', Buffer.from('D2'));      /* разные — не трогаем */
+        await page.evaluate(() => cpLoadShoots());
+        await page.waitForFunction(n => !![...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === n && /перенос в архив не закончен/.test(b.textContent)), SN, { timeout: 8000 }).catch(() => {});
+        const badge = await page.evaluate(n => !![...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === n && /перенос в архив не закончен/.test(b.textContent)), SN);
+        await page.evaluate(n => { const d = CP.shoots.find(s => s.name === n); cpSelectShoot(d.path, d.name, d.modified); }, SN);
+        await page.waitForSelector('#cpPanel [data-cp-arch-finish]', { timeout: 8000 }).catch(() => {});
+        const noGo = await page.evaluate(() => !document.querySelector('#cpPanel [data-cp-arch-go]'));
+        page.once('dialog', d => d.accept());
+        await page.evaluate(() => document.querySelector('#cpPanel [data-cp-arch-finish]').click());
+        for (let i = 0; i < 60 && !FILES.has(DST + '/2/c.jpg'); i++) await page.waitForTimeout(100);
+        await page.waitForFunction(() => /Доперенесено в архив/.test(document.getElementById('cbToast').textContent), null, { timeout: 8000 }).catch(() => {});
+        const toast = await page.evaluate(() => document.getElementById('cbToast').textContent);
+        check('разорванная съёмка (часть в архиве, часть в исходниках): на витрине «перенос в архив не закончен», вместо «В архив» — «Доперенести в архив»', badge && noGo);
+        check('«Доперенести»: недоехавшее — в архив, та же копия — в Корзину, разные файлы с одним именем не тронуты и названы',
+          FILES.get(DST + '/1/b.jpg') + '' === 'B1' && FILES.get(DST + '/2/c.jpg') + '' === 'C1' && !FILES.has(SRC + '/1/a.jpg') && TRASHED.includes(SRC + '/1/a.jpg')
+          && FILES.get(DST + '/1/d.jpg') + '' === 'D1' && FILES.get(SRC + '/1/d.jpg') + '' === 'D2' && /Доперенесено в архив: 2, лишних копий в Корзину: 1/.test(toast) && /d\.jpg/.test(toast), toast);
+        FILES.delete(SRC + '/1/d.jpg');
+        page.once('dialog', d => d.accept());
+        await page.evaluate(n => { const d = CP.shoots.find(s => s.name === n); if (d) { cpSelectShoot(d.path, d.name, d.modified); } }, SN);
+        await page.waitForSelector('#cpPanel [data-cp-arch-finish]', { timeout: 8000 }).catch(() => {});
+        await page.evaluate(() => { const b = document.querySelector('#cpPanel [data-cp-arch-finish]'); if (b) b.click(); });
+        for (let i = 0; i < 60 && DIRS.has(SRC); i++) await page.waitForTimeout(100);
+        check('в исходниках не осталось файлов — пустая папка съёмки уходит в Корзину', !DIRS.has(SRC) && TRASHED.includes(SRC), TRASHED.slice(-3).join(', '));
+        for (const k of [...FILES.keys()]) if (k.indexOf(DST + '/') === 0 || k.indexOf(SRC + '/') === 0) FILES.delete(k);
+        for (const d of [...DIRS]) if (d === DST || d.indexOf(DST + '/') === 0 || d === SRC || d.indexOf(SRC + '/') === 0) DIRS.delete(d);
+        await page.evaluate(() => { CP.archShoots = null; return cpLoadShoots(); });
+      }
       if (!(await page.isVisible('#cpArchiveInput'))) await page.click('#cpGear');
     }
     /* несколько папок (Маша, 09.11): соседний каталог находится сам, переключение — в один клик; добавить руками — общий список */
@@ -2084,6 +2154,41 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       check('«+ Добавить папку»: в настройках обеих папок «ещё папки», в переключателе — новая', /ещё папки = disk:\/Отделы\/ПРЕДМЕТКА_ИМИДЖ/.test((FILES.get('disk:/КАТАЛОГ/_ContentPulse/настройки.txt') || '').toString())
         && /ещё папки = disk:\/КАТАЛОГ/.test((FILES.get('disk:/Отделы/ПРЕДМЕТКА_ИМИДЖ/_ContentPulse/настройки.txt') || '').toString())
         && await page.evaluate(() => !!document.querySelector('#cpCats option[value="disk:/Отделы/ПРЕДМЕТКА_ИМИДЖ"]')), (FILES.get('disk:/КАТАЛОГ/_ContentPulse/настройки.txt') || '').toString().slice(-160));
+      /* 2.0.107: перенос в архив оборвался (до 2.0.106) — часть в архиве, часть в исходниках: «Доперенести в архив» */
+      if (!global.__split107) {
+        global.__split107 = true;
+        const SN = '2026-11-05_SV_РАЗОРВАНА', SRC = K + '/01_ИСХОДНИКИ/' + SN, DST = K + '/00_АРХИВ/' + SN;
+        [SRC, SRC + '/1', SRC + '/2', DST, DST + '/1'].forEach(x => DIRS.add(x));
+        FILES.set(DST + '/1/a.jpg', Buffer.from('A1')); FILES.set(SRC + '/1/a.jpg', Buffer.from('A1'));      /* та же копия — лишняя */
+        FILES.set(SRC + '/1/b.jpg', Buffer.from('B1'));                                                       /* не доехал */
+        FILES.set(SRC + '/2/c.jpg', Buffer.from('C1'));                                                       /* папка не доехала */
+        FILES.set(DST + '/1/d.jpg', Buffer.from('D1')); FILES.set(SRC + '/1/d.jpg', Buffer.from('D2'));      /* разные — не трогаем */
+        await page.evaluate(() => cpLoadShoots());
+        await page.waitForFunction(n => !![...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === n && /перенос в архив не закончен/.test(b.textContent)), SN, { timeout: 8000 }).catch(() => {});
+        const badge = await page.evaluate(n => !![...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === n && /перенос в архив не закончен/.test(b.textContent)), SN);
+        await page.evaluate(n => { const d = CP.shoots.find(s => s.name === n); cpSelectShoot(d.path, d.name, d.modified); }, SN);
+        await page.waitForSelector('#cpPanel [data-cp-arch-finish]', { timeout: 8000 }).catch(() => {});
+        const noGo = await page.evaluate(() => !document.querySelector('#cpPanel [data-cp-arch-go]'));
+        page.once('dialog', d => d.accept());
+        await page.evaluate(() => document.querySelector('#cpPanel [data-cp-arch-finish]').click());
+        for (let i = 0; i < 60 && !FILES.has(DST + '/2/c.jpg'); i++) await page.waitForTimeout(100);
+        await page.waitForFunction(() => /Доперенесено в архив/.test(document.getElementById('cbToast').textContent), null, { timeout: 8000 }).catch(() => {});
+        const toast = await page.evaluate(() => document.getElementById('cbToast').textContent);
+        check('разорванная съёмка (часть в архиве, часть в исходниках): на витрине «перенос в архив не закончен», вместо «В архив» — «Доперенести в архив»', badge && noGo);
+        check('«Доперенести»: недоехавшее — в архив, та же копия — в Корзину, разные файлы с одним именем не тронуты и названы',
+          FILES.get(DST + '/1/b.jpg') + '' === 'B1' && FILES.get(DST + '/2/c.jpg') + '' === 'C1' && !FILES.has(SRC + '/1/a.jpg') && TRASHED.includes(SRC + '/1/a.jpg')
+          && FILES.get(DST + '/1/d.jpg') + '' === 'D1' && FILES.get(SRC + '/1/d.jpg') + '' === 'D2' && /Доперенесено в архив: 2, лишних копий в Корзину: 1/.test(toast) && /d\.jpg/.test(toast), toast);
+        FILES.delete(SRC + '/1/d.jpg');
+        page.once('dialog', d => d.accept());
+        await page.evaluate(n => { const d = CP.shoots.find(s => s.name === n); if (d) { cpSelectShoot(d.path, d.name, d.modified); } }, SN);
+        await page.waitForSelector('#cpPanel [data-cp-arch-finish]', { timeout: 8000 }).catch(() => {});
+        await page.evaluate(() => { const b = document.querySelector('#cpPanel [data-cp-arch-finish]'); if (b) b.click(); });
+        for (let i = 0; i < 60 && DIRS.has(SRC); i++) await page.waitForTimeout(100);
+        check('в исходниках не осталось файлов — пустая папка съёмки уходит в Корзину', !DIRS.has(SRC) && TRASHED.includes(SRC), TRASHED.slice(-3).join(', '));
+        for (const k of [...FILES.keys()]) if (k.indexOf(DST + '/') === 0 || k.indexOf(SRC + '/') === 0) FILES.delete(k);
+        for (const d of [...DIRS]) if (d === DST || d.indexOf(DST + '/') === 0 || d === SRC || d.indexOf(SRC + '/') === 0) DIRS.delete(d);
+        await page.evaluate(() => { CP.archShoots = null; return cpLoadShoots(); });
+      }
       if (!(await page.isVisible('#cpArchiveInput'))) await page.click('#cpGear');
     }
     await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-catalog.png') });
