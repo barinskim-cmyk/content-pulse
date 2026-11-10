@@ -273,10 +273,18 @@ function cpArtPhys(d) {
   ['approval', 'retouch', 'review', 'site'].forEach(function (key) {
     if (!(CP.settings && CP.settings[CP_STAGE_SETTING[key]])) return;
     var pres = CP.stagePresence[key] && CP.stagePresence[key][low];
-    if (!pres) return;
+    /* «Сайт» читается за последние 7 дней: что сдано раньше, берём из сводки отбора (отметки программы) */
+    var sum = key === 'site' && typeof cpSumOf === 'function' ? cpSumOf(d) : null;
+    var byMarks = sum && sum.k ? (sum.k[5] || 0) : 0;
+    if (!pres) {
+      if (byMarks) out.push({ key: key, label: cpStageLabel(key), n: byMarks, took: 0, marks: true });
+      return;
+    }
     var c = (CP.stageArts[key] || {})[low];
     var codes = c ? Object.keys(c) : [];
-    out.push({ key: key, label: cpStageLabel(key), n: c ? codes.length : -1, took: c ? codes.filter(function (k) { return c[k]; }).length : 0 });
+    var n = c ? codes.length : -1;
+    if (n >= 0 && byMarks > n) n = byMarks;
+    out.push({ key: key, label: cpStageLabel(key), n: n, took: c ? codes.filter(function (k) { return c[k]; }).length : 0 });
   });
   return out;
 }

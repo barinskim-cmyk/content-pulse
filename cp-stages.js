@@ -205,6 +205,13 @@ var CP_STAGE_DEFAULT = { approval: 'Согласование', retouch: 'Рет�
 function cpFolderBase(path) { return path ? String(path).replace(/\/+$/, '').split('/').pop() : ''; }
 function cpStageLabel(key) { return cpFolderBase(CP.settings && CP.settings[CP_STAGE_SETTING[key]]) || CP_STAGE_DEFAULT[key]; }
 
+/** Папка даты в «Сайте» старше окна опроса (cp-site.js: CP.siteRecentDays, 7 дней). Не дата — не старая. */
+function cpSiteTooOld(name) {
+  if (typeof cpSiteDateName !== 'function' || typeof cpSiteRecentFrom !== 'function') return false;
+  var d = cpSiteDateName(name);
+  return !!d && d < cpSiteRecentFrom();
+}
+
 /** Какие съёмки лежат в папках этапов: по одному обходу на этап (до 3 уровней). */
 function cpScanStages() {
   var s = CP.settings || {}, archive = CP.archive;
@@ -227,7 +234,11 @@ function cpScanStages() {
               (where[bare.toLowerCase()] = where[bare.toLowerCase()] || []).push(x.path);
               info[x.path] = { props: x.custom_properties || {}, modified: x.modified || '' };   /* метки папки (скачано из «Сайта» и т. п.) */
             }
-            else if (x.name.charAt(0) !== '_') next.push(x.path);
+            else if (x.name.charAt(0) !== '_') {
+              /* «Сайт»: в папки дат старше 7 дней не заходим (Маша, 10.11) — сданное раньше видно по отметкам программы */
+              if (key === 'site' && cpSiteTooOld(x.name)) return;
+              next.push(x.path);
+            }
           });
         });
         return level(next, depth + 1);

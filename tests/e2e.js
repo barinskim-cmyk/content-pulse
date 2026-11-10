@@ -2113,6 +2113,46 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       for (const k of [...FILES.keys()]) if (/_ContentPulse\/превью\//.test(k)) FILES.delete(k);
       for (const d of [...DIRS]) if (/_ContentPulse\/превью/.test(d)) DIRS.delete(d);
     }
+    /* «Сайт»: сами читаются только последние 7 дней (Маша, 10.11) */
+    {
+      const sr = await t.evaluate(async () => {
+        const day = (n) => { const d = new Date(Date.now() - n * 864e5), z = (x) => (x < 10 ? '0' : '') + x; return d.getFullYear() + '-' + z(d.getMonth() + 1) + '-' + z(d.getDate()); };
+        const root = 'disk:/К/05_САЙТ', names = [day(0), day(3), day(10), day(40)];
+        const keep = { settings: CP.settings, ld: window.cpListDirs, sd: window.cpSiteScanDate, shoots: CP.shoots, sf: CP.stageFilter, rs: window.cpRenderShoots, ca: window.cpCountStageArts };
+        const out = { scans: [], listed: [] };
+        CP.settings = Object.assign({}, CP.settings || {}, { site: root });
+        CP.stageFilter = '';
+        window.cpRenderShoots = function () { };
+        window.cpCountStageArts = function () { return Promise.resolve(); };
+        window.cpListDirs = function (p) {
+          out.listed.push(p);
+          if (p === root) return Promise.resolve(names.map(n => ({ name: n, path: root + '/' + n, type: 'dir' })));
+          return Promise.resolve([{ name: '2026-11-01_SV_ТЕСТ_САЙТ', path: p + '/2026-11-01_SV_ТЕСТ_САЙТ', type: 'dir' }]);
+        };
+        let pass = [];
+        window.cpSiteScanDate = function (p) { pass.push(p.split('/').pop()); CP.siteScan[p] = { at: Date.now(), files: [], dirs: [], props: {} }; return Promise.resolve(); };
+        CP.siteDates = null; CP.siteScan = {}; CP.siteDatesAt = 0;
+        await cpSiteRefresh(); out.first = pass.slice().sort(); pass = [];
+        Object.keys(CP.siteScan).forEach(k => { CP.siteScan[k].at = Date.now() - 60000; }); CP.siteDatesAt = 0;
+        await cpSiteRefresh(); out.second = pass.slice().sort(); pass = [];
+        CP.siteDatesAt = 0;
+        await cpSiteRefresh(true); out.forced = pass.slice().sort(); pass = [];
+        out.names = names;
+        /* обход папок этапов: в старые даты «Сайта» не заходим */
+        out.listed = [];
+        CP.shoots = CP.shoots || [];
+        await cpScanStages();
+        out.stage = out.listed.filter(p => p.indexOf(root + '/') === 0).map(p => p.split('/').pop()).sort();
+        out.presence = Object.keys((CP.stagePresence || {}).site || {});
+        CP.settings = keep.settings; window.cpListDirs = keep.ld; window.cpSiteScanDate = keep.sd; CP.shoots = keep.shoots; CP.stageFilter = keep.sf; window.cpRenderShoots = keep.rs; window.cpCountStageArts = keep.ca;
+        CP.siteDates = null; CP.siteScan = {}; CP.siteDatesAt = 0; CP.stagePresence = {}; CP.stagePaths = {};
+        return out;
+      });
+      const nm = sr.names;
+      check('«Сайт»: первый раз читаются все даты, дальше сами перечитываются только последние 7 дней', sr.first.length === 4 && sr.second.join() === [nm[0], nm[1]].sort().join(), JSON.stringify([sr.first, sr.second]));
+      check('«Сайт»: «Обновить» перечитывает и старые даты', sr.forced.length === 4, JSON.stringify(sr.forced));
+      check('витрина: при опросе папок этапов в даты «Сайта» старше 7 дней не заходим', sr.stage.join() === [nm[0], nm[1]].sort().join() && sr.presence.length === 1, JSON.stringify([sr.stage, sr.presence]));
+    }
     check('разбор 10.11: страница без ошибок', terr.length === 0, terr.join(' | '));
     await t.close();
   }

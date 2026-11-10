@@ -61,9 +61,16 @@ function cpSiteRefresh(force) {
     }).sort(function (a, b) { var x = a.date || a.name, y = b.date || b.name; return x < y ? 1 : x > y ? -1 : 0; });
     CP.siteDatesAt = Date.now();
     cpSiteRerender();
-    var need = CP.siteDates.slice(0, CP.siteScanMax).filter(function (d) {
-      var sc = CP.siteScan[d.path];
-      return force || !sc || Date.now() - sc.at > 40000;
+    /* Маша, 10.11.2026: «читать 7 дней на витрине». Сами (раз в 40 с) перечитываются только даты
+       за последние CP.siteRecentDays дней — «Сайт» копится навсегда, и опрос рос вместе с ним.
+       Даты старше (до CP.siteScanMax самых свежих) читаются один раз за сессию — чтобы «Не скачано»
+       оставалось верным; перечитать их — «Обновить» или открыть дату. */
+    var from = cpSiteRecentFrom();
+    var need = CP.siteDates.filter(function (d, i) {
+      var sc = CP.siteScan[d.path], recent = !!d.date && d.date >= from;
+      if (force) return recent || i < CP.siteScanMax;
+      if (recent) return !sc || Date.now() - sc.at > 40000;
+      return i < CP.siteScanMax && !sc;
     });
     return cpPool(need, 2, function (d) { return cpSiteScanDate(d.path).then(cpSiteRerender); });
   }).catch(function (e) {
