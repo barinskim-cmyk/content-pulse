@@ -235,7 +235,6 @@ function cpCountStageArts() {
   var fresh = {};
   return cpPool(jobs, 4, function (j) {
     var type = typeof cpShootType === 'function' ? cpShootType(j.name) : null;
-    var re = (type && type.codeRe) || /^(\d{4,7})(?!\d)/;
     var codes = {}, found = false;
     function walk(paths, depth) {
       if (!paths.length || depth > 4) return Promise.resolve();
@@ -247,8 +246,8 @@ function cpCountStageArts() {
             var name = x.name.replace(/^(!|\d{1,2})_(?=\D)/, ''), letter = '';
             var lm = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(name);
             if (lm && letters.indexOf(lm[1]) !== -1) { letter = lm[1]; name = lm[2]; }
-            var m = re.exec(name);
-            if (m) { found = true; codes[m[1]] = codes[m[1]] || letter; }
+            var code = cpArtCode(type, name);   /* папка-дата — не артикул: идём внутрь */
+            if (code) { found = true; codes[code] = codes[code] || letter; }
             else next.push(x.path);
           });
         });

@@ -2310,6 +2310,21 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         return [type.name, n1, App.cards.filter(c => c.cpAuto).length, !!App.photos.find(p => p.name === 'z1.jpg')];
       });
       check('«карточки по артикулам: нет» — сами не собираются; вернули «да» — собрались', off[1] === 2 && off[2] === 3 && off[3], JSON.stringify(off));
+      /* 2.0.94: папка с датой в начале имени — день съёмки, а не артикул «2026» */
+      [AS + '/2026-11-09', AS + '/2026-11-09/brand', AS + '/2026-11-09/brand/81005_e'].forEach(d => DIRS.add(d));
+      FILES.set(AS + '/2026-11-09/loose.jpg', Buffer.from('6'.repeat(106)));
+      FILES.set(AS + '/2026-11-09/brand/81005_e/w1.jpg', Buffer.from('7'.repeat(107)));
+      const dated = await t.evaluate(async () => {
+        const type = cpShootType(CP.shoot.name);
+        await cpSyncPhotos(false);
+        return { titles: App.cards.filter(c => c.cpAuto).map(c => c.title).join(), dir: (App.cards.find(c => c.title === '81005') || {}).cpArticleDir,
+          loose: cpFacets(type, '2026-11-09/loose.jpg').code || '', deep: cpFacets(type, '2026-11-09/brand/81005_e/w1.jpg').code,
+          codes: [cpArtCode(type, '2026-11-09'), cpArtCode(type, '2026.11.09_часть2'), cpArtCode(type, '2026_синий'), cpArtCode(type, '74595_модель'), cpArtCode(type, '1')].join('|'),
+          stage: Object.keys(cpArticleCodes(CP.shoot.path, CP.shoot.name, CP.files)).sort().join() };
+      });
+      check('папка-дата («2026-11-09») не читается как артикул «2026»: карточка по ней не заводится, артикулы внутри неё находятся',
+        dated.titles === '81001,81003,81004,81005' && dated.dir === '2026-11-09/brand/81005_e' && dated.loose === '' && dated.deep === '81005'
+        && dated.codes === '||2026|74595|' && dated.stage === '81001,81002,81003,81004,81005', JSON.stringify(dated));
       await t.waitForFunction(() => !App.dirty && !CP.saving, null, { timeout: 8000 }).catch(() => {});
     }
     check('разбор 10.11: страница без ошибок', terr.length === 0, terr.join(' | '));

@@ -158,6 +158,19 @@ function cpShootType(name) {
   return null;
 }
 
+/* Папка с датой в начале имени («2026-11-06», «2026.11.06_часть2») — день или часть съёмки,
+   а не артикул: без этого «2026» читался как код, и по такой папке сама заводилась карточка
+   товара «2026» со всеми кадрами дня. */
+var CP_DATE_DIR = /^\d{4}[-._]\d{1,2}[-._]\d{1,2}(?!\d)/;
+
+/** Код артикула из названия папки по правилу типа; '' — это не папка артикула. */
+function cpArtCode(type, name) {
+  name = String(name || '');
+  if (CP_DATE_DIR.test(name)) return '';
+  var m = ((type && type.codeRe) || /^(\d{4,7})(?!\d)/).exec(name);
+  return m ? (m[1] || m[0]) : '';
+}
+
 /** Роли папок для пути внутри съёмки 'лук/артикул/кадр.jpg': {лук, бренд, артикул, code}. */
 function cpFacets(type, rel) {
   var out = {};
@@ -168,17 +181,14 @@ function cpFacets(type, rel) {
     out[role] = dirs[i];
     if (role === 'артикул') out.articlePath = dirs.slice(0, i + 1).join('/');
   });
-  if (out['артикул']) {
-    var m = type.codeRe.exec(out['артикул']);
-    out.code = m ? m[1] : '';
-  }
+  if (out['артикул']) out.code = cpArtCode(type, out['артикул']);
   /* Лишний уровень папок (часть, день) сдвигает роли — тогда артикул ищем
      по коду: ближайшая к кадру папка, чьё имя начинается с кода. Папки
      луков («1», «2») под код не подходят. */
   if (!out.code && type.roles.indexOf('артикул') !== -1) {
     for (var i = dirs.length - 1; i >= 0; i--) {
-      var mm = type.codeRe.exec(dirs[i]);
-      if (mm) { out['артикул'] = dirs[i]; out.code = mm[1]; out.articlePath = dirs.slice(0, i + 1).join('/'); break; }
+      var cc = cpArtCode(type, dirs[i]);
+      if (cc) { out['артикул'] = dirs[i]; out.code = cc; out.articlePath = dirs.slice(0, i + 1).join('/'); break; }
     }
   }
   return out;
