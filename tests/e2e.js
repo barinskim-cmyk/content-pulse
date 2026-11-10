@@ -2182,6 +2182,21 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       check('та же папка на витрине — открытая съёмка остаётся', sw.same === true, JSON.stringify(sw));
       check('перешли в другую папку — съёмка из прежней закрыта, «Вернуться к съёмке» убрано', sw.closed === true && /закрыта/.test(sw.toast), JSON.stringify(sw));
     }
+    /* Cardboard: Cmd+Z в поле ввода не откатывает карточки; в русской раскладке отмена работает */
+    {
+      const hk = await t.evaluate(() => {
+        const n0 = App.cards.length;
+        cbAddCardFromTpl(App.templates[0].id);
+        const inp = document.querySelector('#cbCards .cb-title');
+        const ev = (target, key, code) => { const e = new KeyboardEvent('keydown', { key, code, metaKey: true, bubbles: true, cancelable: true }); target.dispatchEvent(e); return e.defaultPrevented; };
+        const p1 = ev(inp, 'z', 'KeyZ'), afterInput = App.cards.length;
+        const p2 = ev(document.body, 'я', 'KeyZ'), afterBody = App.cards.length;
+        App.dirty = false;
+        return { n0, afterInput, afterBody, p1, p2, hasInput: !!inp };
+      });
+      check('Cmd+Z в названии карточки — карточки не откатываются (отмену текста делает браузер)', hk.hasInput && hk.afterInput === hk.n0 + 1 && hk.p1 === false, JSON.stringify(hk));
+      check('Cmd+Z в русской раскладке (Cmd+Я) отменяет правку карточек', hk.afterBody === hk.n0 && hk.p2 === true, JSON.stringify(hk));
+    }
     check('разбор 10.11: страница без ошибок', terr.length === 0, terr.join(' | '));
     await t.close();
   }
