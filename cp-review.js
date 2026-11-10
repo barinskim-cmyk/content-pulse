@@ -784,6 +784,19 @@ function cpStageTagIndex(sel) {
     });
   });
   var rtdl = sel.stage === 'retouch' ? (m.rtdl || {}) : null;
+  /* сдано: у карточки есть загруженная ретушь или она на сайте (отметки отбора), либо папка этого
+     артикула уже лежит в 04 / на сайте (по папкам) — забирать такое из ретуши незачем */
+  var delivered = m.delivered || {}, low = String(sel.name || '').toLowerCase(), doneCodes = {};
+  if (rtdl && typeof cpArtsAhead === 'function' && CP.stageArtsFor === CP.archive) doneCodes = cpArtsAhead(low, 'retouch');
+  var stype = typeof cpShootType === 'function' ? cpShootType(sel.name) : null;
+  var isDone = function (k, cards) {
+    if (cpStageHasRv(sel, cards) || (cards || []).some(function (c) { return delivered[c]; })) return true;
+    for (var i = k.segs.length - 1; i >= 0; i--) {
+      var code = typeof cpArtCode === 'function' ? cpArtCode(stype, k.segs[i]) : '';
+      if (code) return !!doneCodes[code];
+    }
+    return false;
+  };
   var index = function (x, own) {
     x.files.forEach(function (f) {
       var rel = f.path.indexOf(x.root + '/') === 0 ? f.path.slice(x.root.length + 1) : f.name;
@@ -800,6 +813,8 @@ function cpStageTagIndex(sel) {
         if (rec && rec.rid && rid && rec.rid !== rid) rec = null;   /* на этом месте лежит уже другая копия */
         f.cpTook = rec || (k.letter ? { l: k.letter, folder: true } : null);
         if (rec && rec.l) tags[rec.l] = true;
+        f.cpDone = isDone(k, pid ? cardOf[pid] || [] : []);
+        if (f.cpDone && !f.cpTook) f.cpTook = { l: '', done: true };
       }
       if (letters.length && !Object.keys(tags).some(function (t) { return letters.indexOf(t) !== -1; })) tags[CP_NO_RT] = true;
       f.cpTags = Object.keys(tags);
@@ -900,8 +915,8 @@ function cpStageWhoChips(sel, taken) {
     h += '<div class="cp-note cp-warn">Букв ретушёров нет в словаре тегов (группа «[Ретушёры: один]») — скачивание не подписывается буквой.</div>';
   }
   if (taken) {
-    h += '<div class="cp-fchips"><label class="cp-stg-ck" title="Что уже скачали или забрали (буква в имени папки). По умолчанию скрыто, чтобы было видно только то, что ещё можно забрать">'
-      + '<input type="checkbox" data-cp-staken="1"' + (sel.showTaken ? ' checked' : '') + '> показать скачанное <small>' + taken + '</small></label></div>';
+    h += '<div class="cp-fchips"><label class="cp-stg-ck" title="Что уже скачали, забрали (буква в имени папки) или сдали (ретушь уже в отретушированном или на сайте). По умолчанию скрыто, чтобы было видно только то, что ещё можно забрать">'
+      + '<input type="checkbox" data-cp-staken="1"' + (sel.showTaken ? ' checked' : '') + '> показать скачанное и сданное <small>' + taken + '</small></label></div>';
   }
   return h;
 }
@@ -1051,7 +1066,8 @@ function cpStageTree(sel) {
         if (hide) { a.hid = (a.hid || 0) + 1; continue; }
         a.n++; a.bytes += f.size || 0;
         /* запись «скачано» из отбора: кто (буква) и когда — в отметку у папки */
-        if (tk && !tk.folder) {
+        if (f.cpDone) a.done = (a.done || 0) + 1;
+        if (tk && !tk.folder && !tk.done) {
           a.dl = (a.dl || 0) + 1;
           a.dlBy = a.dlBy || {};
           a.dlBy[tk.l || tk.by || '?'] = true;
@@ -1093,7 +1109,7 @@ cpRenderPanel = (function (orig) {
     var body = cpStageWhoChips(sel, t.taken) + cpStageScopeChips(sel) + cpStageChips(sel) + '<div class="cp-fold cp-fold-all"><span class="cp-fold-name">' + cbEsc(label) + ' <small>· файлов ' + t.files + ' · ' + cpMb(t.bytes) + '</small></span></div>';
     var top = t.kids[''] || [];
     if (!top.length) body += '<div class="cp-note">' + (t.files ? 'Вложенных папок нет — файлы лежат прямо в папке съёмки.'
-      : rt && t.taken ? 'Забирать нечего: всё, что здесь лежит, уже скачано. Посмотреть — «показать скачанное» вверху.' : 'Папка пустая.') + '</div>';
+      : rt && t.taken ? 'Забирать нечего: всё, что здесь лежит, уже скачано или сдано. Посмотреть — «показать скачанное и сданное» вверху.' : 'Папка пустая.') + '</div>';
     var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
     if (top.length === 1 && sel.open[top[0]] === undefined) sel.open[top[0]] = true;   /* одна папка — сразу раскрыта */
     var row = function (fp, depth) {
@@ -1108,7 +1124,8 @@ cpRenderPanel = (function (orig) {
           + (a.dl >= a.n ? 'скачано' : 'скачано ' + a.dl + ' из ' + a.n) + ': ' + cbEsc(Object.keys(a.dlBy || {}).join(', '))
           + (a.dlTs ? ' · ' + cbEsc(cpFmtDate(a.dlTs).slice(0, 5)) : '') + '</span>';
       }
-      if (rt && a.hid) marks += '<span class="cp-state" title="В этой папке есть файлы, которые уже скачали, — они скрыты">уже скачано: ' + a.hid + '</span>';
+      if (rt && a.done) marks += '<span class="cp-state cp-state-dl" title="Ретушь по этому артикулу уже сдана (лежит в отретушированном или на сайте)">' + (a.done >= a.n ? 'сдано' : 'сдано ' + a.done + ' из ' + a.n) + '</span>';
+      if (rt && a.hid) marks += '<span class="cp-state" title="В этой папке есть файлы, которые уже скачали или сдали, — они скрыты">уже скачано или сдано: ' + a.hid + '</span>';
       body += '<div class="cp-fold' + (depth ? ' cp-fold-sub' : '') + '" style="padding-left:' + (depth * 18) + 'px"><span>' + cbEsc(nm)
         + ' <small>· ' + a.n + (a.bytes ? ' · ' + cpMb(a.bytes) : '') + '</small></span>'
         + (ch.length ? '<button class="cp-fold-exp" data-cp-exp="' + cbEsc(fp) + '">' + (open ? 'свернуть' : 'папок: ' + ch.length) + '</button>' : '')
@@ -1122,11 +1139,11 @@ cpRenderPanel = (function (orig) {
     panel.setAttribute('data-path', sel.path);
     var hidden = rt && !sel.showTaken ? t.taken : 0;
     var sum = (rt ? (sel.showTaken ? 'Здесь файлов' : 'Можно забрать') : 'Здесь файлов') + ': <b>' + t.files + '</b> · ' + cpMb(t.bytes)
-      + (hidden ? ' · уже скачано (скрыто): ' + hidden : '')
+      + (hidden ? ' · уже скачано или сдано (скрыто): ' + hidden : '')
       + (narrowed || (rt && sel.showTaken && t.taken) ? ' · к скачиванию: <b>' + picked + '</b> · ' + cpMb(pickedBytes) : '');
     /* перед кнопкой «Скачать»: взять и то, что уже скачивали (потерял файлы, забирает другой ретушёр) */
     var again = rt && t.taken ? '<label class="cp-stg-ck cp-stg-again" title="Без галки уже скачанное в архив не попадёт — чтобы не взять в работу второй раз. '
-      + 'С галкой — попадёт; скачали с другой буквой — артикул переходит к ней"><input type="checkbox" data-cp-sagain="1"' + (sel.againTaken ? ' checked' : '') + '> и уже скачанные <small>' + t.taken + '</small></label>' : '';
+      + 'С галкой — попадёт (и сданное тоже); скачали с другой буквой — артикул переходит к ней"><input type="checkbox" data-cp-sagain="1"' + (sel.againTaken ? ' checked' : '') + '> и уже скачанные <small>' + t.taken + '</small></label>' : '';
     var btn = needWho ? 'Отметьте свою букву — без неё не скачать'
       : (sel.scope === 'all' ? 'Скачать файлы съёмки'
         : sel.scope === 'todo' ? 'Скачать без ретуши' : sel.scope === 'both' ? 'Скачать всё: с ретушью и без'

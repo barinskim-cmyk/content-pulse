@@ -1653,7 +1653,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     await page.waitForFunction(() => /Можно забрать: 1/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
     let pan = await page.textContent('#cpPanel');
     check('панель в фильтре 03_РЕТУШЬ: только то, что ещё можно забрать (74002_модель); забранное Y_74001_модель скрыто; не исходники', /в папке 03_РЕТУШЬ/.test(pan)
-      && !/Y_74001_модель/.test(pan) && /74002_модель/.test(pan) && /Можно забрать: 1/.test(pan) && /уже скачано \(скрыто\): 1/.test(pan) && !/k1\.jpg · 1/.test(pan), pan.slice(0, 500));
+      && !/Y_74001_модель/.test(pan) && /74002_модель/.test(pan) && /Можно забрать: 1/.test(pan) && /уже скачано или сдано \(скрыто\): 1/.test(pan) && !/k1\.jpg · 1/.test(pan), pan.slice(0, 500));
     check('из папки ретуши не скачать без буквы ретушёра: кнопка выключена, сверху «Кто скачивает» — буквы из словаря', await page.evaluate(() => {
       const b = document.querySelector('[data-cp-stdl]');
       return b.disabled && /Отметьте свою букву/.test(b.textContent) && [...document.querySelectorAll('#cpPanel [data-cp-swho]')].map(x => x.textContent).join() === 'Y,U'; }), JSON.stringify(await stBtn()));
@@ -1699,7 +1699,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     const z2 = [...ZIPS.entries()].filter(([k]) => !zb2.has(k)).flatMap(([, v]) => v);
     pan = await page.textContent('#cpPanel');
     check('скачала как U остальное — в архиве только 74002_модель/k2.jpg; в списке пусто: «Забирать нечего», скрыто 2', z2.length === 1 && /74002_модель\/k2\.jpg$/.test(z2[0])
-      && /Забирать нечего/.test(pan) && /Можно забрать: 0/.test(pan) && /уже скачано \(скрыто\): 2/.test(pan) && (await stBtn())[1], JSON.stringify(z2) + ' ' + pan.slice(0, 400));
+      && /Забирать нечего/.test(pan) && /Можно забрать: 0/.test(pan) && /уже скачано или сдано \(скрыто\): 2/.test(pan) && (await stBtn())[1], JSON.stringify(z2) + ' ' + pan.slice(0, 400));
     /* копию убрали из папки ретуши и положили заново (тот же путь, другой файл) — она снова не скачана */
     RID_GEN.set(KRT + '/74002_модель/k2.jpg', 1);
     await page.click('[data-cp-p="close"]');
@@ -1708,6 +1708,31 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     pan = await page.textContent('#cpPanel');
     check('файл в папке ретуши заменили новой копией — он снова в списке «можно забрать», буква не запомнена (отметить заново)', /Можно забрать: 1/.test(pan) && /74002_модель/.test(pan)
       && await page.evaluate(() => !document.querySelector('#cpPanel [data-cp-swho].cp-on') && document.querySelector('[data-cp-stdl]').disabled), pan.slice(0, 400));
+    /* 2.0.96: сданное из ретуши отфильтровывается — в строке съёмки, в фильтре и в списке «можно забрать» */
+    const ph = await page.evaluate(() => {
+      const d = CP.shoots.find(s => s.name === '2026-11-06_SV_КАТ'), low = d.name.toLowerCase();
+      window.__keep96 = { arts: JSON.stringify(CP.stageArts), pres: JSON.stringify(CP.stagePresence) };
+      const rt = () => (cpArtPhys(d).find(x => x.key === 'retouch') || { n: 0 });
+      const before = [rt().n, rt().took, cpStagesFor(d).retouch];
+      (CP.stagePresence.site = CP.stagePresence.site || {})[low] = true;
+      (CP.stageArts.site = CP.stageArts.site || {})[low] = { '74002': '' };
+      const one = [rt().n, rt().took, cpStagesFor(d).retouch, (cpArtPhys(d).find(x => x.key === 'site') || {}).n];
+      CP.stageArts.site[low]['74001'] = '';
+      const none = [cpArtPhys(d).some(x => x.key === 'retouch'), cpStagesFor(d).retouch, cpArtsLeft(d, 'retouch')];
+      delete CP.stageArts.site[low]['74001'];
+      return { before, one, none };
+    });
+    check('артикул считается там, куда дошёл дальше всего: в ретуши 2, один сдан — в ретуши 1; сданы оба — ретуши в строке нет, съёмка уходит из фильтра ретуши',
+      JSON.stringify(ph.before) === '[2,1,true]' && JSON.stringify(ph.one) === '[1,1,true,1]' && JSON.stringify(ph.none) === '[false,false,0]', JSON.stringify(ph));
+    await page.click('[data-cp-p="close"]');
+    await page.click('#cpShelfList .cp-shoot[data-name="2026-11-06_SV_КАТ"]');
+    await page.waitForFunction(() => /Забирать нечего/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
+    pan = await page.textContent('#cpPanel');
+    check('папка ретуши: сданный артикул (74002) в списке «можно забрать» не показывается', /Забирать нечего/.test(pan) && /Можно забрать: 0/.test(pan) && /уже скачано или сдано \(скрыто\): 2/.test(pan) && !/74002_модель/.test(pan), pan.slice(0, 400));
+    await page.check('#cpPanel [data-cp-staken]');
+    check('«показать скачанное и сданное» — сданный артикул виден с отметкой «сдано»', await page.evaluate(() =>
+      [...document.querySelectorAll('#cpPanel .cp-fold')].some(r => /74002_модель/.test(r.textContent) && /сдано/.test(r.textContent))), (await page.textContent('#cpPanel')).slice(0, 500));
+    await page.evaluate(() => { CP.stageArts = JSON.parse(window.__keep96.arts); CP.stagePresence = JSON.parse(window.__keep96.pres); cpRenderShoots(); });
     RID_GEN.delete(KRT + '/74002_модель/k2.jpg');
     FILES.delete(KSTATE); PROPS.delete(K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ');
     await page.click('[data-cp-p="close"]');

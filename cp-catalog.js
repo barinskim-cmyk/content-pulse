@@ -265,11 +265,36 @@ function cpCountStageArts() {
   });
 }
 
+/* Артикул считается там, куда он дошёл дальше всего (Маша, 10.11.2026: «в ретуши 18, сдано 11 —
+   эти 11 должны отфильтроваться из ретуши: в ретуши сейчас 7, которые не разобрали»). Папка
+   артикула в 03 лежит, пока артикул не уйдёт на сайт, поэтому сданное в 04 считалось дважды. */
+var CP_PHYS_ORDER = ['approval', 'retouch', 'review', 'site'];
+
+/** Коды артикулов съёмки, которые лежат на этапах дальше этого: {код: true}. */
+function cpArtsAhead(low, key) {
+  var ahead = {};
+  CP_PHYS_ORDER.slice(CP_PHYS_ORDER.indexOf(key) + 1).forEach(function (k2) {
+    if (!(CP.stagePresence[k2] && CP.stagePresence[k2][low])) return;
+    var c2 = (CP.stageArts[k2] || {})[low];
+    if (c2) Object.keys(c2).forEach(function (code) { ahead[code] = true; });
+  });
+  return ahead;
+}
+
+/** Сколько артикулов съёмки лежит в папке этапа и дальше ещё не ушло; -1 — неизвестно (нет папок артикулов или ещё не считали). */
+function cpArtsLeft(d, key) {
+  if (!cpCatalog() || CP.stageArtsFor !== CP.archive) return -1;
+  var low = d.name.toLowerCase(), c = (CP.stageArts[key] || {})[low];
+  if (!c) return -1;
+  var ahead = cpArtsAhead(low, key);
+  return Object.keys(c).filter(function (code) { return !ahead[code]; }).length;
+}
+
 /** Где лежат артикулы съёмки: [{key, label, n (-1 — есть, но без папок артикулов), took}] или null. */
 function cpArtPhys(d) {
   if (!cpCatalog() || CP.stageArtsFor !== CP.archive) return null;
   var low = d.name.toLowerCase(), out = [];
-  ['approval', 'retouch', 'review', 'site'].forEach(function (key) {
+  CP_PHYS_ORDER.forEach(function (key) {
     if (!(CP.settings && CP.settings[CP_STAGE_SETTING[key]])) return;
     var pres = CP.stagePresence[key] && CP.stagePresence[key][low];
     /* «Сайт» читается за последние 7 дней: что сдано раньше, берём из сводки отбора (отметки программы) */
@@ -280,9 +305,11 @@ function cpArtPhys(d) {
       return;
     }
     var c = (CP.stageArts[key] || {})[low];
-    var codes = c ? Object.keys(c) : [];
+    var ahead = c ? cpArtsAhead(low, key) : {};
+    var codes = c ? Object.keys(c).filter(function (k) { return !ahead[k]; }) : [];
     var n = c ? codes.length : -1;
     if (n >= 0 && byMarks > n) n = byMarks;
+    if (n === 0) return;   /* всё, что лежит в папке этапа, уже ушло дальше */
     out.push({ key: key, label: cpStageLabel(key), n: n, took: c ? codes.filter(function (k) { return c[k]; }).length : 0 });
   });
   return out;
@@ -323,6 +350,8 @@ cpStagesFor = (function (orig) {
     Object.keys(CP_STAGE_SETTING).forEach(function (key) {
       st[key] = !!(CP.settings && CP.settings[CP_STAGE_SETTING[key]] && CP.stagePresence[key] && CP.stagePresence[key][low]);
     });
+    /* в ретуши не осталось несданного (всё уже в 04 или на сайте) — в фильтре ретуши съёмке делать нечего */
+    if (st.retouch && cpArtsLeft(d, 'retouch') === 0) st.retouch = false;
     return st;
   };
 })(cpStagesFor);
