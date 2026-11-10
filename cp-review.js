@@ -371,11 +371,11 @@ cpRvRework = function (id) {
     last.status = 'rework'; last.rby = cpActor(); last.rts = new Date().toISOString(); last.note = note.trim();
     cpRvReworkDone(card, id, last);
   }, function (e) {
-    /* папка не переименовалась — решение записываем, переименование — в очередь */
-    last.status = 'rework'; last.rby = cpActor(); last.rts = new Date().toISOString(); last.note = note.trim();
+    /* папка не переименовалась — переименование в очередь; статус «на доработке» появится,
+       когда папка на Диске получит приписку (Маша, 10.11: сначала перенос, потом статус) */
     CPQ.add(CP.shoot, { kind: 'move', label: 'На доработку: ' + (card ? card.title || 'карточка' : id), items: [{ from: from, path: to }],
-      after: { type: 'rv-rework', id: id, from: from, to: to }, err: (e && e.message) || '' });
-    cpRvReworkDone(card, id, last);
+      after: { type: 'rv-rework', id: id, from: from, to: to, note: note.trim(), by: cpActor(), card: card ? card.title || '' : '' }, err: (e && e.message) || '' });
+    cbToast('Папка не переименовалась сразу — повторяю; «на доработке» появится, когда она получит приписку на Диске (плашка сверху)');
   }).catch(function (e) {
     cpHandleError(e, 'На доработку');
   });
@@ -388,11 +388,18 @@ function cpRvReworkDone(card, id, last) {
     return cpOutputAppend([cpOutputRow(last, CP.shoot.name, card, 'доработка' + (last.note ? ': ' + last.note : ''))]);
 }
 
-CPQ.after['rv-rework'] = function (op, m) {
+CPQ.after['rv-rework'] = function (op, m, shoot) {
   var a = op.after, last = cpLastRv((m.rv || {})[a.id]);
   if (!last) return;
   (last.files || []).forEach(function (f) { if (f.path.indexOf(a.from + '/') === 0) f.path = a.to + f.path.slice(a.from.length); });
   last.dir = a.to;
+  /* папка переименована — теперь и статус (в старых записях очереди решение уже записано) */
+  if (last.status !== 'rework') {
+    var now = new Date().toISOString();
+    last.status = 'rework'; last.rby = a.by || cpActor(); last.rts = now; last.note = a.note || '';
+    (m.events = m.events || []).push({ ts: now, action: 'rt_rework', actor: last.rby, items: [], card: a.card || a.id, note: last.note });
+    cpOutputAppend([cpOutputRow(last, shoot.name, { title: a.card || a.id }, 'доработка' + (last.note ? ': ' + last.note : ''))]);
+  }
 };
 
 /* на карточке: «Согласовать ретушь» → «На сайт» (в каталоге с папкой отретушированного) */
@@ -483,6 +490,94 @@ function cpApprovalSync() {
     _cpApBusy = false;
     cbBusyHide();
     cpHandleError(e, 'Копия на согласование');
+  });
+}
+
+/**
+ * На согласование (Маша, 10.11.2026): сначала копия в 02, потом статус — «статус появляется на
+ * основании того, что что-то наличествует на Диске в нужном месте». groups: [{cardId, pids}].
+ * Что не скопировалось сразу, уходит в очередь и получает статус, когда доедет (CPQ.after.st).
+ */
+function cpApprovalSend(groups, opts) {
+  opts = opts || {};
+  var root = cpApproveRoot();
+  if (!root || !CP.shoot || CP.readOnly) return;
+  var shoot = { path: CP.shoot.path, name: CP.shoot.name }, shootPath = shoot.path.replace(/\/+$/, '');
+  var base = root.replace(/\/+$/, '') + '/' + CPDisk.safeName(shoot.name);
+  var who = cpActor(), m = cpMeta(), going = cpGoingFrom('approval');
+  var items = [], seen = {}, cardOf = {}, already = [], wait = 0;
+  groups.forEach(function (g) {
+    var card = g.cardId ? cbCardById(g.cardId) : null;
+    (g.pids || []).forEach(function (pid) {
+      var p = cbPhotoById(pid);
+      if (!p || !p.disk || p.missing || (p.kind || 'photo') === 'ref' || seen[pid]) return;
+      seen[pid] = true;
+      cardOf[pid] = g.cardId || null;
+      /* копия уже в 02 и статус стоит — второй раз не копируем */
+      if (m.status[pid] && m.status[pid].s === 'approval' && (m.ap2 || {})[pid]) { already.push(pid); return; }
+      if (going[p.disk]) { wait++; return; }
+      items.push({ pid: pid, from: p.disk, path: base + '/' + cpRetouchRel(p, card, shootPath) });
+    });
+  });
+  var label = cpFolderBase(root);
+  /* статус — кадрам, чья копия на месте, и карточкам, у которых такие кадры есть */
+  var mark = function (okItems) {
+    var mm = cpMeta(), ts = new Date().toISOString(), okPid = {};
+    mm.ap2 = mm.ap2 || {};
+    okItems.forEach(function (x) {
+      mm.status[x.pid] = { s: 'approval', by: who, ts: ts, card: cardOf[x.pid] || undefined };
+      mm.ap2[x.pid] = x.path;
+      okPid[x.pid] = true;
+    });
+    already.forEach(function (pid) { okPid[pid] = true; });
+    var nCards = 0;
+    groups.forEach(function (g) {
+      if (!g.cardId || !(g.pids || []).some(function (pid) { return okPid[pid]; })) return;
+      var cs = mm.cardStatus[g.cardId];
+      if (!(cs && cs.s === 'approval')) { mm.cardStatus[g.cardId] = { s: 'approval', by: who, ts: ts }; nCards++; }
+    });
+    return nCards;
+  };
+  var names = function (list) { return cpPhotoNames(list.map(function (x) { return x.pid; })); };
+  var cardNames = groups.map(function (g) { var c = g.cardId ? cbCardById(g.cardId) : null; return c ? c.title || c.category || 'карточка' : ''; }).filter(Boolean).join(', ');
+  var after = function (list) {
+    var a = { type: 'st', s: 'approval', by: who, map: {}, cards: {}, ap2: {} };
+    list.forEach(function (x) { a.map[x.from] = x.pid; if (cardOf[x.pid]) a.cards[x.pid] = cardOf[x.pid]; a.ap2[x.pid] = x.path; });
+    return a;
+  };
+  var queue = function (list, err) {
+    CPQ.add(shoot, { kind: 'copy', label: 'На согласование: ' + list.length + ' кадр(ов)', items: list.map(function (x) { return { from: x.from, path: x.path }; }), dirs: [base], after: after(list), err: err || '' });
+  };
+  var done = function (okItems, queued) {
+    var same = CP.shoot && CP.shoot.path === shoot.path;
+    if (!same) return;
+    var nCards = mark(okItems);
+    if (okItems.length || nCards) {
+      cpEvent(opts.event || 'to_approval', names(okItems), { card: cardNames || undefined, folder: CPDisk.showPath(base), note: opts.note || undefined });
+      if (typeof cpReviewPresentStage === 'function') cpReviewPresentStage('approval', shoot.name, base);
+    }
+    cpAfterStatus();
+    if (typeof cbRenderOutline === 'function') cbRenderOutline();
+    if (opts.quiet) return;
+    if (!okItems.length && !queued && !nCards) { cbToast(already.length || wait ? 'Уже на согласовании' + (wait ? ' (часть ещё копируется)' : '') : 'На согласование не отправлено: этих кадров нет на Диске'); return; }
+    cbToast('На согласование в ' + label + ': ' + okItems.length + ' кадр(ов)' + (already.length ? ', уже были ' + already.length : '')
+      + (queued ? '. Не скопировалось сразу: ' + queued + ' — копирую повторно, статус появится, когда файлы будут на месте' : ''));
+  };
+  if (!items.length) { done([], 0); return; }
+  _cpApBusy = true;
+  cpCopyOnDisk(items.map(function (x) { return { from: x.from, path: x.path }; }), [base], 'Копирую на согласование').then(function (r) {
+    cbBusyHide();
+    _cpApBusy = false;
+    var bad = {};
+    (r.failedFrom || []).forEach(function (f) { bad[f] = true; });
+    var left = items.filter(function (x) { return bad[x.from]; });
+    if (left.length) queue(left, r.failed && r.failed[0]);
+    done(items.filter(function (x) { return !bad[x.from]; }), left.length);
+  }, function (e) {
+    cbBusyHide();
+    _cpApBusy = false;
+    queue(items, (e && e.message) || '');
+    done([], items.length);
   });
 }
 

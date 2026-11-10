@@ -711,6 +711,8 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
   await page.check('#cpBrak input[value="style"]');
   await page.fill('#cpBrakNote', 'фон серый');
   await page.click('#cpBrak [data-cp-brak-go]');
+  /* Маша, 10.11: сначала копия в брак, потом статус */
+  await page.waitForFunction(() => { var c = App.cards.find(x => x.title === '74595'), m = cpMeta(); return m.cardStatus[c.id] && m.cardStatus[c.id].s === 'reshoot'; }, null, { timeout: 8000 }).catch(() => {});
   check('«В брак» на карточке — пересъём для карточки и её кадров', await page.evaluate(() => {
     var c = App.cards.find(x => x.title === '74595'), m = cpMeta();
     return m.cardStatus[c.id].s === 'reshoot' && cpCardPids(c).every(pid => m.status[pid].s === 'reshoot') && !!document.querySelector('#cbCards .cp-badge.cp-reshoot');
@@ -782,11 +784,16 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
   FAIL_COPY = /manekin2/;
   await page.evaluate(() => { var c = App.cards.find(x => x.title === '74596'); c.pids.push(App.photos.find(p => /manekin2/.test(p.disk)).id); cpDoAction('retouch', cpCardPids(c), c.id); });
   await page.waitForFunction(() => /На ретушь: 1/.test((document.getElementById('cpQueue') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
-  check('не скопировалось на ретушь — очередь: плашка «Переношу на Диске», статус остаётся, «докопировать» не нужно', await page.evaluate(() => {
+  check('не скопировалось на ретушь — очередь: плашка «Переношу на Диске», статуса у кадра ещё нет (сначала файл, потом статус), «докопировать» не нужно', await page.evaluate(() => {
     var p = App.photos.find(x => /manekin2/.test(x.disk));
-    return document.getElementById('cpQueue').classList.contains('cp-on') && cpMeta().status[p.id].s === 'retouch' && !document.getElementById('cpRetouchMissing')
+    return document.getElementById('cpQueue').classList.contains('cp-on') && !cpMeta().status[p.id] && !document.getElementById('cpRetouchMissing')
       && Object.keys(cpMeta().q || {}).length === 1;
   }), await page.textContent('#cpQueue').catch(() => ''));
+  check('пока кадр едет — повторное «На ретушь» второй раз его не ставит в очередь', await page.evaluate(async () => {
+    var c = App.cards.find(x => x.title === '74596'); cpDoAction('retouch', cpCardPids(c), c.id);
+    await new Promise(r => setTimeout(r, 200));
+    return Object.keys(CPQ.ops).length === 1 && /Уже копируется|Уже на ретуши/.test(document.getElementById('cbToast').textContent);
+  }), await page.textContent('#cbToast').catch(() => ''));
   await page.waitForFunction(() => document.getElementById('cpQueue').classList.contains('cp-alarm'), null, { timeout: 8000 }).catch(() => {});
   check('3 неудачи подряд — красная плашка «Перенос не проходит», повторы идут', await page.evaluate(() => document.getElementById('cpQueue').classList.contains('cp-alarm')
     && /Перенос не проходит/.test(document.getElementById('cpQueue').textContent) && Object.values(CPQ.ops)[0].op.tries >= 3));
@@ -796,6 +803,11 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
   await page.waitForFunction(() => !App.dirty, null, { timeout: 8000 }).catch(() => {});
   check('Диск ожил — очередь докопировала сама, плашка ушла, в журнале «с N-й попытки»', FILES.has(RT + '1/74596_модель/manekin2.jpg') && await page.evaluate(() => !cpqCount()
     && !Object.keys(cpMeta().q || {}).length && cpMeta().events.some(e => e.action === 'queue_done' && /попытки/.test(e.note || ''))));
+  check('файл доехал — кадр и карточка получили статус «на ретуши» (статус после переноса)', await page.evaluate(() => {
+    var p = App.photos.find(x => /manekin2/.test(x.disk)), c = App.cards.find(x => x.title === '74596'), m = cpMeta();
+    return !!m.status[p.id] && m.status[p.id].s === 'retouch' && m.status[p.id].card === c.id && !!m.cardStatus[c.id] && m.cardStatus[c.id].s === 'retouch'
+      && m.events.some(e => e.action === 'to_retouch' && /файлы на месте/.test(e.note || ''));
+  }));
   check('всё перенесено и сохранено — страницу можно закрыть', await page.evaluate(() => { var e = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(e); return !e.defaultPrevented; }));
   /* сверка: копию в папке ретуши удалили — «Сверить папку ретуши» кладёт заново, остальное не трогает */
   FILES.delete(RT + '1/74595_модель/manekin.jpg');
@@ -920,13 +932,39 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     await page.evaluate(id => cpDoAction('', [id], null), ph.id);
     for (let i = 0; i < 60 && FILES.has(ap2); i++) await page.waitForTimeout(100);
     check('сняли статус — копия из 02 в Корзине', !FILES.has(ap2) && TRASHED.includes(ap2), JSON.stringify(TRASHED.slice(-3)));
+    /* Маша, 10.11: статус — только после того, как файл оказался на месте. Копия в 02 не проходит —
+       статуса «на согласовании» нет; Диск ожил — очередь докопировала, статус появился. */
+    await page.evaluate(() => { CPQ.delays = [150, 150, 150, 150]; });
+    FAIL_COPY = /02_ОТБОР|ОТБОР\//;
     await page.evaluate(id => cpDoAction('approval', [id], null), ph.id);
+    await page.waitForFunction(() => cpqCount() === 1, null, { timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(250);
+    check('копия на согласование не прошла — статуса нет, перенос в очереди', !FILES.has(ap2) && await page.evaluate(id => !cpMeta().status[id] && !(cpMeta().ap2 || {})[id] && cpqCount() === 1, ph.id),
+      JSON.stringify(await page.evaluate(id => [cpMeta().status[id] || null, cpqCount()], ph.id)));
+    FAIL_COPY = null;
     for (let i = 0; i < 60 && !FILES.has(ap2); i++) await page.waitForTimeout(100);
-    await page.waitForFunction(id => (cpMeta().ap2 || {})[id], ph.id, { timeout: 5000 }).catch(() => {});
+    await page.waitForFunction(id => (cpMeta().ap2 || {})[id] && cpMeta().status[id] && cpMeta().status[id].s === 'approval' && !cpqCount(), ph.id, { timeout: 8000 }).catch(() => {});
+    check('копия доехала в 02 — статус «на согласовании» появился, путь копии запомнен', FILES.has(ap2) && await page.evaluate(id => cpMeta().status[id] && cpMeta().status[id].s === 'approval' && !!cpMeta().ap2[id] && !cpqCount(), ph.id));
     await page.evaluate(id => cpDoAction('retouch', [id], null), ph.id);
     const rt3 = 'disk:/Архив/РЕТУШЬ/' + SN + '/' + ph.rel;
     for (let i = 0; i < 60 && (FILES.has(ap2) || !FILES.has(rt3)); i++) await page.waitForTimeout(100);
     check('с согласования на ретушь: из 02 — в Корзину, в 03 — копия (перенос)', !FILES.has(ap2) && FILES.has(rt3), JSON.stringify([FILES.has(ap2), FILES.has(rt3)]));
+    /* брак: копия в «брак» не проходит — кадр остаётся со своим статусом; доехала — «брак», копия из 03 в Корзину */
+    {
+      await page.waitForFunction(id => cpMeta().status[id] && cpMeta().status[id].s === 'retouch', ph.id, { timeout: 5000 }).catch(() => {});
+      FAIL_COPY = /\/брак\//;
+      await page.evaluate(id => { CP.brakAuto = { kind: 'photo', note: 'тест очереди брака' }; cpDoAction('reshoot', [id], null); CP.brakAuto = null; }, ph.id);
+      await page.waitForFunction(() => cpqCount() === 1, null, { timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(250);
+      const mid = await page.evaluate(id => [cpMeta().status[id] ? cpMeta().status[id].s : '', cpqCount(), !!(cpMeta().brak || {})[id]], ph.id);
+      check('копия в брак не прошла — статус прежний, брака нет, перенос в очереди', mid[0] === 'retouch' && mid[1] === 1 && !mid[2], JSON.stringify(mid));
+      FAIL_COPY = null;
+      await page.waitForFunction(id => cpMeta().status[id] && cpMeta().status[id].s === 'reshoot' && !cpqCount(), ph.id, { timeout: 8000 }).catch(() => {});
+      const fin = await page.evaluate(id => { var st = cpMeta().status[id] || {}; return [st.s, st.kind, st.note, (cpMeta().brak || {})[id] || '']; }, ph.id);
+      check('копия в браке — кадр получил «брак» с видом и комментарием, путь копии запомнен', fin[0] === 'reshoot' && fin[1] === 'photo' && fin[2] === 'тест очереди брака' && FILES.has(fin[3]), JSON.stringify(fin));
+      await page.evaluate(id => { if (cpMeta().brak) delete cpMeta().brak[id]; }, ph.id);
+      FILES.delete(fin[3]);
+    }
     await page.evaluate(id => { delete CP.settings.approve; cpSetStatus([id], null, null); cbMarkDirty(); }, ph.id);
     FILES.delete(rt3); FILES.delete(NEWF);
     await page.evaluate(() => cpSyncPhotos(false));
@@ -1147,14 +1185,17 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
   check('пачкой «В брак» — одно окно на всю пачку', /карточек 2/.test(await page.textContent('#cpBrak h3').catch(() => '')));
   await page.check('#cpBrak input[value="photo"]');
   await page.click('#cpBrak [data-cp-brak-go]');
+  await page.waitForFunction(x => { var m = cpMeta(); return m.cardStatus[x[0]] && m.cardStatus[x[0]].s === 'reshoot' && m.cardStatus[x[1]] && m.status[x[2]] && m.status[x[2]].s === 'reshoot'; }, bt, { timeout: 8000 }).catch(() => {});
   check('пачкой «В брак»: обе карточки и их кадры', await page.evaluate(x => { var m = cpMeta(); return m.cardStatus[x[0]].s === 'reshoot' && m.cardStatus[x[1]].s === 'reshoot' && m.status[x[2]].s === 'reshoot'; }, bt));
   await page.click('[data-cp-batch="approval"]');
+  await page.waitForFunction(x => { var m = cpMeta(); return m.cardStatus[x[0]] && m.cardStatus[x[0]].s === 'approval' && m.status[x[2]] && m.status[x[2]].s === 'approval'; }, bt, { timeout: 8000 }).catch(() => {});
   check('пачкой «На согласование»', await page.evaluate(x => { var m = cpMeta(); return m.cardStatus[x[0]].s === 'approval' && m.status[x[2]].s === 'approval'; }, bt));
   await page.click('[data-cp-batch=""]');
   check('пачкой «Снять статус»', await page.evaluate(x => { var m = cpMeta(); return !m.cardStatus[x[0]] && !m.cardStatus[x[1]] && !m.status[x[2]]; }, bt));
   await page.click('[data-cp-batch="retouch"]');
-  await page.waitForFunction(x => cpMeta().status[x[2]] && cpMeta().status[x[2]].s === 'retouch' && cpMeta().events.some(e => e.action === 'to_retouch' && /74596, 74598/.test(e.card || '')), bt, { timeout: 8000 }).catch(() => {});
-  check('пачкой «На ретушь»: статусы и одна запись в журнале с копированием', await page.evaluate(x => cpMeta().cardStatus[x[0]].s === 'retouch' && cpMeta().events.some(e => e.action === 'to_retouch' && /74596, 74598/.test(e.card || '') && e.folder), bt));
+  await page.waitForFunction(x => cpMeta().status[x[2]] && cpMeta().status[x[2]].s === 'retouch' && cpMeta().events.some(e => e.action === 'to_retouch' && /74596/.test(e.card || '') && e.folder), bt, { timeout: 8000 }).catch(() => {});
+  check('пачкой «На ретушь»: статусы и одна запись в журнале с копированием', await page.evaluate(x => cpMeta().cardStatus[x[0]].s === 'retouch' && cpMeta().events.some(e => e.action === 'to_retouch' && /74596/.test(e.card || '') && e.folder), bt));
+  check('пачкой «На ретушь»: пустая карточка (файлов на Диске нет) статус не получает — статус только там, где есть файлы', await page.evaluate(x => !cpMeta().cardStatus[x[1]], bt));
   /* повторно «На ретушь» в том же составе — не отправляется и не перезаписывается */
   {
     const before = await page.evaluate(x => [cpMeta().status[x[2]].ts, cpMeta().events.filter(e => e.action === 'to_retouch').length], bt);
@@ -1313,7 +1354,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     return ev.includes('changed_after_download') && ev.includes('removed_after_download') && ev.includes('added_to_retouch_card');
   }));
   /* убрали из карточки — статус, полученный от неё, снимается; брак остаётся; в другой карточке на ретуши — ретушь */
-  const gs = await page.evaluate(() => {
+  const gs = await page.evaluate(async () => {
     var tpl = App.templates[0];
     cbAddCardFromTpl(tpl.id); var A = App.cards[App.cards.length - 1];
     cbAddCardFromTpl(tpl.id); var B = App.cards[App.cards.length - 1];
@@ -1323,12 +1364,15 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     put(A, [b.id, c.id]); cbMarkDirty(); cbRenderCards();
     cpDoAction('approval', [b.id], A.id);
     CP.brakAuto = { kind: 'photo', note: '' }; cpDoAction('reshoot', [c.id], A.id); CP.brakAuto = null;
+    /* статус — после копии: ждём, пока оба появятся */
+    for (var w = 0; w < 80 && !(cpMeta().status[b.id] && cpMeta().status[c.id] && cpMeta().status[c.id].s === 'reshoot'); w++) await new Promise(r => setTimeout(r, 100));
     var before = [cpMeta().status[b.id] && cpMeta().status[b.id].s, cpMeta().status[c.id] && cpMeta().status[c.id].s];
     take(A, b.id); take(A, c.id); cbMarkDirty(); cbRenderCards();
     var after = [cpMeta().status[b.id] ? cpMeta().status[b.id].s : '', cpMeta().status[c.id] ? cpMeta().status[c.id].s : ''];
     /* кадр на согласовании в карточке A переносим в карточку B, которая на ретуши */
     put(A, [b.id]); cbMarkDirty(); cbRenderCards();
     cpDoAction('approval', [b.id], A.id);
+    for (var w2 = 0; w2 < 80 && !(cpMeta().status[b.id] && cpMeta().status[b.id].s === 'approval'); w2++) await new Promise(r => setTimeout(r, 100));
     cpSetStatus([], 'retouch', B.id); cbMarkDirty(); cbRenderCards();
     take(A, b.id); put(B, [b.id]); cbMarkDirty(); cbRenderCards();
     return { before, after, A: A.id, B: B.id, b: b.id };
@@ -1519,7 +1563,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       && /rt=1/.test((PROPS.get('disk:/Архив/2026-11-05_ЖДЁТ_РЕТУШИ') || {}).cp_sum || ''), JSON.stringify([...PROPS.entries()]));
     const shownFor = async key => { await page.click('[data-cp-stage="' + key + '"]'); return page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-shoot')].map(b => b.dataset.name)); };
     const rt = await shownFor('retouch');
-    check('фильтр папки ретуши: съёмки, у которых папка лежит в РЕТУШЬ; без папки на Диске — нет', rt.includes('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST') && rt.includes('LM-1043') && !rt.includes('2026-11-05_ЖДЁТ_РЕТУШИ'), rt.join(' | '));
+    check('фильтр папки ретуши: съёмки, у которых папка лежит в РЕТУШЬ; без папки на Диске — нет', rt.includes('LM-1043') && !rt.includes('2026-11-05_ЖДЁТ_РЕТУШИ'), rt.join(' | '));
     check('фильтр ретуши: полностью сданная съёмка скрыта, хотя папка в ретуши лежит; недоделанная — видна', !rt.includes('2026-11-04_СДАНА') && rt.includes('2026-11-03_ЗАБРАЛИ'), rt.join(' | '));
     const ap = await shownFor('approval');
     check('фильтр «Согласование»', ap.includes('2026-11-05_ЖДЁТ_СОГЛАСОВАНИЯ') && !ap.includes('2026-11-05_ЖДЁТ_РЕТУШИ'), ap.join(' | '));

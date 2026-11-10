@@ -169,52 +169,77 @@ function cpBatchStatus(status) {
   if (!cards.length) return;
   if ((status === 'retouch' || status === 'approval') && typeof cpCatStageMissing === 'function'
     && cpCatStageMissing(status === 'retouch' ? 'retouch' : 'approve')) return;
-  var all = [], names = [], same = [];
   var m = cpMeta();
-  cards.forEach(function (c) {
-    var pids = cpCardPids(c).filter(function (pid) { var p = cbPhotoById(pid); return p && (p.kind || 'photo') !== 'ref'; });
-    if (status === 'retouch') {
-      /* уже на ретуши в этом же составе — повторно не отправляем и не перезаписываем;
-         добавили кадры после отправки — уходят только они */
-      var cst = m.cardStatus[c.id];
-      var fresh = pids.filter(function (pid) { return !(m.status[pid] && m.status[pid].s === 'retouch'); });
-      if (cst && cst.s === 'retouch' && !fresh.length) { same.push(c.title || 'карточка'); return; }
-      if (!(cst && cst.s === 'retouch')) cpSetStatus([], 'retouch', c.id);
-      cpSetStatus(fresh, 'retouch', c.id);
-      pids = fresh;
-    } else cpSetStatus(pids, status, c.id);
-    pids.forEach(function (pid) { if (all.indexOf(pid) === -1) all.push(pid); });
-    names.push(c.title || c.category || 'карточка');
-  });
-  if (status === 'retouch' && !names.length) {
-    cbToast('Уже на ретуши в этом составе — повторно не отправляю: ' + same.join(', '));
+  var pidsOf = function (c) { return cpCardPids(c).filter(function (pid) { var p = cbPhotoById(pid); return p && (p.kind || 'photo') !== 'ref'; }); };
+  /* согласование в каталоге: копия в 02 -> статус (cp-review.js) */
+  if (status === 'approval' && typeof cpApprovalSend === 'function' && cpApproveRoot()) {
+    cpApprovalSend(cards.map(function (c) { return { cardId: c.id, pids: pidsOf(c) }; }), { batch: cards.length });
     return;
   }
-  var extra = { card: names.join(', ') };
-  if (same.length) extra.note = 'уже были на ретуши в этом составе, не отправлялись: ' + same.join(', ');
   if (status !== 'retouch') {
-    cpEvent(status ? 'to_' + status : 'clear_status', cpPhotoNames(all), extra);
+    var all0 = [], names0 = [];
+    cards.forEach(function (c) {
+      var pids = pidsOf(c);
+      cpSetStatus(pids, status, c.id);
+      pids.forEach(function (pid) { if (all0.indexOf(pid) === -1) all0.push(pid); });
+      names0.push(c.title || c.category || 'карточка');
+    });
+    cpEvent(status ? 'to_' + status : 'clear_status', cpPhotoNames(all0), { card: names0.join(', ') });
     cpAfterStatus();
     cbRenderOutline();
-    cbToast((status ? CP_STATUS[status].label : 'Статус снят') + ': карточек ' + cards.length + ', кадров ' + all.length);
+    cbToast((status ? CP_STATUS[status].label : 'Статус снят') + ': карточек ' + cards.length + ', кадров ' + all0.length);
     return;
   }
-  if (!all.length) { cpEvent('to_retouch', [], extra); cpAfterStatus(); cbRenderOutline(); return; }
-  cpRetouchCopy(all, null, 'Копирую на ретушь: карточек ' + names.length).then(function (r) {
-    extra.folder = CPDisk.showPath(r.folder);
-    extra.copied = r.done;
-    if (r.exists) extra.existed = r.exists;
-    if (r.failed.length) extra.failed = r.failed;
-    cpEvent('to_retouch', cpPhotoNames(all), extra);
+  /* Ретушь (Маша, 10.11.2026): сначала копии в папку ретуши, статус — кадрам и карточкам, чьи
+     файлы на месте. Уже на ретуши в этом же составе — повторно не отправляем; добавили кадры
+     после отправки — уходят только они. */
+  var plan = [], same = [], names = [], going = cpGoingFrom('retouch'), all = [], cardOf = {};
+  cards.forEach(function (c) {
+    var pids = pidsOf(c), cst = m.cardStatus[c.id];
+    var notYet = pids.filter(function (pid) { return !(m.status[pid] && m.status[pid].s === 'retouch'); });
+    var fresh = notYet.filter(function (pid) { var p = cbPhotoById(pid); return !(p && p.disk && going[p.disk]); });
+    if (!notYet.length) {
+      if (cst && cst.s === 'retouch') { same.push(c.title || 'карточка'); return; }
+      /* все кадры карточки уже на ретуши (отправляли по одному) — файлы на месте, карточка тоже на ретуши */
+      if (pids.length) { cpSetStatus([], 'retouch', c.id); names.push(c.title || c.category || 'карточка'); }
+      return;
+    }
+    if (!fresh.length) return;   /* уже едут в очереди */
+    plan.push({ card: c, pids: fresh });
+    fresh.forEach(function (pid) { if (all.indexOf(pid) === -1) { all.push(pid); cardOf[pid] = c.id; } });
+  });
+  var extra = {};
+  if (same.length) extra.note = 'уже были на ретуши в этом составе, не отправлялись: ' + same.join(', ');
+  if (!all.length) {
+    if (names.length) { extra.card = names.join(', '); cpEvent('to_retouch', [], extra); cpAfterStatus(); cbRenderOutline(); cbToast('На ретушь: карточек ' + names.length + ' — кадры уже были в папке ретуши'); return; }
+    cbToast(same.length ? 'Уже на ретуши в этом составе — повторно не отправляю: ' + same.join(', ') : 'Уже копируется на ретушь — статус появится, когда файлы будут на месте');
+    return;
+  }
+  cpRetouchCopy(all, null, 'Копирую на ретушь: карточек ' + plan.length, { s: 'retouch', by: cpActor(), cards: cardOf }).then(function (r) {
+    var okSet = {}, okAll = [];
+    (r.okPids || []).forEach(function (pid) { okSet[pid] = true; });
+    plan.forEach(function (pl) {
+      var okp = pl.pids.filter(function (pid) { return okSet[pid]; });
+      if (!okp.length) return;
+      cpRetouchMark(okp, pl.card.id);
+      okp.forEach(function (pid) { if (okAll.indexOf(pid) === -1) okAll.push(pid); });
+      names.push(pl.card.title || pl.card.category || 'карточка');
+    });
+    if (names.length) {
+      extra.card = names.join(', ');
+      extra.folder = CPDisk.showPath(r.folder);
+      extra.copied = r.done;
+      if (r.exists) extra.existed = r.exists;
+      cpEvent('to_retouch', cpPhotoNames(okAll), extra);
+    }
     cpAfterStatus();
     cbRenderOutline();
     cbToast('На ретушь: карточек ' + names.length + (same.length ? ' (уже были на ретуши: ' + same.length + ')' : '') + ', скопировано ' + r.done + (r.exists ? ', уже было ' + r.exists : '')
-      + (r.failed.length ? ', не скопировано ' + r.failed.length + ' — см. строку съёмки' : ''));
+      + (r.queued ? '. Не скопировалось сразу: ' + r.queued + ' — копирую повторно, статус появится, когда файлы будут на месте' : ''));
   }).catch(function (e) {
-    cpEvent('to_retouch', cpPhotoNames(all), { card: extra.card, note: 'статус поставлен, копирование не удалось: ' + e.message });
     cpAfterStatus();
     cbRenderOutline();
-    cpHandleError(e, 'Копирование на ретушь не удалось (статус поставлен, «докопировать» — в строке съёмки)');
+    cpHandleError(e, 'Копирование на ретушь не удалось — статус не поставлен');
   });
 }
 

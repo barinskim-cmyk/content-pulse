@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.86';
+var CP_VERSION = '2.0.87';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1242,37 +1242,60 @@ function cpDoAction(status, pids, cardId) {
     cpAfterStatus();
     return;
   }
-  if (status === 'retouch') {
-    /* уже на ретуши — повторно не отправляем и не перезаписываем (Маша, 06.11.2026) */
-    var m0 = cpMeta();
-    var fresh = pids.filter(function (pid) { return !(m0.status[pid] && m0.status[pid].s === 'retouch'); });
-    if (!fresh.length) { cbToast('Уже на ретуши — повторно не отправляю'); return; }
-    if (cardId && m0.cardStatus[cardId] && m0.cardStatus[cardId].s === 'retouch') { cpSetStatus(fresh, 'retouch', null); fresh.forEach(function (pid) { m0.status[pid].card = cardId; }); }
-    else cpSetStatus(fresh, status, cardId);
-    if (cardId && !(m0.cardStatus[cardId])) cpSetStatus([], 'retouch', cardId);
-    pids = fresh;
-  } else cpSetStatus(pids, status, cardId);
+  /* Маша, 10.11.2026: «сначала перенести файлы и только после их переноса присвоить статус —
+     статус появляется на основании того, что что-то наличествует на Диске в нужном месте».
+     Ретушь и согласование (в каталоге с папкой 02): копия -> проверка -> статус. Что не
+     скопировалось сразу, уходит в очередь (cp-queue.js) и получает статус, когда доедет. */
+  if (status === 'approval' && typeof cpApprovalSend === 'function' && cpApproveRoot()) {
+    cpApprovalSend([{ cardId: cardId || null, pids: pids }]);
+    return;
+  }
   if (status !== 'retouch') {
+    cpSetStatus(pids, status, cardId);
     cpEvent('to_' + status, cpPhotoNames(pids), extra);
     cpAfterStatus();
     cbToast(CP_STATUS[status].label + ': ' + pids.length + ' кадр(ов)');
     return;
   }
-  /* ретушь: копии в папку ретуши — см. cpRetouchCopy */
-  cpRetouchCopy(pids, card, 'Копирую на ретушь').then(function (r) {
-    extra.folder = CPDisk.showPath(r.folder);
-    extra.copied = r.done;
-    if (r.exists) extra.existed = r.exists;
-    if (r.failed.length) extra.failed = r.failed;
-    cpEvent('to_retouch', cpPhotoNames(pids), extra);
+  /* уже на ретуши — повторно не отправляем и не перезаписываем (Маша, 06.11.2026) */
+  var m0 = cpMeta();
+  var fresh = pids.filter(function (pid) { return !(m0.status[pid] && m0.status[pid].s === 'retouch'); });
+  if (!fresh.length) { cbToast('Уже на ретуши — повторно не отправляю'); return; }
+  var going = cpGoingFrom('retouch');
+  fresh = fresh.filter(function (pid) { var p = cbPhotoById(pid); return !(p && p.disk && going[p.disk]); });
+  if (!fresh.length) { cbToast('Уже копируется на ретушь — статус появится, когда файлы будут на месте'); return; }
+  cpRetouchCopy(fresh, card, 'Копирую на ретушь', { s: 'retouch', card: cardId || null, by: cpActor() }).then(function (r) {
+    var ok = r.okPids || [];
+    if (ok.length) {
+      cpRetouchMark(ok, cardId);
+      extra.folder = CPDisk.showPath(r.folder);
+      extra.copied = r.done;
+      if (r.exists) extra.existed = r.exists;
+      cpEvent('to_retouch', cpPhotoNames(ok), extra);
+    }
     cpAfterStatus();
+    if (!ok.length && !r.queued) { cbToast('На ретушь не отправлено: этих кадров нет на Диске'); return; }
     cbToast('На ретушь: ' + r.done + ' скопировано' + (r.exists ? ', уже было ' + r.exists : '')
-      + (r.queued ? '. Не скопировалось сразу: ' + r.queued + ' — копирую повторно, не закрывайте страницу' : '') + ' → ' + extra.folder);
+      + (r.queued ? '. Не скопировалось сразу: ' + r.queued + ' — копирую повторно, статус появится, когда файлы будут на месте; не закрывайте страницу' : '') + ' → ' + CPDisk.showPath(r.folder));
   }).catch(function (e) {
-    cpEvent('to_retouch', cpPhotoNames(pids), { note: 'статус поставлен, копирование не удалось: ' + e.message });
     cpAfterStatus();
-    cpHandleError(e, 'Копирование на ретушь не удалось (статус поставлен, «докопировать» — в строке съёмки)');
+    cpHandleError(e, 'Копирование на ретушь не удалось — статус не поставлен');
   });
+}
+
+/** Что уже едет в очереди за статусом s: {путь исходника: true}. */
+function cpGoingFrom(s) {
+  if (typeof CPQ === 'undefined') return {};
+  return CPQ.pendingFrom(function (op) { return op.after && op.after.type === 'st' && op.after.s === s; });
+}
+
+/** Статус «на ретуши» кадрам, чьи копии уже в папке ретуши, и их карточке. */
+function cpRetouchMark(pids, cardId) {
+  var m0 = cpMeta();
+  if (cardId && m0.cardStatus[cardId] && m0.cardStatus[cardId].s === 'retouch') {
+    cpSetStatus(pids, 'retouch', null);
+    pids.forEach(function (pid) { m0.status[pid].card = cardId; });
+  } else cpSetStatus(pids, 'retouch', cardId);
 }
 
 /* ---------- копии на ретушь ----------
@@ -1295,11 +1318,25 @@ function cpRetouchRel(p, card, shootPath) {
   return rel.indexOf(d + '/') === 0 ? rel : d + '/' + p.name;
 }
 
-function cpRetouchCopy(pids, card, label) {
+/* after — {s, by, card | cards: {кадр: карточка}}: статус, который кадры получат, когда копия подтвердится.
+   В ответе okPids — кадры, чья копия уже на месте (скопирована сейчас или была); остальные — в очереди. */
+function cpRetouchCopy(pids, card, label, after) {
   var files = pids.map(function (pid) { return cbPhotoById(pid); }).filter(function (p) { return p && p.disk && !p.missing; });
   var shootPath = CP.shoot.path, shootName = CP.shoot.name;
   var ready = typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : Promise.resolve();
   var folder = '', byFrom = {}, items = null;
+  /* что записать в отбор, когда копии из очереди доедут: статус этим кадрам (CPQ.after.st) */
+  var afterFor = function (list) {
+    if (!after) return undefined;
+    var a = { type: 'st', s: after.s, by: after.by || cpActor(), map: {} };
+    if (after.card) a.card = after.card;
+    list.forEach(function (it) {
+      var pid = byFrom[it.from];
+      a.map[it.from] = pid;
+      if (after.cards && after.cards[pid]) (a.cards = a.cards || {})[pid] = after.cards[pid];
+    });
+    return a;
+  };
   cbBusyShow(label + ': ' + files.length + ' кадр(ов)...', 0.2);
   return ready.then(function () {
     folder = cpRetouchBase(shootPath, shootName);
@@ -1330,8 +1367,11 @@ function cpRetouchCopy(pids, card, label) {
     if (r.failed.length && window.console) console.error('[CP] retouch copy failed', r.failed);
     /* не скопированное — в очередь: переносим, пока не перенесём (cp-queue.js) */
     var left = (r.failedFrom || []).map(function (f) { return items.filter(function (it) { return it.from === f; })[0]; }).filter(Boolean);
+    var bad = {};
+    (r.failedFrom || []).forEach(function (f) { bad[f] = true; });
+    r.okPids = files.filter(function (p) { return !bad[p.disk]; }).map(function (p) { return p.id; });
     if (left.length && typeof CPQ !== 'undefined') {
-      CPQ.add({ path: shootPath, name: shootName }, { kind: 'copy', label: 'На ретушь: ' + left.length + ' кадр(ов)', items: left, dirs: [folder] });
+      CPQ.add({ path: shootPath, name: shootName }, { kind: 'copy', label: 'На ретушь: ' + left.length + ' кадр(ов)', items: left, dirs: [folder], after: afterFor(left) });
       r.queued = left.length;
       /* за ними следит очередь — «докопировать» в строке съёмки не нужно */
       left.forEach(function (it) { if (CP.retouchMissing) delete CP.retouchMissing[byFrom[it.from]]; });
@@ -1341,8 +1381,8 @@ function cpRetouchCopy(pids, card, label) {
   }, function (e) {
     cbBusyHide();
     if (items && items.length && typeof CPQ !== 'undefined') {
-      CPQ.add({ path: shootPath, name: shootName }, { kind: 'copy', label: 'На ретушь: ' + items.length + ' кадр(ов)', items: items, dirs: [folder], err: (e && e.message) || '' });
-      return { done: 0, exists: 0, failed: [], folder: folder, queued: items.length };
+      CPQ.add({ path: shootPath, name: shootName }, { kind: 'copy', label: 'На ретушь: ' + items.length + ' кадр(ов)', items: items, dirs: [folder], err: (e && e.message) || '', after: afterFor(items) });
+      return { done: 0, exists: 0, failed: [], folder: folder, queued: items.length, okPids: [] };
     }
     if (CP.shoot && CP.shoot.path === shootPath) {
       var miss = CP.retouchMissing = CP.retouchMissing || {};
@@ -1403,6 +1443,8 @@ function cpCopyOnDisk(items, dirs, label) {
 function cpAfterStatus() {
   cbRenderTray(); cbRenderCards(); cbRenderConts();
   cpUpdateStatusLine();
+  /* статус появляется после копии — кнопки в просмотре крупно обновляем тогда же */
+  if (CP.lb && typeof cpLbShow === 'function') cpLbShow();
 }
 
 function cpUpdateStatusLine() {

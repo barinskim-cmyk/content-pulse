@@ -78,7 +78,7 @@ function cpGuardCheck() {
   if (!prev || CP.snapShoot !== CP.shoot.path || CP.guardMute) { CP.snapShoot = CP.shoot.path; return; }
   var m = cpMeta();
   var actor = cpActor(), ts = new Date().toISOString();
-  var changed = false, warnCards = [], removedDl = [], unretouched = [], inherit = [], removals = [], additions = [];
+  var changed = false, warnCards = [], removedDl = [], unretouched = [], inherit = [], inheritAp = [], removals = [], additions = [];
   var ids = {};
   Object.keys(prev).forEach(function (k) { ids[k] = true; });
   Object.keys(now).forEach(function (k) { ids[k] = true; });
@@ -125,9 +125,13 @@ function cpGuardCheck() {
     });
     if (!fresh.length) return;
     if (x.s === 'approval') {
-      fresh.forEach(function (pid) { m.status[pid] = { s: 'approval', by: actor, ts: ts, card: x.card.id }; });
-      cpEvent('added_to_approval_card', cpPhotoNames(fresh), { card: x.card.title }, true);
-      changed = true;
+      /* в каталоге с папкой согласования: копия в 02 -> статус (cp-review.js); без неё — отметка сразу */
+      if (typeof cpApprovalSend === 'function' && cpApproveRoot()) inheritAp.push({ card: x.card, pids: fresh });
+      else {
+        fresh.forEach(function (pid) { m.status[pid] = { s: 'approval', by: actor, ts: ts, card: x.card.id }; });
+        cpEvent('added_to_approval_card', cpPhotoNames(fresh), { card: x.card.title }, true);
+        changed = true;
+      }
     } else inherit.push({ card: x.card, pids: fresh });
   });
   if (warnCards.length) {
@@ -140,8 +144,11 @@ function cpGuardCheck() {
   if (removedDl.length) cpEvent('removed_after_download', cpPhotoNames(removedDl), {}, true);
   if (unretouched.length) cpEvent('clear_status', cpPhotoNames(unretouched), { note: 'убраны из карточки — статус снят' }, true);
   if (changed) cbMarkDirty();
+  inheritAp.forEach(function (x) {
+    cpApprovalSend([{ cardId: x.card.id, pids: x.pids }], { event: 'added_to_approval_card', quiet: true });
+  });
   inherit.forEach(function (x) {
-    /* статус, копия в папку ретуши и запись в журнал — как при отправке */
+    /* копия в папку ретуши, потом статус и запись в журнал — как при отправке */
     cpDoAction('retouch', x.pids, x.card.id);
     cpEvent('added_to_retouch_card', cpPhotoNames(x.pids), { card: x.card.title }, true);
   });

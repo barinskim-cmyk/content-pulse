@@ -94,14 +94,39 @@ CPQ.adopt = function () {
 };
 
 /** Пути, которые уже стоят в очереди на копирование (чтобы не ставить второй раз). */
-CPQ.pendingFrom = function () {
+CPQ.pendingFrom = function (filter) {
   var set = {};
   Object.keys(CPQ.ops).forEach(function (id) {
     var op = CPQ.ops[id].op;
+    if (filter && !filter(op)) return;
     (op.items || []).forEach(function (it) { set[it.from] = true; });
   });
   return set;
 };
+
+/* Статус после переноса (Маша, 10.11.2026): копии доехали — кадры получают статус, ради которого
+   их копировали (ретушь, согласование), карточки — тоже. after = {type:'st', s, by, map:{исходник: кадр},
+   card | cards:{кадр: карточка}, ap2:{кадр: путь копии в 02}}. Брак, поставленный за это время, не перетираем. */
+CPQ.after.st = function (op, m) {
+  var a = op.after, now = new Date().toISOString(), n = 0, cards = {};
+  m.status = m.status || {}; m.cardStatus = m.cardStatus || {};
+  Object.keys(a.map || {}).forEach(function (from) {
+    var pid = a.map[from], cur = m.status[pid];
+    var cid = (a.cards && a.cards[pid]) || a.card || null;
+    if (cur && cur.s === 'reshoot') return;
+    m.status[pid] = { s: a.s, by: a.by || cpActor(), ts: now, card: cid || undefined };
+    if (a.ap2 && a.ap2[pid]) { m.ap2 = m.ap2 || {}; m.ap2[pid] = a.ap2[pid]; }
+    if (cid) cards[cid] = true;
+    n++;
+  });
+  Object.keys(cards).forEach(function (cid) {
+    var cs = m.cardStatus[cid];
+    if (cs && (cs.s === a.s || cs.s === 'reshoot')) return;
+    m.cardStatus[cid] = { s: a.s, by: a.by || cpActor(), ts: now };
+  });
+  if (n) (m.events = m.events || []).push({ ts: now, action: 'to_' + a.s, actor: a.by || cpActor(), items: [], note: 'файлы на месте — статус поставлен: кадров ' + n });
+};
+CPQ.redraw.st = true;
 
 function cpqKick(delay) {
   clearTimeout(CPQ.timer);
