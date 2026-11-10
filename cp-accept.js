@@ -690,7 +690,7 @@ document.getElementById('cbOutline').addEventListener('click', function (e) {
     + '.cp-acc-row button.cp-sug{border-style:dashed;border-color:#C9956B}'
     + '.cp-acc-who{font-size:12px;color:#cfcac2}.cp-acc-who b{color:#e7c9a8}.cp-acc-who.cp-acc-warn{color:#f2b8a0}'
     + '.cp-acc-found{font-size:13px;color:#cfcac2;line-height:1.6}.cp-acc-found b{color:#f2f2f1}'
-    + '.cp-acc-shoots{display:flex;flex-direction:column;gap:6px;margin-top:8px}.cp-acc-shoots button{text-align:left;padding:8px 10px}.cp-acc-shoots small{color:#a3a09a;margin-left:6px}'
+    + '.cp-acc-shoots{display:flex;flex-direction:column;gap:6px;margin-top:8px}.cp-acc-shoots button{text-align:left;padding:8px 10px;white-space:normal;overflow-wrap:anywhere;line-height:1.5}.cp-acc-shoots small{color:#a3a09a;margin-left:6px}'
     + '.cp-acc-list{display:flex;flex-direction:column;gap:4px;font-size:13px}.cp-acc-list small{color:#a3a09a}'
     + '.cp-acc-warn{color:#f2b8a0;font-size:12px}.cp-acc-done{color:#9fc2a3}'
     + '.cp-rvbarw{display:flex;gap:12px;align-items:center;margin:0 0 12px}'

@@ -2109,6 +2109,16 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       await page.waitForFunction(() => /не доехало до Диска: 1/.test(document.getElementById('cpShelfList').textContent), null, { timeout: 5000 }).catch(() => {});
       check('файл не доехал до Диска — запись «в пути» остаётся, у съёмки на витрине «не доехало: 1» с именем файла', FILES.has(MAN2) && /не доехало до Диска: 1.*lost\.jpg/.test(await page.textContent('#cpShelfList')),
         JSON.stringify([FILES.has(MAN2), (await page.textContent('#cpShelfList')).slice(0, 300)]));
+      /* 2.0.101: длинное имя файла не вылезает за край плитки съёмки — строка переносится, «убрать отметку» внутри плитки */
+      const fit = await page.evaluate(() => {
+        const el = document.querySelector('#cpShelfList .cp-transit-lost'), row = el.closest('.cp-shoot'), a = el.querySelector('[data-cp-transit-clear]');
+        const names = Array.from({ length: 3 }, (x, k) => 'ОченьДлинноеИмяФайлаКотороеНеВлезаетВОднуСтроку_' + k + '.jpg').join(', ');
+        el.firstChild.textContent = 'не доехало до Диска: 3 — загрузите ещё раз: ' + names;
+        const r = row.getBoundingClientRect(), e = el.getBoundingClientRect(), l = a.getBoundingClientRect();
+        return { in: e.right <= r.right + 1 && l.right <= r.right + 1 && l.bottom <= r.bottom + 1, lines: Math.round(e.height / parseFloat(getComputedStyle(el).lineHeight)), ws: getComputedStyle(el).whiteSpace };
+      });
+      check('строка «не доехало до Диска» с длинными именами переносится и не вылезает за плитку съёмки, «убрать отметку» — внутри плитки', fit.in && fit.lines >= 2 && fit.ws === 'normal', JSON.stringify(fit));
+      await page.evaluate(() => cpRenderShoots());
       page.once('dialog', d => d.accept());
       await page.evaluate(() => document.querySelector('[data-cp-transit-clear]').click());
       for (let i = 0; i < 30 && FILES.has(MAN2); i++) await page.waitForTimeout(100);

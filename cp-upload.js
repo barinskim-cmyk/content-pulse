@@ -619,7 +619,7 @@ cpRenderShoots = (function (orig) {
       if (t.done + lost.length < t.n) row.insertAdjacentHTML('beforeend', '<div class="cp-transit">едет на Диск: ' + t.done + ' из ' + t.n + '</div>');
       if (lost.length) {
         row.insertAdjacentHTML('beforeend', '<div class="cp-transit cp-transit-lost" title="' + cbEsc(lost.join(', ')) + '">не доехало до Диска: ' + lost.length
-          + ' — загрузите ещё раз: ' + cbEsc(lost.slice(0, 4).join(', ')) + (lost.length > 4 ? '…' : '')
+          + ' — загрузите ещё раз: ' + cbEsc(lost.slice(0, 3).join(', ')) + (lost.length > 3 ? ' и ещё ' + (lost.length - 3) : '')
           + ' <a href="#" data-cp-transit-clear="' + cbEsc((t.src || []).join('|')) + '">убрать отметку</a></div>');
       }
     });
@@ -701,6 +701,9 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
     + '.cp-src-drop.cp-over{border-color:#C9956B;color:#e7c9a8;background:#1d1a17}'
     + '.cp-su-group{border:1px solid #2f2f2c;border-radius:4px;padding:8px 10px;margin:6px 0;font-size:13px;display:flex;flex-direction:column;gap:4px}'
     + '.cp-su-new{color:#9fc2a3}.cp-su-part{color:#e7c9a8}.cp-su-counts{color:#cfcac2;font-size:12px}'
-    + '.cp-transit{margin-top:6px;font-size:12px;color:#e7c9a8}';
+    /* строка внутри плитки съёмки переносится: длинное имя файла вылезало за край плитки, и
+       «убрать отметку» оказывалась за её пределами (скриншот Маши 10.11.2026) */
+    + '.cp-transit{margin-top:6px;font-size:12px;color:#e7c9a8;white-space:normal;overflow-wrap:anywhere;line-height:1.5}'
+    + '.cp-shoot{min-width:0}.cp-shoot > div{max-width:100%}';
   document.head.appendChild(st);
 })();
