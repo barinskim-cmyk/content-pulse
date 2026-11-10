@@ -666,12 +666,12 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
   check('тип съёмки по названию виден на панели', (await page.textContent('#cpPanel .cp-panel-head small')).includes('Модельная'));
   await page.dblclick('.cp-shoot');
   await page.waitForFunction(() => CP.shoot && /МОДЕЛЬ/.test(CP.shoot.name) && App.photos.length === 3 && !document.getElementById('cpShelf').classList.contains('cp-open'), null, { timeout: 10000 });
-  /* карточки товара по папкам артикулов — по кнопке, пустая папка — пустая карточка */
-  await page.waitForTimeout(600);
-  check('карточки товара сами не появляются — есть кнопка «Собрать карточки по папкам»', await page.evaluate(() =>
-    App.cards.filter(c => c.cpAuto).length === 0 && !!document.querySelector('#cbCards .cp-collect')));
-  await page.click('#cbCards .cp-collect');
-  await page.waitForFunction(() => App.cards.filter(c => c.cpAuto).length === 3, null, { timeout: 8000 });
+  /* карточки товара по папкам артикулов собираются сами (2.0.93), пустая папка — пустая карточка */
+  await page.waitForFunction(() => App.cards.filter(c => c.cpAuto).length === 3, null, { timeout: 8000 }).catch(() => {});
+  check('карточки товара собираются сами при открытии съёмки, кнопки «Собрать карточки» больше нет', await page.evaluate(() =>
+    App.cards.filter(c => c.cpAuto).length === 3 && !document.querySelector('#cbCards .cp-collect')
+    && !/Собрать карточки/.test(document.getElementById('cbCards').textContent)),
+    JSON.stringify(await page.evaluate(() => App.cards.map(c => [c.title, !!c.cpAuto]))));
   await page.evaluate(() => { document.querySelector('#cbCards .cb-card[data-cid="' + App.cards.find(c => c.title === '74595').id + '"]').click(); });
   await page.waitForTimeout(300);
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-collect.png') });
@@ -698,8 +698,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     cbMarkDirty(); cbRenderCards();
   });
   await page.evaluate(() => cpSyncPhotos(false));
-  await page.click('#cbCards .cp-collect');
-  check('повторная сборка: дублей нет, убранный руками кадр не возвращается', await page.evaluate(() =>
+  check('«Обновить съёмку» — повторная сборка: дублей нет, убранный руками кадр не возвращается', await page.evaluate(() =>
     App.cards.filter(c => c.cpAuto).length === 3 && App.cards.find(x => x.title === '74596').pids.length === 0));
   /* галерея следует за карточкой: только её лук; галочка «по карточке» — выключить */
   await page.evaluate(() => { document.querySelector('#cbCards .cb-card[data-cid="' + App.cards.find(c => c.title === '74598').id + '"]').click(); });
@@ -2223,6 +2222,95 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         return { idle, busy, after: fire() };
       });
       check('пока идёт загрузка (окно прогресса) — закрыть страницу молча нельзя; закончилась — можно', bu.idle === false && bu.busy === true && bu.after === false, JSON.stringify(bu));
+    }
+    /* ---------- 2.0.93: карточки товара собираются сами, без кнопки ---------- */
+    {
+      const AS = 'disk:/Архив/2026-11-10_SV_ОПТИКА_AUTO';
+      [AS, AS + '/brand', AS + '/brand/81001_a', AS + '/brand/81002_b'].forEach(d => DIRS.add(d));
+      FILES.set(AS + '/brand/81001_a/x1.jpg', Buffer.from('1'.repeat(101)));
+      FILES.set(AS + '/brand/81001_a/x2.jpg', Buffer.from('2'.repeat(102)));
+      const autoCards = () => t.evaluate(() => App.cards.filter(c => c.cpAuto).map(c => [c.title, cpCardPids(c).map(pid => cbPhotoById(pid).name).join('+')]));
+      await t.evaluate(p => cpOpenShoot(p, '2026-11-10_SV_ОПТИКА_AUTO'), AS);
+      await t.waitForFunction(p => CP.shoot && CP.shoot.path === p && !document.getElementById('cpShelf').classList.contains('cp-open') && App.cards.length === 2, AS, { timeout: 10000 }).catch(() => {});
+      check('новая съёмка: карточки по папкам артикулов появились сами, пустая папка — пустая карточка',
+        JSON.stringify(await autoCards()) === JSON.stringify([['81001', 'x1.jpg+x2.jpg'], ['81002', '']]), JSON.stringify(await autoCards()));
+      check('в журнале — запись «карточки собраны по папкам артикулов», не от имени человека-нажавшего', await t.evaluate(() =>
+        cpMeta().events.some(e => e.action === 'auto_cards' && /новых карточек: 2, добавлено кадров: 2/.test(e.note)) && !!CP_ACTION_LABEL.auto_cards
+        && !cpMeta().events.some(e => e.action === 'collect_cards')));
+      await t.waitForFunction(() => !App.dirty && !CP.saving, null, { timeout: 8000 }).catch(() => {});
+      const savedA = JSON.parse((FILES.get(AS + '/_contentpulse.json') || Buffer.from('{}')).toString());
+      check('собранные карточки сами записались в отбор на Диск', (savedA.cards || []).length === 2 && !!(savedA.meta && savedA.meta.cp.artSeen && savedA.meta.cp.artSeen['brand/81001_a']),
+        JSON.stringify((savedA.cards || []).map(c => c.title)));
+      /* двое открыли новую съёмку одновременно: у обоих карточка папки получает один номер — при склейке дублей нет */
+      const two = await t.evaluate(() => {
+        const mine = cbProjectData();
+        const theirs = JSON.parse(JSON.stringify(mine));
+        const map = {};
+        theirs.photos.forEach(p => { map[p.id] = p.id + 'Z'; p.id = map[p.id]; });   /* у коллеги кадры завелись под своими номерами */
+        theirs.cards.forEach(c => { c.pids = (c.pids || []).map(x => map[x] || x); c.cpAutoSeen = (c.cpAutoSeen || []).map(x => map[x] || x); });
+        const m = cpMerge3(null, mine, theirs);
+        const c1 = m.cards.filter(c => c.cpArticleDir === 'brand/81001_a');
+        const ids = {}; m.photos.forEach(p => { ids[p.id] = true; });
+        const card = App.cards.find(c => c.cpArticleDir === 'brand/81001_a');
+        return { cards: m.cards.length, c1: c1.length, pids: c1[0] ? c1[0].pids.length : -1, known: c1[0] ? c1[0].pids.every(x => ids[x]) : false, photos: m.photos.length,
+          det: card.id === cpArtCardId('brand/81001_a') && card.id.indexOf(CP.idTag) === -1 };
+      });
+      check('двое собрали одну съёмку одновременно: после склейки карточек столько же, кадры не задвоились',
+        two.cards === 2 && two.c1 === 1 && two.pids === 2 && two.known && two.photos === 2 && two.det, JSON.stringify(two));
+      /* убрали кадр руками и удалили карточку — сборка их не возвращает */
+      await t.evaluate(async () => {
+        const c = App.cards.find(x => x.title === '81001');
+        c.pids = c.pids.filter(pid => cbPhotoById(pid).name !== 'x2.jpg');
+        App.cards = App.cards.filter(x => x.title !== '81002');
+        cbMarkDirty(); cbRenderCards();
+        await cpSyncPhotos(false);
+      });
+      check('удалённая карточка товара и убранный руками кадр сами не возвращаются',
+        JSON.stringify(await autoCards()) === JSON.stringify([['81001', 'x1.jpg']]), JSON.stringify(await autoCards()));
+      /* карточка уже на ретуши и из неё скачивали; в её папку приехал новый файл, рядом — новая папка артикула */
+      DIRS.add(AS + '/brand/81003_c');
+      FILES.set(AS + '/brand/81001_a/x3.jpg', Buffer.from('3'.repeat(103)));
+      FILES.set(AS + '/brand/81003_c/y1.jpg', Buffer.from('4'.repeat(104)));
+      const filesBefore = FILES.size;
+      await t.evaluate(async () => {
+        const c = App.cards.find(x => x.title === '81001');
+        const pid = cpCardPids(c)[0];
+        cpMeta().cardStatus[c.id] = { s: 'retouch', by: 'тест', ts: new Date().toISOString() };
+        cpMeta().status[pid] = { s: 'retouch', by: 'тест', ts: new Date().toISOString(), card: c.id };
+        cpMeta().downloads[pid] = { n: 1, first: { by: 'тест', ts: '2026-11-10T00:00:00Z', export: 'x' }, last: { by: 'тест', ts: '2026-11-10T00:00:00Z', export: 'x' } };
+        cbMarkDirty(); cbRenderCards();
+        await cpSyncPhotos(false);
+      });
+      await t.waitForTimeout(900);
+      check('новые файлы: кадр сам попал в карточку своей папки, новая папка — новой карточкой',
+        JSON.stringify(await autoCards()) === JSON.stringify([['81001', 'x1.jpg+x3.jpg'], ['81003', 'y1.jpg']]), JSON.stringify(await autoCards()));
+      const late = await t.evaluate(() => {
+        const c = App.cards.find(x => x.title === '81001');
+        const p3 = App.photos.find(p => p.name === 'x3.jpg');
+        const ev = cpMeta().events;
+        return { st: cpMeta().status[p3.id] || null, inherit: ev.some(e => e.action === 'added_to_retouch_card' || e.action === 'to_retouch'),
+          note: (ev.filter(e => e.action === 'auto_cards').pop() || {}).note || '', warn: !!c.cpChangedAfterDl,
+          chip: !!document.querySelector('#cbCards .cb-card[data-cid="' + c.id + '"] .cp-card-warn'),
+          q: typeof cpqCount === 'function' ? cpqCount() : 0, toast: document.getElementById('cbToast').textContent };
+      });
+      check('новый кадр в карточке на ретуши сам на ретушь не уходит: статуса нет, ничего не копируется, в журнале — «без статуса»',
+        !late.st && !late.inherit && /81001/.test(late.note) && /без статуса/.test(late.note) && late.q === 0
+        && [...FILES.keys()].filter(k => /РЕТУШЬ|03_/.test(k) && /x3\.jpg$/.test(k)).length === 0, JSON.stringify(late) + ' файлов было ' + filesBefore + ', стало ' + FILES.size);
+      check('такая карточка помечена «изменена после скачивания», человеку — подсказка отправить кадры самому', late.warn && late.chip && /81001/.test(late.toast) && /без статуса/.test(late.toast), late.toast);
+      /* «карточки по артикулам: нет» в структуре — сборка выключена */
+      DIRS.add(AS + '/brand/81004_d');
+      FILES.set(AS + '/brand/81004_d/z1.jpg', Buffer.from('5'.repeat(105)));
+      const off = await t.evaluate(async () => {
+        const type = cpShootType(CP.shoot.name), was = type.autoCards;
+        type.autoCards = false;
+        await cpSyncPhotos(false);
+        const n1 = App.cards.filter(c => c.cpAuto).length;
+        type.autoCards = was;
+        await cpSyncPhotos(false);
+        return [type.name, n1, App.cards.filter(c => c.cpAuto).length, !!App.photos.find(p => p.name === 'z1.jpg')];
+      });
+      check('«карточки по артикулам: нет» — сами не собираются; вернули «да» — собрались', off[1] === 2 && off[2] === 3 && off[3], JSON.stringify(off));
+      await t.waitForFunction(() => !App.dirty && !CP.saving, null, { timeout: 8000 }).catch(() => {});
     }
     check('разбор 10.11: страница без ошибок', terr.length === 0, terr.join(' | '));
     await t.close();

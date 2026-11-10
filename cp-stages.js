@@ -43,7 +43,7 @@ var CP_SUM_KEY = 'cp_sum';
 CP.sumWritten = {};       /* путь съёмки -> последняя записанная строка сводки */
 CP.stageFilter = cpGet('cp_stage', '') || '';
 
-/** Коды артикулов по папкам съёмки (как у «Собрать карточки по папкам»). */
+/** Коды артикулов по папкам съёмки (как у карточек товара по папкам, cp-rules.js). */
 function cpArticleCodes(shootPath, shootName, files) {
   var codes = {};
   var type = typeof cpShootType === 'function' ? cpShootType(shootName) : null;

@@ -33,7 +33,6 @@
     + 'border:2px dashed #3a3a37;border-radius:8px;background:transparent;color:#a3a09a;font-size:15px;cursor:pointer}'
     + '.cp-addcard b{font-size:56px;line-height:1;font-weight:300;color:#C9956B}'
     + '.cp-addcard:hover,.cp-addcard.cp-over{border-color:#C9956B;color:#e7c9a8;background:#1d1a17}'
-    + '.cp-addcard.cp-collect{min-height:44px;margin:0 0 14px;border:1px solid #5a4632;color:#e7c9a8;font-size:14px}'
     + '.cb-card.cp-card-active{outline:2px solid #C9956B;outline-offset:2px}'
     + '.cp-card-tags{flex-basis:100%;display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin-top:2px}'
     + '.cp-tg-name{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#a3a09a;margin:0 2px 0 6px}'
@@ -198,15 +197,6 @@ function cpGuardDecorate() {
     plus.innerHTML = '<b>+</b><span>Новая карточка</span>';
     root.appendChild(plus);
   }
-  var can = typeof cpCollectAvailable === 'function' && cpCollectAvailable();
-  var col = root.querySelector('.cp-collect');
-  if (can && !col) {
-    col = document.createElement('button');
-    col.className = 'cp-addcard cp-collect';
-    col.title = 'На каждую папку артикула — карточка товара со всеми кадрами папки. Собранное руками не трогает, повторное нажатие только дополняет.';
-    col.innerHTML = '<span>Собрать карточки по папкам артикулов</span>';
-    root.insertBefore(col, root.firstChild);
-  } else if (!can && col) col.remove();
   /* выбранная карточка — с рамкой */
   Array.prototype.forEach.call(root.querySelectorAll('.cb-card'), function (el) {
     el.classList.toggle('cp-card-active', !!CP.activeCard && el.getAttribute('data-cid') === CP.activeCard);
@@ -318,7 +308,6 @@ function cpAddAutoCard(pid) {
   var root = document.getElementById('cbCards');
   root.addEventListener('click', function (e) {
     var plus = e.target.closest('.cp-addcard');
-    if (plus && plus.classList.contains('cp-collect')) { e.preventDefault(); cpCollectCards(); return; }
     if (plus) { e.preventDefault(); cpAddAutoCard(); return; }
     var tg = e.target.closest('[data-cp-cardtag]');
     if (tg) {
@@ -330,7 +319,7 @@ function cpAddAutoCard(pid) {
   });
   root.addEventListener('dragover', function (e) {
     var plus = e.target.closest('.cp-addcard');
-    if (!plus || plus.classList.contains('cp-collect')) return;
+    if (!plus) return;
     e.preventDefault();
     plus.classList.add('cp-over');
   });
@@ -340,7 +329,7 @@ function cpAddAutoCard(pid) {
   });
   root.addEventListener('drop', function (e) {
     var plus = e.target.closest('.cp-addcard');
-    if (!plus || plus.classList.contains('cp-collect')) return;
+    if (!plus) return;
     e.preventDefault(); e.stopPropagation();
     plus.classList.remove('cp-over');
     var data = e.dataTransfer.getData('text/plain') || '';

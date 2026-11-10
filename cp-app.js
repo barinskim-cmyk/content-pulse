@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.92';
+var CP_VERSION = '2.0.93';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1306,6 +1306,8 @@ function cpStartPoll() {
         CP.base = cpClone(st.data);
         cpApplyRemote(st.data);
         cbToast('Отбор обновлён: изменения коллег');
+        /* отбор мог не читаться с Диска (тогда карточки по папкам не собирались) — собираем теперь */
+        if (typeof cpCollectCards === 'function') { try { cpCollectCards(); } catch (e) { } }
       });
     }).catch(function () { /* тихо: попробуем в следующий раз */ });
   }, CP_CONFIG.pollMs);
@@ -1334,7 +1336,8 @@ var CP_ACTION_LABEL = {
   download_shoot: 'скачал(а) всю съёмку', download_selection: 'скачал(а) отбор',
   changed_after_download: 'изменил(а) карточку после скачивания',
   merged: 'склеены версии отбора', restored: 'восстановлены несохранённые правки',
-  collect_cards: 'собрал(а) карточки по папкам', restore_version: 'вернул(а) версию отбора',
+  collect_cards: 'собрал(а) карточки по папкам', auto_cards: 'карточки собраны по папкам артикулов',
+  restore_version: 'вернул(а) версию отбора',
   retouch_sync: 'докопировал(а) на ретушь',
   added_to_approval_card: 'добавлено в карточку на согласовании — тоже на согласовании',
   rt_upload: 'сдал(а) ретушь на приёмку', rt_approve: 'отправил(а) на сайт', rt_rework: 'вернул(а) ретушь на доработку',

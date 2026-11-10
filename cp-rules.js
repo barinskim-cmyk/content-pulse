@@ -40,9 +40,10 @@ var CP_RULES_TEMPLATE = [
   '# выгрузка — «по карточкам» (папки карточек) или «как в папках» (исходные папки и имена).',
   '#   Карточка с артикулом ложится в выгрузку папкой артикула с исходным именем (с луком): 1/74595_модель.',
   '# имена в выгрузке — «исходные» или «с номером» (01_, 02_ — порядок кадров в карточке).',
-  '# карточки по артикулам — «да»: в карточках есть кнопка «Собрать карточки по папкам»:',
+  '# карточки по артикулам — «да»: карточки товара собираются сами, когда съёмку открывают:',
   '#   на каждую папку артикула заводится карточка товара, в неё собирается всё, что лежит',
-  '#   в папке (пустая папка — пустая карточка). Повторное нажатие только дополняет.',
+  '#   в папке (пустая папка — пустая карточка); новые файлы добавляются при следующем открытии',
+  '#   или по «Обновить съёмку». «нет» — карточки собирают только руками.',
   '# удалять карточки товара — «нет»: кнопки «Удалить» у карточек товара нет.',
   '',
   '[Модельная]',
@@ -134,7 +135,13 @@ function cpLoadRules(force) {
     _cpRulesP = null;
     if (window.console) console.warn('[CP] структура не прочиталась', e && (e.body || e.message));
   }).then(function () {
-    if (CP.shoot && typeof cbRenderCards === 'function') { cbRenderCards(); cpUpdateStatusLine(); }
+    if (CP.shoot && typeof cbRenderCards === 'function') {
+      /* съёмку успели открыть раньше, чем прочиталась структура, — карточки по папкам собираем сейчас */
+      var done = null;
+      try { done = cpCollectCards(); } catch (e) { if (window.console) console.error('[CP] карточки по папкам', e); }
+      if (!done || !(done.created || done.added)) cbRenderCards();
+      cpUpdateStatusLine();
+    }
     return CP.rules;
   });
   return _cpRulesP;
@@ -285,17 +292,26 @@ function cpDecorateArticles() {
 }
 
 /* ---------- карточки товара по папкам артикулов ----------
-   Кнопка «Собрать карточки по папкам» (правило «карточки по артикулам»;
-   есть у типов с папками артикулов, пока в структуре не написано «нет»).
-   Сами карточки не появляются — только по кнопке, поэтому можно сначала
-   собрать часть руками, а потом нажать:
+   Карточка товара — это папка артикула, поэтому карточки собираются сами
+   (Маша, 10.11: «нахрена она, эта кнопка, пусть автоматически собираются»).
+   Правило «карточки по артикулам»: работает у типов с папками артикулов,
+   пока в структуре не написано «нет». Сборка идёт каждый раз, когда папки
+   съёмки прочитаны: при открытии съёмки и по «Обновить съёмку»:
      - на каждую папку артикула, у которой ещё нет карточки, заводится
        карточка товара (автолента, заголовок — код); пустая папка — пустая;
-     - в карточки, заведённые кнопкой, добавляются новые кадры их папки;
+     - в карточки, заведённые по папкам, добавляются новые кадры их папки;
        кадр, который раз положили и потом убрали руками, второй раз не
        добавляется;
-     - карточку артикула, собранную руками, кнопка не трогает.
-   Повторное нажатие только дополняет — дублей не бывает. */
+     - карточку артикула, собранную руками, сборка не трогает;
+     - карточку товара, которую удалили, сборка второй раз не заводит:
+       папки, по которым карточка уже заводилась, записаны в отметках
+       (artSeen), как убранные кадры — в cpAutoSeen.
+   Новый кадр в карточке, которая уже на согласовании или на ретуши, статус
+   карточки сам НЕ получает: открытие съёмки не должно само отправлять файлы
+   ретушёру или клиенту. Кадр виден в карточке без статуса, в журнале —
+   запись; отправляет его человек.
+   Дублей нет и у двоих сразу: номер карточки считается из пути папки
+   артикула, у обоих он один — при склейке это одна и та же карточка. */
 
 function cpMakeCard(t, title) {
   return {
@@ -313,18 +329,33 @@ function cpCollectAvailable() {
   return !!(type && type.autoCards !== false && (type.autoCards || type.roles.indexOf('артикул') !== -1));
 }
 
-/** Собрать карточки товара по папкам артикулов. -> {created, added, manual, arts} или null */
+/** Номер карточки товара — из пути папки артикула: у всех, кто открыл съёмку, он один. */
+function cpArtCardId(dir) {
+  var h1 = 0x811c9dc5, h2 = 5381;
+  for (var i = 0; i < dir.length; i++) {
+    var c = dir.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193);
+    h2 = (Math.imul(h2, 33) + c) | 0;
+  }
+  return 'art' + (h1 >>> 0).toString(36) + (h2 >>> 0).toString(36);
+}
+
+/**
+ * Собрать карточки товара по папкам артикулов. Вызывается сама, без кнопки;
+ * если собирать нечего или нельзя — молча ничего не делает.
+ * -> {created, added, manual, arts, late} или null (не собирали).
+ */
 function cpCollectCards() {
-  if (!CP.shoot) return null;
-  if (CP.readOnly) { cbToast('Отбор не прочитан с Диска — собирать карточки нельзя, чтобы не затереть его'); return null; }
-  if (!CP.files || (!CP.files.length && !(CP.files.dirs || []).length)) { cbToast('Папки съёмки ещё читаются — нажмите через несколько секунд'); return null; }
+  if (!CP.shoot || CP.readOnly || !CP.rules) return null;
+  /* папки этой съёмки ещё не прочитаны (у прочитанного обхода есть список папок) */
+  if (!CP.files || !CP.files.dirs) return null;
+  if (!cpCollectAvailable()) return null;
   var type = cpShootType(CP.shoot.name);
-  if (!type) { cbToast('Тип съёмки не распознан по названию — проверьте «Структура съёмок»'); return null; }
   var root = CP.shoot.path.replace(/\/+$/, '') + '/';
   var rel = function (p) { return p.indexOf(root) === 0 ? p.slice(root.length) : ''; };
   /* папки артикулов: и с файлами, и пустые */
   var arts = {};
-  (CP.files.dirs || []).forEach(function (d) {
+  CP.files.dirs.forEach(function (d) {
     var r = rel(d);
     if (!r) return;
     var f = cpFacets(type, r + '/x');
@@ -335,16 +366,32 @@ function cpCollectCards() {
     if (x.code && x.articlePath) arts[x.articlePath] = x.code;
   });
   var dirs = Object.keys(arts).sort(function (a, b) { return a.localeCompare(b, undefined, { numeric: true }); });
-  var res = { created: 0, added: 0, manual: 0, arts: dirs.length };
-  if (!dirs.length) { cbToast('Папок артикулов в съёмке не нашлось (тип «' + type.name + '»)'); return res; }
+  var res = { created: 0, added: 0, manual: 0, arts: dirs.length, late: [] };
+  if (!dirs.length) return res;
   var tpl = typeof cpAutoTemplate === 'function' ? cpAutoTemplate() : null;
-  if (!tpl) { cbToast('Нет шаблона автоленты — создайте карточку из галереи шаблонов'); return null; }
+  if (!tpl) { if (window.console) console.warn('[CP] карточки по папкам: нет шаблона автоленты'); return null; }
+  var m = cpMeta();
+  var seenDirs = m.artSeen = m.artSeen || {};   /* папка артикула -> 1: карточка по ней уже заводилась */
   var byDir = {};
   App.cards.forEach(function (c) { if (c.cpArticleDir && !byDir[c.cpArticleDir]) byDir[c.cpArticleDir] = c; });
+  /* кадры по папкам артикулов — один проход по галерее (папка кадра и её родители) */
+  var inDir = {};
+  App.photos.forEach(function (p) {
+    if (!p.disk || p.missing || (p.kind || 'photo') === 'ref') return;
+    var seg = cpRelDir(p).split('/');
+    for (var i = seg.length; i > 0; i--) {
+      var d = seg.slice(0, i).join('/');
+      if (arts[d]) { (inDir[d] = inDir[d] || []).push(p); break; }
+    }
+  });
+  var stamp = new Date().toISOString();
   dirs.forEach(function (d) {
     var card = byDir[d];
     if (!card) {
+      if (seenDirs[d]) return;                 /* карточку этой папки удалили — второй раз не заводим */
       card = cpMakeCard(tpl, arts[d]);
+      var id = cpArtCardId(d);
+      if (!cbCardById(id)) card.id = id;
       card.cpArticle = arts[d];
       card.cpArticleDir = d;
       card.cpArtTitled = true;
@@ -355,12 +402,11 @@ function cpCollectCards() {
       res.created++;
     }
     if (!card.cpAuto) { res.manual++; return; }    /* карточку собрали руками — её состав не трогаем */
+    seenDirs[d] = 1;
     var seen = card.cpAutoSeen = card.cpAutoSeen || [];
     var have = cpCardPids(card);
-    App.photos.forEach(function (p) {
-      if (!p.disk || p.missing || (p.kind || 'photo') === 'ref') return;
-      var pd = cpRelDir(p);
-      if (pd !== d && pd.indexOf(d + '/') !== 0) return;
+    var was = have.slice(), got = 0;
+    (inDir[d] || []).forEach(function (p) {
       if (seen.indexOf(p.id) !== -1) return;
       seen.push(p.id);
       if (have.indexOf(p.id) !== -1) return;
@@ -369,20 +415,46 @@ function cpCollectCards() {
         var slot = (card.slots || []).filter(function (s) { return !s.pid; })[0];
         if (slot) slot.pid = p.id; else return;
       }
-      res.added++;
+      got++;
     });
+    res.added += got;
+    if (!got || !was.length) return;
+    /* карточка уже в работе: новый кадр её статус сам не получает — только отметки */
+    if (m.cardStatus[card.id]) res.late.push(card.title || arts[d]);
+    if (was.some(function (pid) { return m.downloads[pid] && m.downloads[pid].n; })) {
+      card.cpChangedAfterDl = { by: 'новые файлы в папке артикула', ts: stamp };
+    }
   });
-  var note = res.created || res.added
-    ? 'новых карточек: ' + res.created + ', добавлено кадров: ' + res.added
-    : 'всё уже собрано — новых папок и кадров нет';
-  if (res.manual) note += '; собранные руками (' + res.manual + ') не трогала';
-  cpEvent('collect_cards', [], { note: note }, true);
+  if (!res.created && !res.added) return res;
+  var note = 'новых карточек: ' + res.created + ', добавлено кадров: ' + res.added;
+  if (res.late.length) note += '; новые кадры в карточках в работе (' + res.late.join(', ') + ') — без статуса';
+  cpEvent('auto_cards', [], { note: note }, true);
+  /* это не правка человека: правила «кадр добавили в карточку» (cp-guard.js) не запускаем */
+  if (typeof cpSnapNow === 'function') { CP.cardSnap = cpSnapNow(); CP.snapShoot = CP.shoot.path; }
   cbMarkDirty();
   cbRenderCards();
   cbRenderTray();
-  cbToast('Карточки по папкам: ' + note);
+  if (res.late.length) {
+    setTimeout(function () {
+      cbToast('Новые файлы в папках артикулов: кадры добавлены в карточки в работе (' + res.late.join(', ') + ') без статуса — отправьте их сами.');
+    }, 600);
+  }
   return res;
 }
+
+/* Сборка сама: как только прочитаны папки съёмки (открытие, «Обновить съёмку»). */
+(function cpCollectHooks() {
+  var orig = window.cpSyncPhotos;
+  window.cpSyncPhotos = function () {
+    var path = CP.shoot && CP.shoot.path;
+    return orig.apply(this, arguments).then(function (n) {
+      if (CP.shoot && CP.shoot.path === path) {
+        try { cpCollectCards(); } catch (e) { if (window.console) console.error('[CP] карточки по папкам', e); }
+      }
+      return n;
+    });
+  };
+})();
 
 /* «удалять карточки товара: нет» — кнопки «Удалить» у карточек товара нет */
 function cpCardDeleteBlocked(card) {
@@ -527,7 +599,11 @@ function cpFilesSave() {
     note.textContent = 'Сохранено: ' + f.name;
     cbToast('Сохранено на Диск: ' + f.name);
     if (CP.sel) cpRenderPanel();
-    if (CP.shoot) cbRenderCards();
+    if (CP.shoot) {
+      /* в структуре могли включить «карточки по артикулам» — собираем сразу */
+      var done = f.name === CP_RULES_FILE ? cpCollectCards() : null;
+      if (!done || !(done.created || done.added)) cbRenderCards();
+    }
   }).catch(function (e) {
     note.textContent = 'Не сохранилось: ' + ((e && (e.body || e.message)) || e);
     cpHandleError(e, 'Сохранение ' + f.name);
