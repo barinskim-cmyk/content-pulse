@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.101';
+var CP_VERSION = '2.0.102';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1467,6 +1467,13 @@ function cpRetouchMark(pids, cardId) {
     cpSetStatus(pids, 'retouch', null);
     pids.forEach(function (pid) { m0.status[pid].card = cardId; });
   } else cpSetStatus(pids, 'retouch', cardId);
+  /* файлы уже в папке ретуши — витрина узнаёт об этом сразу, не дожидаясь сверки с Диском (cp-stages.js) */
+  if (typeof cpStageNote === 'function' && CP.shoot && CP.settings && CP.settings.retouch) {
+    var codes = [];
+    var cards = cardId ? [cbCardById(cardId)] : App.cards.filter(function (c) { return pids.some(function (pid) { return cpCardPids(c).indexOf(pid) !== -1; }); });
+    cards.forEach(function (c) { if (c && c.cpArticle && c.cpArticle.indexOf(',') === -1 && codes.indexOf(c.cpArticle) === -1) codes.push(c.cpArticle); });
+    cpStageNote('retouch', CP.shoot.name, cpRetouchBase(CP.shoot.path, CP.shoot.name), codes);
+  }
 }
 
 /* ---------- копии на ретушь ----------

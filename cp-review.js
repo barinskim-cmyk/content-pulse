@@ -202,6 +202,7 @@ function cpReviewPresent(shootName, dir) {
   (CP.stagePresence.review = CP.stagePresence.review || {})[low] = true;
   var w = CP.stagePaths.review = CP.stagePaths.review || {};
   if (!(w[low] || []).some(function (p) { return p === dir; })) w[low] = (w[low] || []).concat([dir]);
+  if (typeof cpStageNote === 'function') cpStageNote('review', shootName, dir);
   if (CP.shoots) cpRenderShoots();
   [4000, 15000].forEach(function (ms) {
     setTimeout(function () { if (typeof cpScanStages === 'function' && CP.shoots) cpScanStages(); }, ms);
@@ -630,6 +631,7 @@ function cpReviewPresentStage(key, shootName, dir) {
   (CP.stagePresence[key] = CP.stagePresence[key] || {})[low] = true;
   var w = CP.stagePaths[key] = CP.stagePaths[key] || {};
   if (!(w[low] || []).some(function (p) { return p === dir; })) w[low] = (w[low] || []).concat([dir]);
+  if (typeof cpStageNote === 'function') cpStageNote(key, shootName, dir);
 }
 
 /* ---------- съёмка, открытая из фильтра этапа: только карточки этого этапа ----------

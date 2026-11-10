@@ -213,6 +213,54 @@ function cpSiteTooOld(name) {
 }
 
 /** Какие съёмки лежат в папках этапов: по одному обходу на этап (до 3 уровней). */
+/* ---------- что программа только что сделала сама — видно сразу ----------
+   Маша, 10.11.2026: «перемещала предметку из исходников в ретушь — не переместилась… переместилось,
+   нужно было подождать, пока прогрузится. Надо с этим лагом что-то сделать». Витрина узнавала о
+   новых файлах на этапе только из сверки с Диском (раз в 40 секунд), а Яндекс ещё и показывает
+   новую папку в списке не сразу — сверка, прошедшая в эти секунды, стирала даже то, что витрина
+   уже показала. Теперь действие программы (отправили на ретушь, на согласование, сдали, на сайт)
+   записывается как свежая отметка: она видна сразу и две минуты переживает сверки, пока Диск
+   не начнёт показывать папку сам. */
+CP.stageRecent = {};       /* этап -> {съёмка (строчными): {ts, dirs: [папки], codes: {код: ''}}} */
+CP.stageRecentMs = 120000;
+
+/** Программа только что положила файлы съёмки на этап (dir — её папка там, codes — артикулы). */
+function cpStageNote(key, shootName, dir, codes) {
+  var low = String(shootName).toLowerCase();
+  var r = CP.stageRecent[key] = CP.stageRecent[key] || {};
+  var x = r[low] = r[low] || { dirs: [], codes: {} };
+  x.ts = Date.now();
+  if (dir && x.dirs.indexOf(dir) === -1) x.dirs.push(dir);
+  (codes || []).forEach(function (c) { if (c && x.codes[c] === undefined) x.codes[c] = ''; });
+  CP.stageTouched = x.ts;
+  cpStageRecentApply();
+}
+
+/** Наложить свежие отметки на то, что прочитано с Диска; старше двух минут — забыть. */
+function cpStageRecentApply() {
+  var now = Date.now();
+  CP.stagePresence = CP.stagePresence || {};
+  CP.stagePaths = CP.stagePaths || {};
+  Object.keys(CP.stageRecent).forEach(function (key) {
+    var r = CP.stageRecent[key];
+    /* только этапы, у которых есть папка в настройках: без неё этап считается по отметкам программы, а не по папкам */
+    if (!(CP.settings && CP.settings[CP_STAGE_SETTING[key]])) return;
+    Object.keys(r).forEach(function (low) {
+      var x = r[low];
+      if (now - x.ts > CP.stageRecentMs) { delete r[low]; return; }
+      (CP.stagePresence[key] = CP.stagePresence[key] || {})[low] = true;
+      var w = CP.stagePaths[key] = CP.stagePaths[key] || {};
+      x.dirs.forEach(function (d) { if ((w[low] || []).indexOf(d) === -1) w[low] = (w[low] || []).concat([d]); });
+      var codes = Object.keys(x.codes);
+      if (codes.length && CP.stageArts) {
+        var a = CP.stageArts[key] = CP.stageArts[key] || {};
+        var c = a[low] = a[low] || {};
+        codes.forEach(function (code) { if (c[code] === undefined) c[code] = x.codes[code]; });
+      }
+    });
+  });
+}
+
 function cpScanStages() {
   var s = CP.settings || {}, archive = CP.archive;
   var known = {};
@@ -244,13 +292,38 @@ function cpScanStages() {
         return level(next, depth + 1);
       });
     };
-    return level([root], 1).then(function () { return [key, names, where, info]; }, function () { return [key, null, null, null]; });
+    return level([root], 1).then(function () { return [key, names, where, info]; }, function (e) { return [key, 'fail', e]; });
   })).then(function (pairs) {
     if (CP.archive !== archive) return;
+    /* Папка этапа не прочиталась (сеть, Диск ответил ошибкой или «слишком много запросов») — это не
+       «в папке пусто». Раньше такая сверка стирала всё, что было известно про этап: под съёмками
+       пропадала «03_РЕТУШЬ N», съёмки вылетали из фильтра — до следующей удачной сверки (Маша,
+       10.11.2026: «сначала показала, что есть в ретуши, потом перестала»). Теперь оставляем прежнее. */
+    var prev = CP.stageFor === archive ? { p: CP.stagePresence || {}, w: CP.stagePaths || {}, i: CP.stageInfo || {} } : { p: {}, w: {}, i: {} };
+    var failed = [];
     CP.stagePresence = {};
     CP.stagePaths = {};
     CP.stageInfo = {};
-    pairs.forEach(function (kv) { if (kv[1]) { CP.stagePresence[kv[0]] = kv[1]; CP.stagePaths[kv[0]] = kv[2]; CP.stageInfo[kv[0]] = kv[3] || {}; } });
+    pairs.forEach(function (kv) {
+      var k = kv[0];
+      if (kv[1] === 'fail') {
+        failed.push(k);
+        if (window.console) console.warn('[CP] папка этапа не прочиталась: ' + k, kv[2] && (kv[2].status || kv[2].message || kv[2]));
+        if (prev.p[k]) { CP.stagePresence[k] = prev.p[k]; CP.stagePaths[k] = prev.w[k] || {}; CP.stageInfo[k] = prev.i[k] || {}; }
+        return;
+      }
+      if (kv[1]) { CP.stagePresence[k] = kv[1]; CP.stagePaths[k] = kv[2]; CP.stageInfo[k] = kv[3] || {}; }
+    });
+    if (CP.stageFor && CP.stageFor !== archive) CP.stageRecent = {};   /* открыли другую папку — свежие отметки прежней к ней не относятся */
+    CP.stageFor = archive;
+    /* сказать один раз, а не каждые 45 секунд */
+    var sig = failed.join(',');
+    if (sig && sig !== CP.stageFailedSig) {
+      cbToast('Не прочиталась папка этапа: ' + failed.map(function (k) { return cpStageLabel(k); }).join(', ') + ' — показываю, что было, и попробую ещё раз');
+    }
+    CP.stageFailedSig = sig;
+    CP.stageFailed = failed;
+    cpStageRecentApply();
     cpRenderShoots();
     if (typeof cpCountStageArts === 'function') cpCountStageArts();
   });

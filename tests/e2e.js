@@ -69,6 +69,7 @@ const TRASHED = [], MOVED = [], ZIPPART_CALLS = [];
 const CRC_CALLS = [], ZIP_SLICES = [];
 let ZIPPART_FAIL_ONCE = null, ZIPPART_BAD = null;   /* ZIPPART_BAD — файл, который Яндекс не отдаёт (HTTP 500) */   /* оборвать один кусок архива — страница должна повторить */   /* что ушло в Корзину Диска / перенесено между этапами */
 const PROPS = new Map();   /* custom_properties папок (сводка съёмки) */
+let LIST_FAIL = null;   /* список этих папок Диск «не отдаёт» (403) — проверка сверки витрины */
 let CLOUD_PUT_FAIL = null, UPLOAD_FAIL = null;   /* {re, n}: n раз «уронить» загрузку куска в Облако (по началу содержимого) / файла на Диск (по пути) */
 const RID_GEN = new Map();   /* путь -> поколение: файл убрали и положили заново — у новой копии другой resource_id */
 const meta = (p) => {
@@ -104,6 +105,7 @@ async function route(r) {
     } else if (pn.indexOf('/v1/disk/resources') === 0 && vdPath) return json(400, { error: 'DiskPathFormatError', message: 'путь общего диска — в /virtual-disks' });
     const vmeta = x => { const o = meta(x); if (vdMode) o.path = o.path.replace(/^vd:[^:]+:/, ''); return o; };
     if (pn === '/v1/disk/resources' && m === 'GET') {
+      if (LIST_FAIL && LIST_FAIL.test(p)) return json(403, { error: 'тест: Диск не отдал список' });
       if (DIRS.has(p)) {
         const kids = [...DIRS, ...FILES.keys()].filter(x => x !== p && x.slice(0, x.lastIndexOf('/')) === p && !(FRESH.has(x) && Date.now() - FRESH.get(x) < 3000)).sort();
         const off = +q.offset || 0, lim = +q.limit || 20;
@@ -1757,6 +1759,37 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     check('«показать скачанное и сданное» — сданный артикул виден с отметкой «сдано»', await page.evaluate(() =>
       [...document.querySelectorAll('#cpPanel .cp-fold')].some(r => /74002_модель/.test(r.textContent) && /сдано/.test(r.textContent))), (await page.textContent('#cpPanel')).slice(0, 500));
     await page.evaluate(() => { CP.stageArts = JSON.parse(window.__keep96.arts); CP.stagePresence = JSON.parse(window.__keep96.pres); cpRenderShoots(); });
+    /* 2.0.102: папка этапа не прочиталась — это не «в ретуши пусто»: счёт под съёмкой и фильтр остаются */
+    const scan = () => page.evaluate(async () => {
+      await cpScanStages(); await cpCountStageArts();
+      const d = CP.shoots.find(s => s.name === '2026-11-06_SV_КАТ'), rt = (cpArtPhys(d) || []).find(x => x.key === 'retouch');
+      const tile = [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(x => x.dataset.name === d.name);
+      return [!!(CP.stagePresence.retouch || {})[d.name.toLowerCase()], rt ? rt.n : null, cpStagesFor(d).retouch, (CP.stageFailed || []).join(), /03_РЕТУШЬ 2/.test(tile ? tile.textContent : ''),
+        document.getElementById('cbToast').textContent];
+    });
+    const sc0 = await scan();
+    LIST_FAIL = /03_РЕТУШЬ/;
+    const sc1 = await scan();
+    LIST_FAIL = null;
+    const sc2 = await scan();
+    /* 2.0.103: программа только что отправила артикул на ретушь — на витрине он сразу, и сверка его не стирает, пока Диск не покажет папку сам */
+    const rc = await page.evaluate(async () => {
+      const d = CP.shoots.find(s => s.name === '2026-11-06_SV_КАТ'), d2 = { name: '2026-11-07_SV_ТОЛЬКО_ЧТО', path: d.path + '_2' }, low = d.name.toLowerCase();
+      const n = x => ((cpArtPhys(x) || []).find(y => y.key === 'retouch') || { n: 0 }).n;
+      cpStageNote('retouch', d.name, CP.settings.retouch + '/' + d.name, ['74003']);
+      cpStageNote('retouch', d2.name, CP.settings.retouch + '/' + d2.name, ['99001']);
+      const now = [n(d), n(d2), cpStagesFor(d2).retouch];
+      await cpScanStages(); await cpCountStageArts();
+      const afterScan = [n(d), n(d2), cpStagesFor(d2).retouch];
+      CP.stageRecent.retouch[low].ts = CP.stageRecent.retouch[d2.name.toLowerCase()].ts = Date.now() - 200000;   /* прошло больше двух минут, а на Диске так и нет */
+      await cpScanStages(); await cpCountStageArts();
+      return [now, afterScan, [n(d), n(d2), cpStagesFor(d2).retouch]];
+    });
+    check('отправили на ретушь — под съёмкой и в фильтре видно сразу и после сверки (Диск ещё не показывает папку); через две минуты верим только Диску',
+      JSON.stringify(rc) === '[[3,1,true],[3,1,true],[2,0,false]]', JSON.stringify(rc));
+    check('папка ретуши не прочиталась с Диска — «03_РЕТУШЬ 2» под съёмкой и фильтр остаются (раньше пропадали), об ошибке сказано; прочиталась — как было',
+      JSON.stringify(sc0.slice(0, 5)) === '[true,2,true,"",true]' && JSON.stringify(sc1.slice(0, 5)) === '[true,2,true,"retouch",true]' && /Не прочиталась папка этапа: 03_РЕТУШЬ/.test(sc1[5])
+      && JSON.stringify(sc2.slice(0, 5)) === '[true,2,true,"",true]', JSON.stringify([sc0, sc1, sc2]));
     RID_GEN.delete(KRT + '/74002_модель/k2.jpg');
     FILES.delete(KSTATE); PROPS.delete(K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ');
     await page.click('[data-cp-p="close"]');
@@ -2480,11 +2513,12 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         return { titles: App.cards.filter(c => c.cpAuto).map(c => c.title).join(), dir: (App.cards.find(c => c.title === '81005') || {}).cpArticleDir,
           loose: cpFacets(type, '2026-11-09/loose.jpg').code || '', deep: cpFacets(type, '2026-11-09/brand/81005_e/w1.jpg').code,
           codes: [cpArtCode(type, '2026-11-09'), cpArtCode(type, '2026.11.09_часть2'), cpArtCode(type, '2026_синий'), cpArtCode(type, '74595_модель'), cpArtCode(type, '1')].join('|'),
+          notDates: [cpArtCode(type, '7459_1_2_модель'), cpArtCode(type, '2026_13_40'), cpArtCode(type, '2026_1_5_день')].join('|'),
           stage: Object.keys(cpArticleCodes(CP.shoot.path, CP.shoot.name, CP.files)).sort().join() };
       });
       check('папка-дата («2026-11-09») не читается как артикул «2026»: карточка по ней не заводится, артикулы внутри неё находятся',
         dated.titles === '81001,81003,81004,81005' && dated.dir === '2026-11-09/brand/81005_e' && dated.loose === '' && dated.deep === '81005'
-        && dated.codes === '||2026|74595|' && dated.stage === '81001,81002,81003,81004,81005', JSON.stringify(dated));
+        && dated.codes === '||2026|74595|' && dated.notDates === '7459|2026|' && dated.stage === '81001,81002,81003,81004,81005', JSON.stringify(dated));
       await t.waitForFunction(() => !App.dirty && !CP.saving, null, { timeout: 8000 }).catch(() => {});
     }
     /* 2.0.95: из папки ретуши скачал другой ретушёр (запись U), папка на Диске ещё «Y_…» — сверка ставит карточке U, а не Y */
@@ -2755,6 +2789,22 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       await t.waitForFunction(() => !App.dirty && !CP.saving, null, { timeout: 8000 }).catch(() => {});
       const saved = JSON.parse(FILES.get(AS + '/_contentpulse.json').toString());
       check('новый путь кадра записан в отбор на Диске', saved.photos.some(p => p.id === b0.x3 && /\/brand\/x3\.jpg$/.test(p.disk)), JSON.stringify(saved.photos.filter(p => p.id === b0.x3)));
+    }
+    /* 2.0.103: кадры доехали в папку ретуши — отметка для витрины ставится тут же, с артикулом карточки */
+    {
+      const nt = await t.evaluate(() => {
+        const was = (CP.settings || {}).retouch;
+        CP.settings = CP.settings || {}; CP.settings.retouch = 'disk:/Этапы/03_РЕТУШЬ';
+        CP.stageRecent = {};
+        const c = App.cards.find(x => x.title === '81004');
+        cpRetouchMark(cpCardPids(c), c.id);
+        const r = (CP.stageRecent.retouch || {})[CP.shoot.name.toLowerCase()] || {};
+        const out = [Object.keys(r.codes || {}).join(), (r.dirs || []).join(), !!(CP.stagePresence.retouch || {})[CP.shoot.name.toLowerCase()]];
+        if (was) CP.settings.retouch = was; else delete CP.settings.retouch;
+        CP.stageRecent = {};
+        return out;
+      });
+      check('карточку отправили на ретушь — витрина сразу знает: съёмка в папке ретуши, артикул карточки в счёте', nt[0] === '81004' && /03_РЕТУШЬ\/2026-11-10_SV_ОПТИКА_AUTO$/.test(nt[1]) && nt[2] === true, JSON.stringify(nt));
     }
     check('разбор 10.11: страница без ошибок', terr.length === 0, terr.join(' | '));
     await t.close();

@@ -256,11 +256,16 @@ function cpCountStageArts() {
     }
     return walk(j.paths, 1).then(function () {
       (fresh[j.key] = fresh[j.key] || {})[j.low] = found ? codes : null;
-    }, function () { });
+    }, function () {
+      /* папка не прочиталась — оставляем прошлый счёт, а не «есть» без числа */
+      var old = CP.stageArtsFor === archive ? (CP.stageArts[j.key] || {})[j.low] : undefined;
+      if (old !== undefined) (fresh[j.key] = fresh[j.key] || {})[j.low] = old;
+    });
   }).then(function () {
     if (run !== _cpArtsRun || CP.archive !== archive) return;
     CP.stageArts = fresh;
     CP.stageArtsFor = archive;
+    if (typeof cpStageRecentApply === 'function') cpStageRecentApply();   /* только что отправленное — в счёте, пока Диск не покажет сам */
     cpRenderShoots();
   });
 }
@@ -367,6 +372,18 @@ function cpShelfLive() {
   return cpCatalog() && CP.shoots && shelf && shelf.classList.contains('cp-open') && document.visibilityState !== 'hidden';
 }
 setInterval(function () { if (cpShelfLive() && Date.now() - CP.stageScanAt > 40000) cpScanStages(); }, 15000);
+/* вернулись на витрину из съёмки — показываем, что знаем, и сверяемся с Диском сразу, а не по таймеру */
+cpShowShelf = (function (orig) {
+  return function () {
+    var r = orig.apply(this, arguments);
+    if (cpCatalog() && CP.shoots && CPDisk.hasToken()) {
+      if (typeof cpStageRecentApply === 'function') cpStageRecentApply();
+      cpRenderShoots();
+      if (Date.now() - CP.stageScanAt > 5000) setTimeout(function () { if (cpShelfLive()) cpScanStages(); }, 400);
+    }
+    return r;
+  };
+})(cpShowShelf);
 document.addEventListener('visibilitychange', function () { if (cpShelfLive() && Date.now() - CP.stageScanAt > 8000) cpScanStages(); });
 
 /* ---------- шестерёнка: папки каталога и что они значат ---------- */
