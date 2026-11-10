@@ -119,7 +119,7 @@ cpAcceptUpload = function () {
     show();
     return cpPool(jobs, 3, function (j, i) {
       now = j.name;
-      return CPDisk.uploadBlob(j.path, j.file, true, function (b) { loaded[i] = b; show(); })
+      return cpUpSure(j.path, j.file, true, function (b) { loaded[i] = b; show(); })
         .then(function () { loaded[i] = j.file.size; ok.push(j); }, function (e) { loaded[i] = j.file.size; failed.push(j.name + ': ' + (e && (e.message || e.status))); })
         .then(show);
     });
@@ -1435,7 +1435,7 @@ function cpRvCardUpload(id, files) {
     olds.forEach(function (o) { if (o.path.indexOf(from + '/') === 0) { var np = dir + o.path.slice(from.length); if (replaced[o.path]) { replaced[np] = true; } o.path = np; } });
     prog();
     return cpPool(jobs, 3, function (j, i) {
-      return CPDisk.uploadBlob(dir + '/' + j.name, j.file, true, function (b) { loaded[i] = b; prog(); })
+      return cpUpSure(dir + '/' + j.name, j.file, true, function (b) { loaded[i] = b; prog(); })
         .then(function () { loaded[i] = j.file.size; ok.push(j); }, function (e) { loaded[i] = j.file.size; failed.push(j.name + ': ' + (e && (e.message || e.status))); })
         .then(prog);
     });

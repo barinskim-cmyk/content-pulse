@@ -73,6 +73,35 @@ function cpDropFiles(dt) {
   return Promise.resolve(Array.prototype.slice.call(dt.files || []).map(function (f) { return { file: f, rel: f.name }; }));
 }
 
+/* ---------- загрузка с повторами ----------
+   Маша, 10.11.2026: «один файл не догрузился — он должен ещё раз его подхватить и следующим
+   потоком залить; пока не загружено, ничего не писать». Файл у страницы в руках, пока окно
+   загрузки открыто, поэтому сбой сети или ответ «попробуйте позже» — не повод сдаваться:
+   повторяем сразу (с растущей паузой), а что не взялось — ещё раз в конце, отдельными проходами.
+   Сообщение «не загрузилось» появляется, только когда не помогло и это. Отказ по существу
+   (нет места, нет прав) повторять бесполезно — о нём говорим сразу. */
+CP.upRetryMs = 1500;      /* пауза перед повтором в том же потоке: ×1, ×2, ×3 */
+CP.upRedoPasses = 3;      /* сколько раз в конце ещё раз проходим по незагруженным */
+CP.upRedoWaitMs = 5000;   /* пауза перед таким проходом: ×1, ×2, ×3 */
+
+function cpWaitMs(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+/** Сбой, после которого повтор имеет смысл: сеть, 5xx, «слишком много запросов». */
+function cpUpRetriable(e) { return !e || !e.status || e.status >= 500 || e.status === 429; }
+
+/** Загрузить файл на Диск; сбой сети или 5xx — до трёх повторов. */
+function cpUpSure(path, blob, overwrite, onProgress) {
+  var tries = 0;
+  var once = function () {
+    return CPDisk.uploadBlob(path, blob, overwrite, onProgress).catch(function (e) {
+      if (tries >= 3 || !cpUpRetriable(e)) throw e;
+      tries++;
+      if (onProgress) onProgress(0);
+      return cpWaitMs(CP.upRetryMs * tries).then(once);
+    });
+  };
+  return once();
+}
+
 /* ---------- разбор: какая карточка, буква, номер ---------- */
 
 function cpStem(name) {
@@ -363,7 +392,7 @@ function cpAcceptUpload() {
   var dirList = Object.keys(dirs);
   dirList.reduce(function (p, d) { return p.then(function () { return CPDisk.ensureDir(d); }); }, Promise.resolve()).then(function () {
     return cpPool(jobs, 3, function (j) {
-      return CPDisk.uploadBlob(j.path, j.file, true).then(function () { ok.push(j); }, function (e) { failed.push(j.name + ': ' + (e && (e.message || e.status))); })
+      return cpUpSure(j.path, j.file, true).then(function () { ok.push(j); }, function (e) { failed.push(j.name + ': ' + (e && (e.message || e.status))); })
         .then(function () {
           done += j.file.size;
           cbBusyShow('Загружаю на приёмку: ' + (ok.length + failed.length) + ' из ' + jobs.length + ' · ' + (done / 1048576).toFixed(0) + ' из ' + (total / 1048576).toFixed(0) + ' МБ', 0.02 + 0.95 * (total ? done / total : 1));

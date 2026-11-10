@@ -280,12 +280,25 @@ function cpSrcUpload() {
       return CPDisk.uploadBlob(j.dest, j.file, false, function (b) { loaded[i] = b; show(); }).catch(function (e) {
         /* сеть оборвалась или Диск ответил 5xx — ещё раз; файл уже есть (409) — значит, загрузился */
         if (e && e.status === 409) return;
-        if (tries < 2 && (!e || !e.status || e.status >= 500)) { tries++; loaded[i] = 0; return new Promise(function (r) { setTimeout(r, 1500 * tries); }).then(once); }
+        if (tries < 2 && cpUpRetriable(e)) { tries++; loaded[i] = 0; return cpWaitMs(CP.upRetryMs * tries).then(once); }
         throw e;
       });
     };
     return once().then(function () { loaded[i] = j.file.size; ok.push(j); },
-      function (e) { loaded[i] = j.file.size; failed.push(j.dest.split('/').pop() + ': ' + ((e && (e.message || e.status)) || e)); }).then(show);
+      function (e) {
+        /* не взялся — ещё раз в конце, отдельным проходом; сообщаем, только если не помогло и это */
+        if (cpUpRetriable(e) && (j.redo || 0) < CP.upRedoPasses) { j.redo = (j.redo || 0) + 1; loaded[i] = 0; redoD.push(i); return; }
+        loaded[i] = j.file.size;
+        failed.push(j.dest.split('/').pop() + ': ' + ((e && (e.message || e.status)) || e));
+      }).then(show);
+  };
+  var redoD = [];
+  var againD = function () {
+    if (!redoD.length) return;
+    var list = redoD.splice(0);
+    now = 'повторяю: ' + list.length + ' файл(ов)';
+    show();
+    return cpWaitMs(CP.upRedoWaitMs * (jobs[list[0]].redo || 1)).then(function () { return cpPool(list, 4, function (i) { return put(jobs[i], i); }); }).then(againD);
   };
   var idx = jobs.map(function (j, i) { return i; });
   var notVideo = idx.filter(function (i) { return jobs[i].kind !== 'video'; }), video = idx.filter(function (i) { return jobs[i].kind === 'video'; });
@@ -293,7 +306,7 @@ function cpSrcUpload() {
     /* напрямую: 4 потока (проверка скорости: 8 МБ/с против 2 в один поток); кадры, потом видео */
     return cpPool(notVideo, 4, function (i) { return put(jobs[i], i); }).then(function () {
       return cpPool(video, 4, function (i) { return put(jobs[i], i); });
-    });
+    }).then(againD);
   };
   mk.then(function () {
     show();
@@ -366,8 +379,26 @@ function cpSrcViaCloud(st, jobs, loaded, ok, failed, show, setNow) {
       ? CPDisk.proxyCloudUp({ op: 'done', key: j.cloud.key, uploadId: j.cloud.uploadId, etags: j.etags })
       : Promise.resolve();
     return done.then(function () { ok.push(j); queueFetch(j); }, function (e) {
-      failed.push(j.dest.split('/').pop() + ': ' + ((e && (e.message || e.body)) || e));
+      j.err = (e && (e.message || e.body)) || String(e);
+      redo.push(j);
     });
+  };
+  /* файлы, которые не взялись с первого захода, — ещё раз в конце (cp-accept.js: CP.upRedoPasses) */
+  var redo = [];
+  var unitsOf = function (list) {
+    var units = [];
+    list.forEach(function (j) {
+      var c = j.cloud;
+      j.etags = []; j.broken = false; j.hard = false;
+      (j.keys || []).forEach(function (k) { loaded[k] = 0; });
+      j.keys = [];
+      if (c.put) { j.left = 1; units.push({ j: j, url: c.put, start: 0, end: j.file.size, n: 0 }); }
+      else {
+        j.left = c.parts.length;
+        c.parts.forEach(function (u, k) { units.push({ j: j, url: u, start: k * c.partSize, end: Math.min(j.file.size, (k + 1) * c.partSize), n: k }); });
+      }
+    });
+    return units;
   };
   st.transitPath = CP_CONFIG.serviceDir.replace(/\/+$/, '') + '/_в_пути/' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
   return cpPool(batches, 3, function (bt) {
@@ -375,20 +406,12 @@ function cpSrcViaCloud(st, jobs, loaded, ok, failed, show, setNow) {
       bt.forEach(function (j, i) { j.cloud = r.files[i]; });
     });
   }).catch(function (e) { throw { cloudStart: true, cause: e }; }).then(function () {
-    var units = [];
-    jobs.forEach(function (j) {
-      var c = j.cloud;
-      j.etags = [];
-      if (c.put) { j.left = 1; units.push({ j: j, url: c.put, start: 0, end: j.file.size, n: 0 }); }
-      else {
-        j.left = c.parts.length;
-        c.parts.forEach(function (u, k) { units.push({ j: j, url: u, start: k * c.partSize, end: Math.min(j.file.size, (k + 1) * c.partSize), n: k }); });
-      }
-    });
+    var units = unitsOf(jobs);
     /* прогресс — по кускам: loaded[«uN»] */
     jobs.forEach(function (j, i) { delete loaded[i]; });
-    var putUnit = function (u, ui) {
-      var key = 'u' + ui, tries = 0;
+    var putUnit = function (pre) { return function (u, ui) {
+      var key = pre + ui, tries = 0;
+      u.j.keys.push(key);
       if (u.j.broken) { loaded[key] = u.end - u.start; return Promise.resolve(); }
       setNow(u.j.dest.split('/').pop());
       var once = function () {
@@ -403,7 +426,7 @@ function cpSrcViaCloud(st, jobs, loaded, ok, failed, show, setNow) {
       };
       var go = function () {
         return once().catch(function (e) {
-          if (tries++ < 3) { loaded[key] = 0; return new Promise(function (r) { setTimeout(r, 1500 * tries); }).then(go); }
+          if (tries++ < 3 && cpUpRetriable(e)) { loaded[key] = 0; return cpWaitMs(CP.upRetryMs * tries).then(go); }
           throw e;
         });
       };
@@ -414,10 +437,27 @@ function cpSrcViaCloud(st, jobs, loaded, ok, failed, show, setNow) {
         if (--u.j.left === 0) return finishJob(u.j);
       }, function (e) {
         loaded[key] = u.end - u.start;
-        if (!u.j.broken) { u.j.broken = true; failed.push(u.j.dest.split('/').pop() + ': ' + ((e && e.message) || e)); }
+        if (!u.j.broken) { u.j.broken = true; u.j.err = (e && e.message) || String(e); u.j.hard = !cpUpRetriable(e); redo.push(u.j); }
       });
+    }; };
+    var pass = function (n) {
+      if (!redo.length) return;
+      var list = redo.splice(0), soft = list.filter(function (j) { return !j.hard; });
+      /* отказ по существу или проходы кончились — теперь говорим */
+      list.forEach(function (j) { if (j.hard || n > CP.upRedoPasses) failed.push(j.dest.split('/').pop() + ': ' + (j.err || 'не загрузился')); });
+      if (n > CP.upRedoPasses || !soft.length) return;
+      setNow('повторяю: ' + soft.length + ' файл(ов)');
+      show();
+      return cpWaitMs(CP.upRedoWaitMs * n).then(function () {
+        return CPDisk.proxyCloudUp({ op: 'start', files: soft.map(function (j) { return { size: j.file.size }; }) });
+      }).then(function (r) {
+        soft.forEach(function (j, i) { j.cloud = r.files[i]; });
+        return cpPool(unitsOf(soft), CP.cloudStreams, putUnit('r' + n + '_'));
+      }, function (e) {
+        soft.forEach(function (j) { j.err = (e && (e.message || e.body)) || 'Облако не ответило'; redo.push(j); });
+      }).then(function () { return pass(n + 1); });
     };
-    return cpPool(units, CP.cloudStreams, putUnit);
+    return cpPool(units, CP.cloudStreams, putUnit('u')).then(function () { return pass(1); });
   }).then(flush).then(function () {
     /* всё в Облаке; дальше Диск забирает сам — смотрим, пока окно открыто */
     cpTransitWatch(st);
@@ -433,27 +473,49 @@ function cpTransitSave(st) {
   }).catch(function (e) { if (window.console) console.warn('[CP] не записалось «в пути»', e); });
 }
 
-/** Сверить, доехало ли: операции Диска, при ошибке — попросить ещё раз (до 3 раз). Возвращает число ещё едущих. */
-function cpTransitCheck(items) {
-  var todo = items.filter(function (x) { return x.st !== 'done' && x.st !== 'lost'; }).slice(0, 60);
+/* Диск забирает файл из Облака сам; копия в Облаке живёт 3 дня, и всё это время его можно попросить
+   ещё раз — компьютер с файлом для этого не нужен. Раньше просили 3 раза подряд за несколько секунд
+   и писали «не удалось», хотя файл доезжал (Маша, 10.11.2026: «написала, что что-то не доехало, а
+   всё доехало»). Теперь: до CP.transitTries просьб с растущей паузой; перед каждой и у тех, что уже
+   «не удалось», проверяем по самому Диску — файл на месте и того же размера, значит, доехал. */
+CP.transitTries = 12;
+CP.transitRetryMs = 20000;                 /* пауза перед повторной просьбой: ×1, ×2, … не больше 5 минут */
+CP.transitKeepMs = 2.5 * 86400000;         /* дольше копия в Облаке не живёт — просить бесполезно */
+
+/** Сверить, доехало ли: операции Диска и сам Диск; не доехало — попросить ещё раз. Возвращает число ещё едущих. */
+function cpTransitCheck(items, since) {
+  var now = Date.now();
+  var stale = since && now - new Date(since).getTime() > CP.transitKeepMs;
+  var todo = items.filter(function (x) { return x.st !== 'done'; }).slice(0, 60);
   var again = [];
   return cpPool(todo, 4, function (x) {
+    /* по самому Диску: файл лежит и того же размера — доехал, что бы ни говорила операция */
     var viaMeta = function () {
-      return CPDisk.meta(x.path).then(function (m) { if (m && m.size === x.size) x.st = 'done'; else if (x.st === 'going' && !x.op) x.st = 'retry'; }, function () { if (!x.op) x.st = 'retry'; });
+      return CPDisk.meta(x.path).then(function (m) {
+        if (m && m.size === x.size) x.st = 'done';
+        else if (x.st === 'going' && !x.op) x.st = 'retry';
+      }, function () { if (x.st !== 'lost' && !x.op) x.st = 'retry'; });
     };
-    if (x.st === 'retry') { again.push(x); return Promise.resolve(); }
+    if (x.st === 'lost') return viaMeta();
+    if (x.st === 'retry') return viaMeta().then(function () { if (x.st === 'retry') again.push(x); });
     if (!x.op) return viaMeta();
     return CPDisk.opStatus(x.op).then(function (s) {
-      if (s === 'success') x.st = 'done';
-      else if (s === 'failed') { x.st = 'retry'; again.push(x); }
+      if (s === 'success') { x.st = 'done'; return; }
+      if (s !== 'failed') return;
+      x.st = 'retry'; x.op = '';
+      return viaMeta().then(function () { if (x.st === 'retry') again.push(x); });
     }, viaMeta);
   }).then(function () {
-    again = again.filter(function (x) { if ((x.tries || 1) >= 3) { x.st = 'lost'; return false; } return true; });
+    again = again.filter(function (x) {
+      if ((x.tries || 1) >= CP.transitTries || stale) { x.st = 'lost'; return false; }
+      return !x.at || now - x.at >= Math.min(300000, CP.transitRetryMs * (x.tries || 1));   /* ещё рано — подождём */
+    });
     if (!again.length) return;
     return CPDisk.proxyCloudUp({ op: 'fetch', items: again.map(function (x) { return { key: x.key, path: x.path }; }) }).then(function (r) {
       (r.results || []).forEach(function (res, i) {
         var x = again[i];
         x.tries = (x.tries || 1) + 1;
+        x.at = Date.now();
         if (res.status === 'started') { x.st = 'going'; x.op = res.href || ''; }
         else if (res.status === 'exists') x.st = 'done';
       });
@@ -505,7 +567,7 @@ function cpTransitScan() {
     return cpPool(files, 2, function (f) {
       return CPDisk.proxyFile(f.path).then(function (b) { return b.text(); }).then(function (t) {
         var m = JSON.parse(t), items = m.items || [];
-        return cpTransitCheck(items).then(function (left) {
+        return cpTransitCheck(items, m.ts).then(function (left) {
           var nLost = 0;
           items.forEach(function (x) {
             if (x.st === 'lost') nLost++;

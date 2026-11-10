@@ -69,6 +69,7 @@ const TRASHED = [], MOVED = [], ZIPPART_CALLS = [];
 const CRC_CALLS = [], ZIP_SLICES = [];
 let ZIPPART_FAIL_ONCE = null, ZIPPART_BAD = null;   /* ZIPPART_BAD — файл, который Яндекс не отдаёт (HTTP 500) */   /* оборвать один кусок архива — страница должна повторить */   /* что ушло в Корзину Диска / перенесено между этапами */
 const PROPS = new Map();   /* custom_properties папок (сводка съёмки) */
+let CLOUD_PUT_FAIL = null, UPLOAD_FAIL = null;   /* {re, n}: n раз «уронить» загрузку куска в Облако (по началу содержимого) / файла на Диск (по пути) */
 const RID_GEN = new Map();   /* путь -> поколение: файл убрали и положили заново — у новой копии другой resource_id */
 const meta = (p) => {
   const name = p.split('/').pop();
@@ -332,6 +333,9 @@ async function route(r) {
     if (m === 'OPTIONS') return r.fulfill({ status: 200, headers: { ...CORS, 'access-control-allow-methods': 'GET, PUT, HEAD', 'access-control-allow-headers': '*' }, body: '' });
     if (m === 'PUT') {
       if (!q['X-Amz-Signature']) return r.fulfill({ status: 403, headers: CORS, body: 'AccessDenied' });
+      if (CLOUD_PUT_FAIL && CLOUD_PUT_FAIL.n > 0 && CLOUD_PUT_FAIL.re.test((req.postDataBuffer() || Buffer.alloc(0)).toString().slice(0, 8))) {
+        CLOUD_PUT_FAIL.n--; return r.fulfill({ status: 500, headers: CORS, body: 'fail' });
+      }
       SPEED_PUTS.push(key + (q.partNumber ? '#' + q.partNumber : ''));
       if (q.uploadId) {
         const arr = CLOUD_PARTS.get(q.uploadId) || []; arr[+q.partNumber - 1] = req.postDataBuffer(); CLOUD_PARTS.set(q.uploadId, arr);
@@ -352,6 +356,7 @@ async function route(r) {
     DOWNLOADS.push(CLOUD.get(key));
     return r.fulfill({ status: 200, headers: { 'content-type': 'application/zip', 'content-disposition': 'attachment; filename="x.zip"' }, body: 'PK' });
   }
+  if (u.host === 'uploader1.disk.yandex.net' && UPLOAD_FAIL && UPLOAD_FAIL.n > 0 && UPLOAD_FAIL.re.test(q.p)) { UPLOAD_FAIL.n--; return r.fulfill({ status: 500, headers: CORS, body: 'fail' }); }
   if (u.host === 'uploader1.disk.yandex.net') { UPLOADS.push(q.p); if (!FILES.has(q.p)) FRESH.set(q.p, Date.now()); FILES.set(q.p, req.postDataBuffer()); return r.fulfill({ status: 201, headers: CORS, body: '' }); }
   return r.continue();
 }
@@ -1013,7 +1018,13 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       await page.click('[data-cp-acc="close"]');
       return txt;
     };
+    UPLOAD_FAIL = { re: /manekin\.tif$/, n: 2 };
+    await page.evaluate(() => { CP.upRetryMs = 20; });
     const t1 = await up([['готово/74595', 'manekin.tif'], ['готово/74596', 'manekin2.tif']]);
+    const upToast = await page.evaluate(() => { CP.upRetryMs = 1500; return document.getElementById('cbToast').textContent; });
+    check('сдача ретуши: Диск дважды не принял файл — программа догрузила его сама, без «не загрузилось»',
+      UPLOAD_FAIL.n === 0 && /Загружено в/.test(upToast) && !/не загрузилось/.test(upToast) && [...FILES.keys()].filter(k => k.indexOf(RV + '/' + SN + '/') === 0 && k.endsWith('/manekin.tif')).length === 1, upToast);
+    UPLOAD_FAIL = null;
     const inRv = n => [...FILES.keys()].filter(k => k.indexOf(RV + '/' + SN + '/') === 0 && k.endsWith('/' + n));
     check('сдача: буква ретушёра с прошлого раза не подставляется; «Загрузить» без неё не грузит и просит выбрать имя',
       needLog.length >= 1 && needLog[0].every(Boolean), JSON.stringify(needLog));
@@ -2027,11 +2038,56 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     check('«Всё в Облаке»: кадры, потом видео (большое — кусками)', /Всё в Облаке: файлов 3[^]*[Кк]омпьютер можно выключать/.test(await page.textContent('#cpSrcUp'))
       && puts.length === 5 && /#\d$/.test(puts[2]) && /#\d$/.test(puts[4]) && !/#/.test(puts[0]) && !/#/.test(puts[1]), JSON.stringify(puts));
     await page.waitForFunction(() => /всё на Диске/.test((document.getElementById('cpSrcUp') || {}).textContent || ''), null, { timeout: 20000 }).catch(() => {});
+    for (let i = 0; i < 30 && !REMOVED.some(p => /_в_пути\/.+\.json$/.test(p)); i++) await page.waitForTimeout(100);
     check('Диск забрал всё сам (видео собрано из кусков), не забранный с первого раза — попросил ещё раз; «в пути» удалено',
       String(FILES.get('disk:/Архив/' + CS + '/видео/big.mp4') || '') === 'V'.repeat(250) && String(FILES.get('disk:/Архив/' + CS + '/1/b.jpg') || '') === 'B'.repeat(70)
       && CLOUD_FETCH.filter(p => /\/1\/b\.jpg$/.test(p)).length === 2 && /Диск забирает файлы из Облака: 3 из 3/.test(await page.textContent('#cpSrcUp'))
       && REMOVED.some(p => /_в_пути\/.+\.json$/.test(p)), JSON.stringify([CLOUD_FETCH, REMOVED, await page.textContent('#cpSrcUp')]));
     await page.click('[data-cp-su="close"]');
+    /* 2.0.100: кусок не взялся и с четырёх попыток — файл догружается отдельным проходом в конце, без сообщения */
+    {
+      const CS2 = '2026-11-10_SV_ПОВТОР';
+      CLOUD_PUT_FAIL = { re: /^BBBB/, n: 5 };
+      await page.evaluate(n => {
+        CP.upRetryMs = 10; CP.upRedoWaitMs = 30;
+        cpSrcOpen(null);
+        cpSrcAdd([[n + '/1/a.jpg', 'A'.repeat(61)], [n + '/1/b.jpg', 'B'.repeat(71)]].map(x => ({ file: new File([x[1]], x[0].split('/').pop()), rel: x[0] })));
+      }, CS2);
+      await page.waitForFunction(() => /кадров 2/.test((document.getElementById('cpSrcUp') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => {});
+      await page.click('[data-cp-su="go"]');
+      await page.waitForFunction(() => /Всё в Облаке: файлов \d/.test((document.getElementById('cpSrcUp') || {}).textContent || ''), null, { timeout: 15000 }).catch(() => {});
+      const txt2 = await page.textContent('#cpSrcUp');
+      await page.waitForFunction(() => /всё на Диске/.test((document.getElementById('cpSrcUp') || {}).textContent || ''), null, { timeout: 20000 }).catch(() => {});
+      check('загрузка в Облако: файл не взялся пять раз подряд — догружен отдельным проходом, «не загрузилось» не пишется, файл на Диске',
+        /Всё в Облаке: файлов 2/.test(txt2) && !/не загрузилось/.test(txt2) && CLOUD_PUT_FAIL.n === 0 && String(FILES.get('disk:/Архив/' + CS2 + '/1/b.jpg') || '') === 'B'.repeat(71), txt2.slice(0, 400));
+      CLOUD_PUT_FAIL = null;
+      await page.evaluate(() => { CP.upRetryMs = 1500; CP.upRedoWaitMs = 5000; });
+      await page.click('[data-cp-su="close"]');
+      /* «не удалось», а файл на Диске лежит — отметка снимается сама; просьбы Диску — с паузами и до 12 раз */
+      const SD0 = await page.evaluate(() => CP_CONFIG.serviceDir), MAN2 = SD0 + '/_в_пути/test2.json';
+      DIRS.add(SD0 + '/_в_пути');
+      FILES.set(MAN2, Buffer.from(JSON.stringify({ ts: new Date().toISOString(), items: [{ path: 'disk:/Архив/' + CS2 + '/1/a.jpg', key: 'exports/x/0', size: 61, op: '', st: 'lost', tries: 3 }] })));
+      const rm0 = REMOVED.length;
+      await page.evaluate(() => cpTransitScan());
+      for (let i = 0; i < 40 && !REMOVED.slice(rm0).some(p => /test2\.json$/.test(p)); i++) await page.waitForTimeout(100);
+      check('«не доехало до Диска», а файл на Диске есть — отметка снимается сама при сверке', REMOVED.slice(rm0).some(p => /test2\.json$/.test(p))
+        && await page.evaluate(n => !Object.keys(CP.transit).some(k => k.indexOf(n) !== -1 && CP.transit[k].lost.length), CS2), JSON.stringify(REMOVED.slice(rm0)));
+      const sp = await page.evaluate(async () => {
+        const meta = CPDisk.meta, up = CPDisk.proxyCloudUp, asked = [];
+        CPDisk.meta = () => Promise.reject({ status: 404 });
+        CPDisk.proxyCloudUp = (b) => { asked.push(b.items.map(x => x.path).join()); return Promise.resolve({ results: b.items.map(() => ({ status: 'failed' })) }); };
+        const now = Date.now();
+        const early = [{ path: 'disk:/a', key: 'k', size: 1, op: '', st: 'retry', tries: 2, at: now }];
+        const due = [{ path: 'disk:/b', key: 'k', size: 1, op: '', st: 'retry', tries: 2, at: now - 60000 }];
+        const last = [{ path: 'disk:/c', key: 'k', size: 1, op: '', st: 'retry', tries: 12, at: now - 600000 }];
+        const old = [{ path: 'disk:/d', key: 'k', size: 1, op: '', st: 'retry', tries: 1 }];
+        const r = [await cpTransitCheck(early), await cpTransitCheck(due), await cpTransitCheck(last), await cpTransitCheck(old, new Date(now - 3 * 86400000).toISOString())];
+        CPDisk.meta = meta; CPDisk.proxyCloudUp = up;
+        return { left: r, st: [early[0].st, due[0].st + ':' + due[0].tries, last[0].st, old[0].st], asked };
+      });
+      check('Диск просим забрать файл не три раза подряд, а до 12 раз с растущей паузой; «не удалось» — только после этого или когда копии в Облаке уже нет',
+        JSON.stringify(sp.left) === '[1,1,0,0]' && JSON.stringify(sp.st) === '["retry","retry:3","lost","lost"]' && JSON.stringify(sp.asked) === '["disk:/b"]', JSON.stringify(sp));
+    }
     /* компьютер выключили, пока Диск забирал: при открытии витрина сверяет «в пути» и доводит до конца */
     const SD = await page.evaluate(() => CP_CONFIG.serviceDir), MAN = SD + '/_в_пути/test.json', KEY = 'exports/in_test/0', LATE = 'disk:/Архив/' + CS + '/1/late.jpg';
     SPEED_OBJ.set(KEY, Buffer.from('L'.repeat(33)));
