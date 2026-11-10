@@ -64,7 +64,8 @@ function cpCatRoleOf(name, settings) {
   if (r) return r;
   for (var i = 0; i < CP_CAT_WORDS.length; i++) if (CP_CAT_WORDS[i][0].test(name)) return CP_CAT_WORDS[i][1];
   var m = CP_CAT_RE.exec(name);
-  return (m && CP_CAT_NUM[m[1]]) || 'skip';
+  /* «ГОТОВО» без номера этапа — тоже сданное: читается вместе с папкой сайта (с номером решает номер) */
+  return (m && CP_CAT_NUM[m[1]]) || (/готов/i.test(name) ? 'site' : 'skip');
 }
 
 /** Папки каталога с этой ролью (исходники: сначала 01, потом прочие). */
@@ -83,6 +84,9 @@ function cpCatMerge(settings) {
     if (d) settings[r.setting] = d.path;
     else delete settings[r.setting];
   });
+  /* папок с готовым может быть две («05_САЙТ» и «ГОТОВО»): первая — куда программа отправляет, остальные только читаются */
+  var more = cpCatDirs('site', settings).slice(1).map(function (d) { return d.path; });
+  if (more.length) settings.siteMore = more; else delete settings.siteMore;
   settings.catalog = cpCatalog();
   return settings;
 }

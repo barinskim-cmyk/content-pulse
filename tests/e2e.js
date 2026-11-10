@@ -1853,6 +1853,27 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       FILES.delete(PL + '/74005_модель/k5.jpg'); [PL + '/74005_модель', PL].forEach(d => DIRS.delete(d));
       await page.evaluate(async () => { await cpScanStages(); await cpCountStageArts(); });
       check('папка съёмки в ретуши с « +» в конце имени читается как та же съёмка: её артикулы в счёте', JSON.stringify(pl) === '[2,"74001,74002,74005",3]', JSON.stringify(pl));
+      /* 2.0.105: даты лежат ещё и в папке «готово» — внутри папки сайта и отдельной папкой рядом */
+      const G1 = SITE + '/готово/06.10.26/Y/1/' + SH, G2 = K + '/ГОТОВО/05.10.26/U/3/' + SH;
+      [SITE + '/готово', SITE + '/готово/06.10.26', SITE + '/готово/06.10.26/Y', SITE + '/готово/06.10.26/Y/1', G1, G1 + '/Y_1', G1 + '/Y_1/74001_модель',
+        K + '/ГОТОВО', K + '/ГОТОВО/05.10.26', K + '/ГОТОВО/05.10.26/U', K + '/ГОТОВО/05.10.26/U/3', G2, G2 + '/74002_модель'].forEach(d => DIRS.add(d));
+      FILES.set(G1 + '/Y_1/74001_модель/g1.jpg', Buffer.from('G'.repeat(31)));
+      FILES.set(G2 + '/74002_модель/g2.jpg', Buffer.from('G'.repeat(32)));
+      const gt = await page.evaluate(async (k) => {
+        const roles = [cpCatRoleOf('ГОТОВО', {}), cpCatRoleOf('04_ГОТОВО', {}), cpCatRoleOf('ПРОЧЕЕ', {})].join();
+        const was = CP.settings.siteMore;
+        CP.settings.siteMore = [k + '/ГОТОВО'];
+        cpSiteOldReset(); await cpScanStages(); await cpCountStageArts();
+        const d = CP.shoots.find(s => s.name === '2026-11-06_SV_КАТ'), low = d.name.toLowerCase();
+        const out = [roles, Object.keys((CP.stageArts.site || {})[low] || {}).sort().join(), ((CP.stagePaths.site || {})[low] || []).length];
+        if (was) CP.settings.siteMore = was; else delete CP.settings.siteMore;
+        return out;
+      }, K);
+      [G1 + '/Y_1/74001_модель/g1.jpg', G2 + '/74002_модель/g2.jpg'].forEach(f => FILES.delete(f));
+      [...DIRS].filter(d => d.indexOf(SITE + '/готово') === 0 || d.indexOf(K + '/ГОТОВО') === 0).forEach(d => DIRS.delete(d));
+      await page.evaluate(async () => { cpSiteOldReset(); await cpScanStages(); await cpCountStageArts(); });
+      check('папки с датами в «готово» читаются: и внутри папки сайта, и отдельной папкой «ГОТОВО» рядом (без номера этапа она считается сданным)',
+        JSON.stringify(gt) === '["site,review,skip","74001,74002",2]', JSON.stringify(gt));
     }
     RID_GEN.delete(KRT + '/74002_модель/k2.jpg');
     FILES.delete(KSTATE); PROPS.delete(K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ');

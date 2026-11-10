@@ -288,7 +288,7 @@ function cpScanStages() {
     /* «Сайт» читаем в том виде, как туда сдают сейчас (Маша, 10.11.2026: «структура шибанутая — дата /
        буква / номер / съёмка / партия; на время тестирования её сохраняем, программа должна уметь
        читать и её, и ту, которую хотим»): папка съёмки ищется на любом уровне до пятого. */
-    var maxDepth = key === 'site' ? 5 : 3;
+    var maxDepth = key === 'site' ? 6 : 3;   /* с запасом: «готово» / дата / буква / номер / съёмка (Маша, 10.11: «ещё папки с датами в папке готово») */
     var oldDates = [];
     var level = function (paths, depth, into, inOld) {
       if (!paths.length || depth > maxDepth) return Promise.resolve();
@@ -348,7 +348,9 @@ function cpScanStages() {
         if (dirty) cpSiteOldSave(archive, cache);
       });
     };
-    return level([root], 1, cur, false).then(readOld).then(function () { return [key, names, where, info]; }, function (e) { return [key, 'fail', e]; });
+    /* «Сайт» может быть не один: вторая папка с готовым («ГОТОВО» рядом с «05_САЙТ») читается так же */
+    var roots = [root].concat(key === 'site' ? (s.siteMore || []) : []);
+    return level(roots, 1, cur, false).then(readOld).then(function () { return [key, names, where, info]; }, function (e) { return [key, 'fail', e]; });
   })).then(function (pairs) {
     if (CP.archive !== archive) return;
     /* Папка этапа не прочиталась (сеть, Диск ответил ошибкой или «слишком много запросов») — это не
