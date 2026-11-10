@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.87';
+var CP_VERSION = '2.0.88';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -713,7 +713,7 @@ function cpBlobToThumb(blob, shrink) {
     var w = bmp.width, h = bmp.height;
     if (bmp.close) bmp.close();
     return new Promise(function (res) {
-      cnv.toBlob(function (b) { res({ url: URL.createObjectURL(b), w: w, h: h }); }, 'image/jpeg', 0.85);
+      cnv.toBlob(function (b) { res({ url: URL.createObjectURL(b), w: w, h: h, blob: b }); }, 'image/jpeg', 0.85);
     });
   });
 }
@@ -750,8 +750,8 @@ function cpPumpThumbs() {
       cpLoadThumb(p).then(function (t) {
         cpThumbDone(p.disk, t);
       }).catch(function (e) {
-        cpThumbFailed(p.disk, e);
-        if (e && e.status === 401) cpHandleError(e);
+        if (e && e.status === 401) { cpThumbFailed(p.disk, e); cpHandleError(e); return; }
+        if (CPDisk.hasProxy()) cpOwnPreview(p.disk, e); else cpThumbFailed(p.disk, e);
       }).then(function () {
         CP.loadingThumbs--;
         cpPumpThumbs();
@@ -773,8 +773,12 @@ function cpPumpBatches() {
             return cpBlobToThumb(cpB64Blob(it.data, it.type), false).then(function (t) { cpThumbDone(disk, t); });
           }
           if (it && it.status === 'later') { CP.queue.push({ disk: disk }); return null; }
-          cpThumbFailed(disk, it);
-          if (it && it.status === 401 && !CP._authWarned) { CP._authWarned = true; cpHandleError({ status: 401, message: 'Не авторизован' }); }
+          if (it && it.status === 401) {
+            cpThumbFailed(disk, it);
+            if (!CP._authWarned) { CP._authWarned = true; cpHandleError({ status: 401, message: 'Не авторизован' }); }
+            return null;
+          }
+          cpOwnPreview(disk, it);   /* у Яндекса превью нет или оно не отдалось — делаем своё из самого файла */
           return null;
         });
         return Promise.all(jobs);
@@ -790,6 +794,97 @@ function cpPumpBatches() {
       });
     })(batch);
   }
+}
+
+/* ---------- своё превью, когда у Яндекса его нет ----------
+   Маша, 10.11.2026: «у Яндекса иногда глючит превью — картинка на Диске может быть без превью.
+   Если превью не загружено, нужно скачать сам файл, сделать из него превью и отправить —
+   чтобы все картинки всегда отображались».
+   Порядок для кадра без превью:
+     1) готовое своё превью из служебной папки: <_ContentPulse>/превью/<2 знака md5>/<md5>.jpg;
+     2) нет его — файл переносится в Облако (прослойка, op=whole), страница забирает его оттуда,
+        уменьшает до CP_THUMB_SIDE и показывает; уменьшенная копия ложится в служебную папку —
+        второй раз (и у коллег) кадр берётся оттуда, без переноса исходника;
+     3) Облако не отдало файл странице (нет доступа из браузера) — показываем сам файл по ссылке
+        Облака: картинка видна, просто тяжелее.
+   Не вышло ничего — «превью не загрузилось», как раньше. По два кадра одновременно: исходники тяжёлые. */
+CP.ownQueue = [];
+CP.ownBusy = 0;
+CP.ownParallel = 2;
+CP.ownDirs = {};       /* папки своих превью, которые уже создавали в этой вкладке */
+CP.ownStats = { cached: 0, made: 0, direct: 0, failed: 0 };
+
+function cpOwnPreviewPath(md5) {
+  return CP_CONFIG.serviceDir.replace(/\/+$/, '') + '/превью/' + String(md5).slice(0, 2) + '/' + md5 + '.jpg';
+}
+
+function cpOwnPreview(disk, why) {
+  if (!CPDisk.hasProxy()) { cpThumbFailed(disk, why); return; }
+  CP.thumbPending[disk] = true;
+  CP.ownQueue.push({ disk: disk, why: why });
+  cpOwnPump();
+}
+
+function cpOwnPump() {
+  while (CP.ownBusy < CP.ownParallel && CP.ownQueue.length) {
+    (function (job) {
+      CP.ownBusy++;
+      cpOwnMake(job.disk).then(function (t) {
+        cpThumbDone(job.disk, t);
+      }, function (e) {
+        CP.ownStats.failed++;
+        if (window.console) console.warn('[CP] своё превью не получилось', job.disk, e && (e.body || e.message || e));
+        cpThumbFailed(job.disk, job.why || e);
+      }).then(function () { CP.ownBusy--; cpOwnPump(); });
+    })(CP.ownQueue.shift());
+  }
+}
+
+/** Картинка по ссылке без чтения её данных (когда Облако не отдаёт файл странице). */
+function cpImgByUrl(url) {
+  return new Promise(function (res, rej) {
+    var img = new Image();
+    img.onload = function () { res({ url: url, w: img.naturalWidth, h: img.naturalHeight }); };
+    img.onerror = function () { rej(new Error('картинка по ссылке не открылась')); };
+    img.src = url;
+  });
+}
+
+function cpOwnMake(disk) {
+  var p = App.photos.filter(function (q) { return q.disk === disk; })[0] || {};
+  var md5 = p.md5 || '', name = p.name || String(disk).split('/').pop();
+  var cached = md5 ? CPDisk.proxyFile(cpOwnPreviewPath(md5)).then(function (b) {
+    if (!b || !b.size) throw new Error('пусто');
+    return cpBlobToThumb(new Blob([b], { type: 'image/jpeg' }), false).then(function (t) {
+      if (!t.w) throw new Error('не картинка');
+      CP.ownStats.cached++;
+      return t;
+    });
+  }) : Promise.reject(new Error('нет md5'));
+  return cached.catch(function () {
+    return CPDisk.proxyMpu({ op: 'whole', from: disk, size: p.size || 0, filename: name }).then(function (out) {
+      if (!out || !out.url) throw new Error('Облако не выдало ссылку на файл');
+      return fetch(out.url, { cache: 'no-store' }).then(function (r) {
+        if (!r.ok) throw new Error('Облако: HTTP ' + r.status);
+        return r.blob();
+      }).then(function (blob) {
+        return cpBlobToThumb(blob, true);
+      }).then(function (t) {
+        CP.ownStats.made++;
+        /* уменьшенную копию — в служебную папку: в следующий раз берём её (ошибка записи не мешает показу) */
+        if (md5 && t.blob) {
+          var path = cpOwnPreviewPath(md5), dir = path.slice(0, path.lastIndexOf('/'));
+          (CP.ownDirs[dir] ? Promise.resolve() : CPDisk.ensureDir(dir).then(function () { CP.ownDirs[dir] = true; }))
+            .then(function () { return CPDisk.uploadBlob(path, t.blob, true); })
+            .catch(function (e) { if (window.console) console.warn('[CP] своё превью не сохранилось', path, e && (e.body || e.message || e)); });
+        }
+        return { url: t.url, w: t.w, h: t.h };
+      }, function (e) {
+        /* файл в Облаке есть, но странице не отдался или не уменьшился — показываем его по ссылке */
+        return cpImgByUrl(out.url).then(function (t) { CP.ownStats.direct++; return t; }, function () { throw e; });
+      });
+    });
+  });
 }
 
 /* Заглушка вместо «файл не найден» для кадров с Диска, пока превью грузится. */
@@ -2645,8 +2740,16 @@ function cpLoadBig(disk) {
   var p = CPDisk.proxyPreview(disk, CP_BIG_SIZE).catch(function (e) {
     if (e && e.status === 413) return CPDisk.proxyPreview(disk, CP_BIG_FALLBACK);
     throw e;
+  }).catch(function (e) {
+    /* у Яндекса нет превью этого кадра — показываем сам файл: прослойка переносит его в Облако */
+    if (!e || e.status === 401) throw e;
+    var ph = App.photos.filter(function (q) { return q.disk === disk; })[0] || {};
+    return CPDisk.proxyMpu({ op: 'whole', from: disk, size: ph.size || 0, filename: ph.name || 'file.jpg' }).then(function (out) {
+      if (!out || !out.url) throw e;
+      return cpImgByUrl(out.url).then(function () { return { direct: out.url }; }, function () { throw e; });
+    });
   }).then(function (blob) {
-    var url = URL.createObjectURL(blob);
+    var url = blob && blob.direct ? blob.direct : URL.createObjectURL(blob);
     CP.big[disk] = url;
     delete _cpBigP[disk];
     return url;

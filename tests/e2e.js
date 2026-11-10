@@ -60,6 +60,8 @@ const MPU = new Map();
 const MPU_PARTS = [];
 const WHOLE = [];   /* ключ в бакете -> путь архива */   /* путь .zip на Диске -> имена внутри архива */
 const PREVIEW_CALLS = { single: 0, batch: 0, big: 0 };
+const NO_PREVIEW = new Set();   /* кадры, у которых Яндекс «забыл» сделать превью */
+const OWN_GETS = []; let OWN_NOCORS = false;   /* сам файл из Облака для своего превью; OWN_NOCORS — Облако не отдаёт его странице */
 /* режим «превью заблокировано»: файлы — настоящие картинки, их будут уменьшать в браузере */
 if (process.env.BLOCK_PREVIEW) for (const k of [...FILES.keys()]) FILES.set(k, png(60, 40));
 const md5 = (b) => require('crypto').createHash('md5').update(b).digest('hex');
@@ -141,11 +143,13 @@ async function route(r) {
       const b = JSON.parse(req.postData() || '{}');
       const img = png(30, 20).toString('base64');
       return json(200, { items: (b.paths || []).map(p => process.env.BLOCK_PREVIEW ? { path: p, status: 502, error: 'blocked' }
+        : NO_PREVIEW.has(p) ? { path: p, status: 404, error: 'У файла нет превью' }
         : FILES.has(p) ? { path: p, type: 'image/png', data: img } : { path: p, status: 404, error: 'nf' }) });
     }
     if (q.a === 'preview') {
       if (q.size === '2400x2400') PREVIEW_CALLS.big++; else PREVIEW_CALLS.single++;
       if (process.env.BLOCK_PREVIEW) return json(502, { error: 'blocked' });
+      if (NO_PREVIEW.has(q.path)) return json(404, { error: 'У файла нет превью' });
       return r.fulfill({ status: 200, headers: { ...CORS, 'content-type': 'image/png' }, body: png(30, 20) });
     }
     if (q.a === 'props' && m === 'POST') {
@@ -335,6 +339,13 @@ async function route(r) {
       return r.fulfill({ status: 200, headers: CORS, body: '' });
     }
     if (m === 'GET' && SPEED_OBJ.has(key)) { SPEED_GETS.push(key); return r.fulfill({ status: 200, headers: CORS, body: SPEED_OBJ.get(key) }); }
+    /* своё превью: страница забирает сам файл из Облака (fetch) или показывает его картинкой */
+    if (m === 'GET' && CLOUD.has(key) && NO_PREVIEW.has(CLOUD.get(key)) && FILES.has(CLOUD.get(key)) && req.resourceType() !== 'document') {
+      OWN_GETS.push(req.resourceType() + ' ' + CLOUD.get(key));
+      /* OWN_NOCORS: как бакет без доступа со страницы — fetch обрывается, а картинкой (<img>) файл открывается */
+      if (OWN_NOCORS && req.resourceType() !== 'image') return r.abort('failed');
+      return r.fulfill({ status: 200, headers: { ...CORS, 'content-type': 'image/png' }, body: FILES.get(CLOUD.get(key)) });
+    }
     if (!CLOUD.has(key) || !q['X-Amz-Signature']) return r.fulfill({ status: 403, body: 'AccessDenied' });
     DOWNLOADS.push(CLOUD.get(key));
     return r.fulfill({ status: 200, headers: { 'content-type': 'application/zip', 'content-disposition': 'attachment; filename="x.zip"' }, body: 'PK' });
@@ -2071,6 +2082,37 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     check('очередь: копии уходят пачками по 50, всё подтверждено — готово', qc.all === true && qc.sizes.join(',') === '50,50,30' && qc.left0 === 0, JSON.stringify(qc.sizes));
     check('очередь: файл, про который прослойка не ответила, остаётся в очереди', qc.partOk === false && qc.left === 130 - 60, 'осталось ' + qc.left);
     check('очередь: пачка, упавшая целиком, остаётся, остальные ушли; перенос — пачками по 100', qc.netOk === false && qc.netLeft === 50 && qc.mv === true && qc.ms.join(',') === '100,30', JSON.stringify([qc.netLeft, qc.ms]));
+    /* своё превью (Маша, 10.11): у Яндекса нет превью кадра — берём сам файл через Облако, уменьшаем, кладём в служебную папку */
+    {
+      const NP = 'disk:/Архив/LM-NOPREV', n1 = NP + '/n1.jpg', n2 = NP + '/n2.jpg';
+      DIRS.add(NP); FILES.set(n1, png(60, 40)); FILES.set(n2, Buffer.from('Z'.repeat(90))); NO_PREVIEW.add(n1);
+      const openNp = async (pg) => {
+        await pg.evaluate(() => cpOpenShoot('disk:/Архив/LM-NOPREV', 'LM-NOPREV'));
+        await pg.waitForFunction(() => CP.shoot && CP.shoot.name === 'LM-NOPREV' && App.photos.length === 2 && App.photos.every(p => p.dataUrl), null, { timeout: 10000 }).catch(() => {});
+        return pg.evaluate(() => { const p = App.photos.find(x => /n1\.jpg$/.test(x.disk)) || {}; return { url: String(p.dataUrl || '').slice(0, 40), w: p.w, h: p.h, st: CP.ownStats, path: p.md5 ? cpOwnPreviewPath(p.md5) : '', failed: p._thumbState }; });
+      };
+      const a1 = await openNp(t);
+      for (let i = 0; i < 40 && !FILES.has(a1.path); i++) await t.waitForTimeout(100);
+      check('у Яндекса нет превью — кадр всё равно показан: файл взят через Облако и уменьшен', /^blob:/.test(a1.url) && a1.w === 60 && a1.h === 40 && a1.st.made === 1 && WHOLE.includes(n1), JSON.stringify(a1));
+      check('своё превью легло в служебную папку: _ContentPulse/превью/<2 знака md5>/<md5>.jpg', !!a1.path && /\/превью\/[0-9a-f]{2}\/[0-9a-f]{32}\.jpg$/.test(a1.path) && FILES.has(a1.path), a1.path);
+      const wholeBefore = WHOLE.filter(x => x === n1).length;
+      const t2 = await ctx.newPage(); await t2.goto(base); await t2.waitForSelector('.cp-shoot', { timeout: 8000 });
+      const a2 = await openNp(t2);
+      check('второй раз (и у коллег) своё превью берётся из служебной папки — исходник больше не переносится', /^blob:/.test(a2.url) && a2.st.cached === 1 && a2.st.made === 0 && WHOLE.filter(x => x === n1).length === wholeBefore, JSON.stringify(a2));
+      await t2.close();
+      /* Облако не отдаёт файл странице — показываем сам файл по ссылке Облака */
+      FILES.delete(a1.path); OWN_NOCORS = true;
+      const t3 = await ctx.newPage(); await t3.goto(base); await t3.waitForSelector('.cp-shoot', { timeout: 8000 });
+      const a3 = await openNp(t3);
+      check('Облако не отдало файл странице — кадр показан по ссылке Облака', /^https:\/\/storage\.yandexcloud\.net/.test(a3.url) && a3.st.direct === 1 && a3.w === 60, JSON.stringify(a3));
+      /* просмотр крупно: нет крупного превью — сам файл */
+      const big = await t3.evaluate(async () => { const p = App.photos.find(x => /n1\.jpg$/.test(x.disk)); try { return String(await cpLoadBig(p.disk)).slice(0, 34); } catch (e) { return 'ошибка: ' + (e && e.message); } });
+      check('просмотр крупно без превью Яндекса — открывается сам файл из Облака', /^https:\/\/storage\.yandexcloud\.net/.test(big), big);
+      await t3.close();
+      OWN_NOCORS = false; NO_PREVIEW.delete(n1); FILES.delete(n1); FILES.delete(n2); FILES.delete(NP + '/_contentpulse.json'); DIRS.delete(NP);
+      for (const k of [...FILES.keys()]) if (/_ContentPulse\/превью\//.test(k)) FILES.delete(k);
+      for (const d of [...DIRS]) if (/_ContentPulse\/превью/.test(d)) DIRS.delete(d);
+    }
     check('разбор 10.11: страница без ошибок', terr.length === 0, terr.join(' | '));
     await t.close();
   }
