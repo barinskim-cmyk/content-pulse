@@ -10,8 +10,9 @@
    с датами. Даты для выработки ретушёров — внутри».
 
    Решения Маши (06.11):
-   - кто сдал — буква, которую ретушёр выбирает при сдаче (компьютер её
-     запоминает; из имени скачанного архива «…_Y_1» подставляется сама);
+   - кто сдал — буква, которую ретушёр выбирает при сдаче. Сама подставляется
+     только из имён папок («…_Y_1», «…_03_РЕТУШЬ_Y_дата», «Y_74595_…»); иначе
+     её нужно нажать — с прошлого раза не запоминается (Маша, 10.11);
    - кто и когда — внутри: таблица _ContentPulse/выработка.csv и скрытая
      метка на папке артикула; в именах папок дат нет;
    - доработка — остаётся в 04 с припиской «_доработка», новая версия
@@ -25,7 +26,6 @@
 
 var CP_OUTPUT_FILE = 'выработка.csv';
 var CP_OUTPUT_HEAD = 'дата;время;ретушёр;съёмка;карточка;кадров;событие;кто;версия';
-var CP_RT_LETTER = 'cp_rt_letter';
 
 function cpReviewRoot() { return (CP.settings && CP.settings.retouched) || ''; }
 
@@ -71,9 +71,8 @@ cpAcceptUpload = function () {
   var li = document.getElementById('cpAccLetter'), ni = document.getElementById('cpAccN');
   if (li) st.letter = li.value.trim();
   if (ni) st.n = ni.value.trim();
-  if (!st.letter) { cbToast('Выберите букву ретушёра'); return; }
+  if (!st.letter) { cpAcceptNeedLetter(); return; }
   if (!st.n) st.n = '1';
-  cpSet(CP_RT_LETTER, st.letter);
   var batch = cpToday() + '_' + st.letter + '_' + st.n;
   var base = root.replace(/\/+$/, '') + '/' + CPDisk.safeName(st.name);
   var cards = st.data.cards || [];
@@ -143,7 +142,9 @@ cpAcceptUpload = function () {
         rows.push(cpOutputRow(ver, st.name, card, 'сдано'));
       });
       (m.events = m.events || []).push({ ts: now, actor: who, action: 'rt_upload', items: ok.map(function (j) { return j.name; }),
-        note: 'сдача ' + batch + ' в ' + label + ': карточек ' + Object.keys(byCard).length + ', файлов ' + ok.length + (failed.length ? ', не загрузилось ' + failed.length : '') });
+        note: 'сдача ' + batch + ' в ' + label + ': карточек ' + Object.keys(byCard).length + ', файлов ' + ok.length + (failed.length ? ', не загрузилось ' + failed.length : '')
+          + ' · буква ' + st.letter + (st.letterAuto ? ' — из имени папки' : st.letterHow === 'took' ? ' — выбрана, забирал(а) эти артикулы' : ' — выбрана при сдаче')
+          + (st.found ? ' · съёмка найдена по артикулам' : '') });
     };
     var saved;
     if (CP.shoot && CP.shoot.path === st.path) {
@@ -203,18 +204,24 @@ function cpReviewPresent(shootName, dir) {
   });
 }
 
-/* в окне сдачи: буква с прошлого раза, кнопка — «Загрузить в 04_…» */
+/* в окне сдачи: кнопка — «Загрузить в 04_…»; съёмку нашли по артикулам — сверху вопрос «сдаём сюда?» */
 cpAcceptPlan = (function (orig) {
   return function () {
-    var st = CP.accept;
-    if (st && !st.letter && !(st.plan && st.plan.letter) && st.files.length) {
-      var plan = cpPlanUpload(st.files, st.data);
-      if (!plan.letter) st.letter = cpGet(CP_RT_LETTER, '');
-    }
     var r = orig.apply(this, arguments);
-    var root = cpReviewRoot();
+    var st = CP.accept, root = cpReviewRoot();
     var b = document.querySelector('[data-cp-acc="go"]');
     if (root && b) b.textContent = 'Загрузить в ' + cpFolderBase(root);
+    var box = document.getElementById('cpAccPlan');
+    if (st && st.found && box && !document.getElementById('cpAccFound')) {
+      var cur = st.found.list.filter(function (x) { return x.d.path === st.path; })[0];
+      var others = st.found.list.filter(function (x) { return x.d.path !== st.path; });
+      box.insertAdjacentHTML('afterbegin', '<div class="cp-acc-found" id="cpAccFound">Папки артикулов без папки съёмки. Артикул' + (st.found.codes.length > 1 ? 'ы' : '') + ' '
+        + cbEsc(st.found.codes.slice(0, 12).join(', ')) + (st.found.codes.length > 12 ? '…' : '') + ' — в съёмке <b>' + cbEsc(st.name) + '</b>'
+        + (cur && cur.miss.length ? ' (нет в ней: ' + cbEsc(cur.miss.slice(0, 8).join(', ')) + ')' : '') + '. Сдаём в неё? Да — выберите своё имя и нажмите «Загрузить»; нет — закройте окно.'
+        + (others.length ? '<br>Эти артикулы есть и в других съёмках: ' + others.map(function (x) {
+          return '<a href="#" data-cp-acc-shoot="' + cbEsc(x.d.path) + '">' + cbEsc(x.d.name) + '</a>';
+        }).join(', ') : '') + '</div>');
+    }
     return r;
   };
 })(cpAcceptPlan);
@@ -1237,13 +1244,105 @@ function cpShootByFolder(top) {
   return best;
 }
 
+/* Сдача просто папками артикулов (Маша, 10.11.2026: «ретушёр должен мочь загрузить просто
+   папками артикулов, без дополнительных данных; программа находит, в какой съёмке есть такой
+   артикул — может быть в нескольких — и спрашивает: эту съёмку сдаём, ты — тот ретушёр, который
+   забирал? Человек ставит «да» — и подгружается в нужную съёмку»).
+   Где искать: артикулы, которые сейчас лежат в папке ретуши или в отретушированном (сверка
+   витрины с Диском, CP.stageArts) — то есть в работе. */
+
+/** Коды артикулов из перетащенных папок (буква ретушёра в начале имени не мешает); нет папок — из имён файлов. */
+function cpDropCodes(files) {
+  var codes = {}, order = [];
+  var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  var add = function (c) { if (c && !codes[c]) { codes[c] = true; order.push(c); } };
+  files.forEach(function (x) {
+    var segs = String(x.rel || '').split('/'), name = segs.pop(), got = '';
+    for (var i = segs.length - 1; i >= 0 && !got; i--) {
+      var sg = segs[i], lm = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(sg);
+      if (lm && letters.indexOf(lm[1]) !== -1) sg = lm[2];
+      got = cpArtCode(null, sg);
+    }
+    if (!got && !segs.length) got = cpArtCode(null, name);
+    add(got);
+  });
+  return order;
+}
+
+/** Съёмки, где эти артикулы сейчас в работе: {codes, list: [{d, hit: [коды], miss: [коды]}]} — лучшая первой. */
+function cpShootsByArticles(files) {
+  var codes = cpDropCodes(files), list = [];
+  if (!codes.length) return { codes: codes, list: list };
+  (CP.shoots || []).forEach(function (d) {
+    var low = d.name.toLowerCase(), have = {};
+    ['retouch', 'review'].forEach(function (key) {
+      if (!(CP.stagePresence && CP.stagePresence[key] && CP.stagePresence[key][low])) return;
+      var c = ((CP.stageArts || {})[key] || {})[low];
+      if (c) Object.keys(c).forEach(function (k) { have[k] = true; });
+    });
+    var hit = codes.filter(function (c) { return have[c]; });
+    if (hit.length) list.push({ d: d, hit: hit, miss: codes.filter(function (c) { return !have[c]; }) });
+  });
+  list.sort(function (a, b) { return b.hit.length - a.hit.length || (a.d.modified < b.d.modified ? 1 : -1); });
+  return { codes: codes, list: list };
+}
+
+/** Открыть окно сдачи для найденной съёмки (found — из cpShootsByArticles). */
+function cpAcceptOpenFound(found, d, files) {
+  cpAcceptOpen(d.path, d.name);
+  if (!CP.accept) return;
+  CP.accept.found = found;
+  CP.accept.foundFiles = files;
+  cpAcceptAdd(files);
+}
+
+/** Артикулы нашлись в нескольких съёмках — сначала спросить, в какую сдаём (ничего не выбрано заранее). */
+function cpAcceptChoose(found, files) {
+  var box = document.getElementById('cpAccept');
+  if (!box) { box = document.createElement('div'); box.id = 'cpAccept'; box.className = 'cp-files'; document.body.appendChild(box); }
+  CP.accept = null;
+  CP.acceptChoice = { found: found, files: files };
+  box.innerHTML = '<div class="cp-files-box"><div class="cp-files-head"><b>Сдать ретушь · в какую съёмку?</b><button data-cp-acc-x="1" title="Закрыть">×</button></div>'
+    + '<div class="cp-acc-body"><div class="cp-acc-found">Папки артикулов без папки съёмки: ' + cbEsc(found.codes.slice(0, 12).join(', ')) + (found.codes.length > 12 ? '…' : '')
+    + '. Такие артикулы сейчас в работе в нескольких съёмках — выберите, в какую сдаём:'
+    + '<div class="cp-acc-shoots">' + found.list.map(function (x, i) {
+      return '<button data-cp-acc-pick="' + i + '"><b>' + cbEsc(x.d.name) + '</b><small>артикулов из ваших папок: ' + x.hit.length + ' из ' + found.codes.length
+        + (x.miss.length ? ' · нет: ' + cbEsc(x.miss.slice(0, 6).join(', ')) : '') + '</small></button>';
+    }).join('') + '</div></div></div></div>';
+  box.classList.add('cp-open');
+}
+
+document.addEventListener('click', function (e) {
+  var pick = e.target.closest('[data-cp-acc-pick]'), x = e.target.closest('[data-cp-acc-x]'), sw = e.target.closest('[data-cp-acc-shoot]');
+  if (x) { document.getElementById('cpAccept').classList.remove('cp-open'); CP.acceptChoice = null; return; }
+  if (pick && CP.acceptChoice) {
+    var ch = CP.acceptChoice, it = ch.found.list[+pick.getAttribute('data-cp-acc-pick')];
+    CP.acceptChoice = null;
+    if (it) cpAcceptOpenFound(ch.found, it.d, ch.files);
+    return;
+  }
+  if (sw && CP.accept && CP.accept.found) {
+    e.preventDefault();
+    var found = CP.accept.found, files = CP.accept.foundFiles || CP.accept.files, path = sw.getAttribute('data-cp-acc-shoot');
+    var to = found.list.filter(function (y) { return y.d.path === path; })[0];
+    if (to) cpAcceptOpenFound(found, to.d, files);
+  }
+});
+
 function cpReviewDrop(files) {
   if (!files.length) return;
   var top = files[0].rel.split('/')[0];
   var d = files.every(function (f) { return f.rel.split('/')[0] === top; }) ? cpShootByFolder(top) : null;
-  if (!d) { cbToast('Не нашла съёмку по имени папки «' + top + '». Выберите съёмку и нажмите «Сдать»'); return; }
-  cpAcceptOpen(d.path, d.name);
-  cpAcceptAdd(files);
+  if (d) { cpAcceptOpen(d.path, d.name); cpAcceptAdd(files); return; }
+  /* папки артикулов без папки съёмки — ищем съёмку по артикулам */
+  var found = cpShootsByArticles(files);
+  if (!found.list.length) {
+    cbToast(found.codes.length ? 'Не нашла съёмку, где артикул' + (found.codes.length > 1 ? 'ы ' : ' ') + found.codes.slice(0, 6).join(', ') + ' сейчас в ретуши. Выберите съёмку и нажмите «Сдать»'
+      : 'Не нашла съёмку по имени папки «' + top + '». Выберите съёмку и нажмите «Сдать»');
+    return;
+  }
+  if (found.list.length === 1) cpAcceptOpenFound(found, found.list[0].d, files);
+  else cpAcceptChoose(found, files);
 }
 
 cpRenderShoots = (function (orig) {
@@ -1253,7 +1352,7 @@ cpRenderShoots = (function (orig) {
     if (!list || CP.stageFilter !== 'review' || !root || document.getElementById('cpRvDrop')) return r;
     list.insertAdjacentHTML('afterbegin', '<div class="cp-rv-drop" id="cpRvDrop">Перетащите сюда папку с готовой ретушью — как на Диск '
       + '(или <label class="cp-acc-pick">выберите папку<input type="file" id="cpRvDropPick" webkitdirectory multiple hidden></label>). '
-      + 'Съёмка найдётся по имени папки (как назывался скачанный архив), файлы лягут в ' + cbEsc(cpFolderBase(root)) + '.</div>');
+      + 'Можно скачанный архив целиком, можно просто папки артикулов: съёмка найдётся по имени папки или по артикулам, файлы лягут в ' + cbEsc(cpFolderBase(root)) + '.</div>');
     var z = document.getElementById('cpRvDrop');
     var pick = document.getElementById('cpRvDropPick');
     pick.onchange = function () {
@@ -1289,7 +1388,8 @@ function cpRvCardUpload(id, files) {
   var base = root.replace(/\/+$/, '') + '/' + CPDisk.safeName(shoot.name);
   var from = cpRvDirOf(last) || base + '/' + cpRvDirFor(card, idx);
   var target = from.replace(/_доработка$/i, '');
-  var letter = last.letter || cpGet(CP_RT_LETTER, ''), wasRework = last.status === 'rework';
+  /* кто сдаёт: буква этой версии, иначе — кто забирал карточку; с прошлого раза букву не берём */
+  var letter = last.letter || (card && typeof cpCardLetter === 'function' ? cpCardLetter(card) : '') || '', wasRework = last.status === 'rework';
   var used = {}, jobs = [];
   files.forEach(function (x) {
     var name = CPDisk.safeName(x.file.name), k = 2;

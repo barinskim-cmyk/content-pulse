@@ -142,6 +142,22 @@ function cpPlanUpload(files, data) {
     segs = segs.map(function (s) { return s.slice(1); });
   }
   var lm = /_([A-Za-zА-Яа-яЁё]{1,3})_(\d+)$/.exec(top) || [];
+  /* Буква ретушёра известна по именам папок — тогда выбирать её не нужно (Маша, 10.11.2026:
+     «сдаёт папку, в которой уже есть буква его имени, — сразу подставляем»): архив из папки
+     ретуши «…_03_РЕТУШЬ_Y_2026-11-10» и папки артикулов «Y_74595_…». Разные буквы — не знаем. */
+  var rtLetters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  if (!lm[1] && rtLetters.length) {
+    var am = /_([A-Za-zА-Яа-яЁё]{1,3})(?:\+[^_]*)?_\d{4}-\d{2}-\d{2}$/.exec(top);
+    var seen = {};
+    if (am && rtLetters.indexOf(am[1]) !== -1) seen[am[1]] = true;
+    else segs.forEach(function (sg) {
+      sg.slice(0, -1).forEach(function (part) {
+        var pm = /^([A-Za-zА-Яа-яЁё]{1,3})_./.exec(part);
+        if (pm && rtLetters.indexOf(pm[1]) !== -1) seen[pm[1]] = true;
+      });
+    });
+    if (Object.keys(seen).length === 1) lm = [null, Object.keys(seen)[0], ''];
+  }
   var cards = data.cards || [];
   var photosById = {};
   (data.photos || []).forEach(function (p) { photosById[p.id] = p; });
@@ -229,7 +245,10 @@ function cpAcceptPlan() {
   var meta = ((st.data.meta || {}).cp) || {};
   var rv = meta.rv || {};
   var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
-  if (!st.letter) st.letter = plan.letter;
+  /* Буква сама подставляется только из имени папки. Иначе её нужно нажать — заранее ничего не
+     выбрано и с прошлого раза не запоминается (Маша, 10.11.2026: «чтобы человек не пропустил
+     этот этап и не сдал за другого — поедут метрики выработки»). */
+  if (!st.letter && plan.letter) { st.letter = plan.letter; st.letterAuto = true; }
   if (!st.n) st.n = plan.n;
   if (!st.n && st.letter) {
     /* номер сдачи этого ретушёра в съёмке — следующий */
@@ -243,11 +262,32 @@ function cpAcceptPlan() {
   var ids = Object.keys(plan.groups);
   var bytes = 0, count = 0;
   ids.forEach(function (id) { plan.groups[id].forEach(function (f) { bytes += f.file.size; count++; }); });
+  /* кто забирал эти артикулы: буква карточки (ставится при скачивании из папки ретуши и по имени папки на Диске) */
+  var took = {}, tookOrder = [];
+  ids.forEach(function (id) {
+    var c = cards.filter(function (x) { return x.id === id; })[0];
+    ((c && c.tags) || []).forEach(function (t) {
+      if (letters.indexOf(t) === -1) return;
+      if (!took[t]) { took[t] = []; tookOrder.push(t); }
+      took[t].push(c.title || 'карточка');
+    });
+  });
+  st.took = tookOrder.slice();
+  var sug = !st.letter && tookOrder.length === 1 ? tookOrder[0] : '';
+  var hint = '';
+  if (ids.length) {
+    if (st.letter && st.letterAuto) hint = 'Буква ' + cbEsc(st.letter) + ' — из имени папки. Не вы — нажмите свою.';
+    else if (st.letter) hint = '';
+    else if (sug) hint = 'Эти артикулы забирал(а) <b>' + cbEsc(sug) + '</b>. Это вы? Нажмите свою букву — без неё не загрузить.';
+    else if (tookOrder.length > 1) hint = 'Забирали: ' + tookOrder.map(function (t) { return '<b>' + cbEsc(t) + '</b> — ' + cbEsc(took[t].slice(0, 6).join(', ')) + (took[t].length > 6 ? '…' : ''); }).join('; ') + '. Нажмите свою букву — без неё не загрузить.';
+    else hint = 'Кто сдаёт? Нажмите свою букву — без неё не загрузить.';
+  }
   var html = '<div class="cp-acc-row">Ретушёр: ' + (letters.length ? letters.map(function (t) {
-    return '<button data-cp-acc-l="' + cbEsc(t) + '"' + (st.letter === t ? ' class="cp-on"' : '') + '>' + cbEsc(t) + '</button>';
+    return '<button data-cp-acc-l="' + cbEsc(t) + '" class="' + (st.letter === t ? 'cp-on' : sug === t ? 'cp-sug' : '') + '">' + cbEsc(t) + '</button>';
   }).join('') : '<input id="cpAccLetter" value="' + cbEsc(st.letter) + '" placeholder="буква" style="width:60px">')
     + ' · номер сдачи <input id="cpAccN" value="' + cbEsc(st.n) + '" style="width:50px">'
-    + (plan.top ? ' <small>из «' + cbEsc(plan.top) + '»</small>' : '') + '</div>';
+    + (plan.top ? ' <small>из «' + cbEsc(plan.top) + '»</small>' : '') + '</div>'
+    + (hint ? '<div class="cp-acc-who' + (st.needLetter && !st.letter ? ' cp-acc-warn' : '') + '" id="cpAccWho">' + hint + '</div>' : '');
   html += '<div class="cp-acc-list">' + ids.map(function (id) {
     var c = cards.filter(function (x) { return x.id === id; })[0];
     var last = cpLastRv(rv[id]);
@@ -269,19 +309,37 @@ function cpAcceptPlan() {
 document.addEventListener('click', function (e) {
   var b = e.target.closest('[data-cp-acc],[data-cp-acc-l]');
   if (!b || !CP.accept) return;
-  if (b.hasAttribute('data-cp-acc-l')) { CP.accept.letter = b.getAttribute('data-cp-acc-l'); CP.accept.n = ''; cpAcceptPlan(); return; }
+  if (b.hasAttribute('data-cp-acc-l')) {
+    var l = b.getAttribute('data-cp-acc-l');
+    /* how — как буква оказалась выбрана: нажали ту, что предложена («забирал»), или другую */
+    CP.accept.letterHow = (CP.accept.took || []).indexOf(l) !== -1 ? 'took' : 'picked';
+    CP.accept.letter = l; CP.accept.letterAuto = false; CP.accept.needLetter = false; CP.accept.n = '';
+    cpAcceptPlan();
+    return;
+  }
   var act = b.getAttribute('data-cp-acc');
   if (act === 'close') { document.getElementById('cpAccept').classList.remove('cp-open'); CP.accept = null; }
-  else if (act === 'reset') { CP.accept.files = []; CP.accept.letter = ''; CP.accept.n = ''; document.getElementById('cpAccPlan').innerHTML = ''; }
+  else if (act === 'reset') { CP.accept.files = []; CP.accept.letter = ''; CP.accept.letterAuto = false; CP.accept.needLetter = false; CP.accept.n = ''; document.getElementById('cpAccPlan').innerHTML = ''; }
   else if (act === 'go') cpAcceptUpload();
 });
+
+/** Нажали «Загрузить», не выбрав, кто сдаёт: ещё раз просим нажать свою букву. */
+function cpAcceptNeedLetter() {
+  var st = CP.accept;
+  if (!st) return;
+  st.needLetter = true;
+  cpAcceptPlan();
+  cbToast('Выберите своё имя: нажмите букву ретушёра — без неё не загрузить');
+  var el = document.getElementById('cpAccWho');
+  if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+}
 
 function cpAcceptUpload() {
   var st = CP.accept, plan = st.plan;
   var li = document.getElementById('cpAccLetter'), ni = document.getElementById('cpAccN');
   if (li) st.letter = li.value.trim();
   if (ni) st.n = ni.value.trim();
-  if (!st.letter) { cbToast('Выберите букву ретушёра'); return; }
+  if (!st.letter) { cpAcceptNeedLetter(); return; }
   if (!st.n) st.n = '1';
   var batch = cpToday() + '_' + st.letter + '_' + st.n;
   var base = st.path.replace(/\/+$/, '') + '/' + CP_ACCEPT_DIR + '/' + CPDisk.safeName(batch);
@@ -599,6 +657,10 @@ document.getElementById('cbOutline').addEventListener('click', function (e) {
     + '.cp-acc-drop.cp-over{border-color:#C9956B;color:#e7c9a8;background:#1d1a17}'
     + '.cp-acc-pick{color:#C9956B;cursor:pointer;text-decoration:underline}'
     + '.cp-acc-row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.cp-acc-row button.cp-on{border-color:#C9956B;color:#e7c9a8}'
+    + '.cp-acc-row button.cp-sug{border-style:dashed;border-color:#C9956B}'
+    + '.cp-acc-who{font-size:12px;color:#cfcac2}.cp-acc-who b{color:#e7c9a8}.cp-acc-who.cp-acc-warn{color:#f2b8a0}'
+    + '.cp-acc-found{font-size:13px;color:#cfcac2;line-height:1.6}.cp-acc-found b{color:#f2f2f1}'
+    + '.cp-acc-shoots{display:flex;flex-direction:column;gap:6px;margin-top:8px}.cp-acc-shoots button{text-align:left;padding:8px 10px}.cp-acc-shoots small{color:#a3a09a;margin-left:6px}'
     + '.cp-acc-list{display:flex;flex-direction:column;gap:4px;font-size:13px}.cp-acc-list small{color:#a3a09a}'
     + '.cp-acc-warn{color:#f2b8a0;font-size:12px}.cp-acc-done{color:#9fc2a3}'
     + '.cp-rvbarw{display:flex;gap:12px;align-items:center;margin:0 0 12px}'

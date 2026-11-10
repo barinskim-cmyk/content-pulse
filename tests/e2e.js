@@ -990,12 +990,20 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     const prev = await page.evaluate(([rv, st]) => { const p = { site: CP.settings.site, retouched: CP.settings.retouched };
       Object.assign(CP.settings, { retouched: rv, site: st }); localStorage.setItem('cp_rt_letter', 'U'); return p; }, [RV, ST]);
     const today = await page.evaluate(() => cpToday());
+    const needLog = [];
     const up = async (list) => {
       await page.evaluate(l => {
         cpAcceptOpen(CP.shoot.path, CP.shoot.name);
         cpAcceptAdd(l.map(x => ({ file: new File(['RT-' + x[1]], x[1], { type: 'image/tiff' }), rel: x[0] + '/' + x[1] })));
       }, list);
       await page.waitForFunction(() => document.querySelector('[data-cp-acc="go"]'), null, { timeout: 5000 });
+      /* 2.0.97: буква с прошлого раза не подставляется — без неё «Загрузить» просит выбрать имя */
+      if (await page.evaluate(() => !CP.accept.letter)) {
+        await page.click('[data-cp-acc="go"]');
+        needLog.push(await page.evaluate(() => [!!CP.accept.needLetter, /Выберите своё имя/.test(document.getElementById('cbToast').textContent),
+          /cp-acc-warn/.test((document.getElementById('cpAccWho') || {}).className || ''), !document.getElementById('cpAccProg'), !document.querySelector('[data-cp-acc-l].cp-on')]));
+        if (await page.$('[data-cp-acc-l="U"]')) await page.click('[data-cp-acc-l="U"]'); else await page.fill('#cpAccLetter', 'U');
+      }
       const txt = await page.textContent('#cpAccPlan');
       /* что видно по ходу загрузки — прогресс в окне сдачи */
       await page.evaluate(() => { window.__prog = []; new MutationObserver(() => { const e = document.getElementById('cpAccProg'); if (e && e.textContent) window.__prog.push(e.textContent); })
@@ -1007,7 +1015,9 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     };
     const t1 = await up([['готово/74595', 'manekin.tif'], ['готово/74596', 'manekin2.tif']]);
     const inRv = n => [...FILES.keys()].filter(k => k.indexOf(RV + '/' + SN + '/') === 0 && k.endsWith('/' + n));
-    check('сдача в 04: кнопка «Загрузить в 04_ОТРЕТУШИРОВАНО», буква с прошлого раза (U), файлы — 04/<съёмка>/<папка артикула>/',
+    check('сдача: буква ретушёра с прошлого раза не подставляется; «Загрузить» без неё не грузит и просит выбрать имя',
+      needLog.length >= 1 && needLog[0].every(Boolean), JSON.stringify(needLog));
+    check('сдача в 04: кнопка «Загрузить в 04_ОТРЕТУШИРОВАНО», буква выбрана нажатием (U), файлы — 04/<съёмка>/<папка артикула>/',
       /Загрузить в 04_ОТРЕТУШИРОВАНО/.test(t1) && inRv('manekin.tif').length === 1 && inRv('manekin2.tif').length === 1 && /\/74595[^/]*\/manekin\.tif$/.test(inRv('manekin.tif')[0]),
       JSON.stringify([t1, inRv('manekin.tif'), inRv('manekin2.tif')]));
     /* карточки, которым досталась эта сдача (у артикула бывает две карточки — смотрим по версиям) */
@@ -2432,6 +2442,99 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       });
       check('сверка с Диском: буква карточки — по записи «скачано» (U), без записи или с записью о прежней копии — по имени папки (Y)',
         mr[0] === 'Y' && mr[1] === 'U' && mr[2] === 'Y' && mr[3] === '1/74595_модель/a.jpg' && mr[4] === mr[3], JSON.stringify(mr));
+    }
+    /* 2.0.97: сдача просто папками артикулов — съёмка ищется по артикулам; букву нужно выбрать */
+    {
+      const AS = 'disk:/Архив/2026-11-10_SV_ОПТИКА_AUTO';
+      const mkFiles = `(l) => l.map(r => ({ file: new File(['RT'], r.split('/').pop(), { type: 'image/tiff' }), rel: r }))`;
+      const pl = await t.evaluate((mk) => {
+        const files = eval(mk);
+        CP.dict = cpParseDict('[Ретушёры: один]\nY\nU');
+        const data = cbProjectData();
+        const L = l => cpPlanUpload(files(l), data).letter;
+        return [L(['U_81001_a/x1.tif']), L(['2026-11-10_SV_ОПТИКА_AUTO_03_РЕТУШЬ_Y_2026-11-10/brand/81001_a/x1.tif']), L(['съёмка_Y_2/81001_a/x1.tif']),
+          L(['81001_a/x1.tif', '81003_c/y1.tif']), L(['Y_81001_a/x1.tif', 'U_81003_c/y1.tif']), cpDropCodes(files(['Y_81001_a/x1.tif', '2026-11-09/81003_c/y1.tif', 'лишнее/z.tif'])).join()];
+      }, mkFiles);
+      check('буква ретушёра подставляется сама только из имён папок: «U_81001_a», архив «…_03_РЕТУШЬ_Y_дата», «…_Y_2»; папки без буквы или с разными — нет',
+        JSON.stringify(pl) === JSON.stringify(['U', 'Y', 'Y', '', '', '81001,81003']), JSON.stringify(pl));
+      const fnd = await t.evaluate((mk) => {
+        const files = eval(mk);
+        const keep = { shoots: CP.shoots, arts: CP.stageArts, pres: CP.stagePresence };
+        const A = { path: 'disk:/Архив/2026-11-10_SV_ОПТИКА_AUTO', name: '2026-11-10_SV_ОПТИКА_AUTO', modified: '2026-11-10T10:00:00Z' };
+        const B = { path: 'disk:/Архив/LM-2001', name: 'LM-2001', modified: '2026-11-09T10:00:00Z' };
+        const C = { path: 'disk:/Архив/LM-1043', name: 'LM-1043', modified: '2026-11-08T10:00:00Z' };
+        CP.shoots = [A, B, C];
+        CP.stagePresence = { retouch: { [A.name.toLowerCase()]: true, 'lm-2001': true }, review: { 'lm-1043': true } };
+        CP.stageArts = { retouch: { [A.name.toLowerCase()]: { '81001': '', '81003': 'Y' }, 'lm-2001': { '81003': '' } }, review: { 'lm-1043': { '90000': '' } } };
+        const one = cpShootsByArticles(files(['81001_a/x1.tif']));
+        const two = cpShootsByArticles(files(['81001_a/x1.tif', 'Y_81003_c/y1.tif']));
+        const none = cpShootsByArticles(files(['77777_x/q.tif']));
+        window.__found97 = { one, two, keep };
+        return [one.list.map(x => x.d.name + ':' + x.hit.join('+')), two.list.map(x => x.d.name + ':' + x.hit.join('+') + '/' + x.miss.join('+')), none.list.length, none.codes.join()];
+      }, mkFiles);
+      check('съёмка по папкам артикулов: ищется среди тех, где артикул сейчас в работе; артикул в двух съёмках — обе, лучшая первой; нигде — ничего',
+        JSON.stringify(fnd) === JSON.stringify([['2026-11-10_SV_ОПТИКА_AUTO:81001'], ['2026-11-10_SV_ОПТИКА_AUTO:81001+81003/', 'LM-2001:81003/81001'], 0, '77777']), JSON.stringify(fnd));
+      /* одна съёмка — окно сдачи с вопросом «сдаём в неё?»; буква не выбрана */
+      const w1 = await t.evaluate(async (mk) => {
+        const files = eval(mk);
+        const was = { retouched: CP.settings && CP.settings.retouched, miss: window.cpCatStageMissing };
+        CP.settings = CP.settings || {}; CP.settings.retouched = 'disk:/Этапы/04_ОТРЕТУШИРОВАНО';
+        window.cpCatStageMissing = () => false;
+        window.__was97 = was;
+        App.cards.forEach(c => { c.tags = []; });
+        const f = window.__found97.one;
+        cpAcceptOpenFound(f, f.list[0].d, files(['81001_a/x1.tif']));
+        await new Promise(r => setTimeout(r, 300));
+        const txt = document.getElementById('cpAccept').textContent;
+        document.querySelector('[data-cp-acc="go"]').click();
+        const need = [!!CP.accept.needLetter, /Выберите своё имя/.test(document.getElementById('cbToast').textContent)];
+        return { q: /Папки артикулов без папки съёмки/.test(txt) && /81001/.test(txt) && /Сдаём в неё\?/.test(txt) && /2026-11-10_SV_ОПТИКА_AUTO/.test(txt),
+          who: /Кто сдаёт\? Нажмите свою букву/.test(txt), on: !!document.querySelector('[data-cp-acc-l].cp-on'), letter: CP.accept.letter || '', need };
+      }, mkFiles);
+      check('папка артикула без папки съёмки: окно сдачи спрашивает «сдаём в съёмку …?», буква не выбрана, «Загрузить» без неё просит выбрать имя',
+        w1.q && w1.who && !w1.on && w1.letter === '' && w1.need.every(Boolean), JSON.stringify(w1));
+      /* программа знает, кто забирал (буква карточки) — предлагает, но выбрать нужно нажатием */
+      const w2 = await t.evaluate(async (mk) => {
+        const files = eval(mk);
+        document.querySelector('[data-cp-acc="close"]').click();
+        App.cards.find(c => c.title === '81001').tags = ['Y'];
+        const f = window.__found97.one;
+        cpAcceptOpenFound(f, f.list[0].d, files(['81001_a/x1.tif']));
+        await new Promise(r => setTimeout(r, 300));
+        const txt = document.getElementById('cpAccWho').textContent, sug = document.querySelector('[data-cp-acc-l].cp-sug');
+        const before = [CP.accept.letter || '', sug ? sug.textContent : '', !!document.querySelector('[data-cp-acc-l].cp-on')];
+        sug.click();
+        const after = [CP.accept.letter, CP.accept.letterHow, !!document.querySelector('[data-cp-acc-l="Y"].cp-on')];
+        document.querySelector('[data-cp-acc="close"]').click();
+        App.cards.find(c => c.title === '81001').tags = [];
+        return { txt, before, after };
+      }, mkFiles);
+      check('кто забирал — известно: «Эти артикулы забирал(а) Y. Это вы?» — буква предложена, но не выбрана, пока не нажали',
+        /забирал\(а\) Y/.test(w2.txt) && /Это вы\?/.test(w2.txt) && JSON.stringify(w2.before) === '["","Y",false]' && JSON.stringify(w2.after) === '["Y","took",true]', JSON.stringify(w2));
+      /* артикулы в двух съёмках — сначала вопрос «в какую сдаём», ничего не выбрано; выбрали — окно этой съёмки, можно переключить */
+      const w3 = await t.evaluate(async (mk) => {
+        const files = eval(mk);
+        const f = window.__found97.two, fl = files(['81001_a/x1.tif', 'Y_81003_c/y1.tif']);
+        cpAcceptChoose(f, fl);
+        const btns = [...document.querySelectorAll('[data-cp-acc-pick]')].map(b => b.textContent);
+        const noAccept = !CP.accept;
+        document.querySelectorAll('[data-cp-acc-pick]')[1].click();
+        await new Promise(r => setTimeout(r, 400));
+        const second = CP.accept ? CP.accept.name : '';
+        const sw = document.querySelector('[data-cp-acc-shoot]');
+        const swTxt = sw ? sw.textContent : '';
+        if (sw) sw.click();
+        await new Promise(r => setTimeout(r, 300));
+        const first = CP.accept ? CP.accept.name : '', letter = CP.accept ? CP.accept.letter : '';
+        if (document.querySelector('[data-cp-acc="close"]')) document.querySelector('[data-cp-acc="close"]').click();
+        const k = window.__found97.keep, w = window.__was97;
+        CP.shoots = k.shoots; CP.stageArts = k.arts; CP.stagePresence = k.pres;
+        CP.settings.retouched = w.retouched; window.cpCatStageMissing = w.miss;
+        return { btns, noAccept, second, swTxt, first, letter };
+      }, mkFiles);
+      check('артикулы есть в двух съёмках: сначала выбор «в какую сдаём» (обе, ничего не выбрано), выбрали вторую — окно её сдачи, по ссылке — в первую; буква из папки «Y_81003_c»',
+        w3.btns.length === 2 && /ОПТИКА_AUTO/.test(w3.btns[0]) && /2 из 2/.test(w3.btns[0]) && /LM-2001/.test(w3.btns[1]) && /1 из 2/.test(w3.btns[1]) && w3.noAccept
+        && w3.second === 'LM-2001' && /ОПТИКА_AUTO/.test(w3.swTxt) && w3.first === '2026-11-10_SV_ОПТИКА_AUTO' && w3.letter === 'Y', JSON.stringify(w3));
     }
     check('разбор 10.11: страница без ошибок', terr.length === 0, terr.join(' | '));
     await t.close();
