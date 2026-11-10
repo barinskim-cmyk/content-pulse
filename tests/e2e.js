@@ -1744,12 +1744,12 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       (CP.stageArts.site = CP.stageArts.site || {})[low] = { '74002': '' };
       const one = [rt().n, rt().took, cpStagesFor(d).retouch, (cpArtPhys(d).find(x => x.key === 'site') || {}).n];
       CP.stageArts.site[low]['74001'] = '';
-      const none = [cpArtPhys(d).some(x => x.key === 'retouch'), cpStagesFor(d).retouch, cpArtsLeft(d, 'retouch')];
+      const none = [(cpArtPhys(d).find(x => x.key === 'retouch') || { n: -9 }).n, cpStagesFor(d).retouch, cpArtsLeft(d, 'retouch')];
       delete CP.stageArts.site[low]['74001'];
       return { before, one, none };
     });
-    check('артикул считается там, куда дошёл дальше всего: в ретуши 2, один сдан — в ретуши 1; сданы оба — ретуши в строке нет, съёмка уходит из фильтра ретуши',
-      JSON.stringify(ph.before) === '[2,1,true]' && JSON.stringify(ph.one) === '[1,1,true,1]' && JSON.stringify(ph.none) === '[false,false,0]', JSON.stringify(ph));
+    check('артикул считается там, куда дошёл дальше всего: в ретуши 2, один сдан — в ретуши 1; сданы оба — в ретуши 0, съёмка уходит из фильтра ретуши',
+      JSON.stringify(ph.before) === '[2,1,true]' && JSON.stringify(ph.one) === '[1,1,true,1]' && JSON.stringify(ph.none) === '[0,false,0]', JSON.stringify(ph));
     await page.click('[data-cp-p="close"]');
     await page.click('#cpShelfList .cp-shoot[data-name="2026-11-06_SV_КАТ"]');
     await page.waitForFunction(() => /Забирать нечего/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
@@ -1794,7 +1794,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     {
       const SITE = K + '/04_САЙТ', SH = '2026-11-06_SV_КАТ';
       const D1 = SITE + '/02.10.26/Y/1/' + SH, D2 = SITE + '/03.10.26/U/2/' + SH;
-      [SITE + '/02.10.26', SITE + '/02.10.26/Y', SITE + '/02.10.26/Y/1', D1, D1 + '/Y_1', D1 + '/Y_1/74001_модель',
+      [SITE + '/02.10.26', SITE + '/02.10.26/Y', SITE + '/02.10.26/Y/1', D1, D1 + '/Y_1', D1 + '/Y_1/74001_модель', D1 + '/Y_1/74009_пустая',
         SITE + '/03.10.26', SITE + '/03.10.26/U', SITE + '/03.10.26/U/2', D2, D2 + '/U_2'].forEach(d => DIRS.add(d));
       FILES.set(D1 + '/Y_1/74001_модель/k1.jpg', Buffer.from('S'.repeat(40)));
       FILES.set(D2 + '/U_2/74002_1.jpg', Buffer.from('S'.repeat(41)));      /* без папки артикула — артикул по имени файла */
@@ -1805,12 +1805,34 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         d.custom_properties = {}; d.cpSum = { k: [0, 2, 0, 0, 0, 0, 0], filled: 2 };
         const arch = cpArchCount(d), ready = cpArchReady(d);
         d.cpSum = sumWas; d.custom_properties = propsWas;
-        return { pres: !!(CP.stagePresence.site || {})[low], codes: Object.keys((CP.stageArts.site || {})[low] || {}).sort().join(), paths: ((CP.stagePaths.site || {})[low] || []).length,
-          site: (ph.find(x => x.key === 'site') || {}).n, retouch: ph.some(x => x.key === 'retouch'), arch, ready, cached: Object.keys(JSON.parse(localStorage.getItem('cp_site_old:' + CP.archive) || '{}')).length };
+        const sf = CP.stageFilter; CP.stageFilter = ''; cpRenderShoots();
+        const tile = [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(x => x.dataset.name === d.name);
+        const tip = [...(tile ? tile.querySelectorAll('.cp-artbar-leg span[title*="артикулы"]') : [])].map(x => x.title).filter(x => /САЙТ/.test(x) || true).pop() || '';
+        CP.stageFilter = sf; cpRenderShoots();
+        return { tip, pres: !!(CP.stagePresence.site || {})[low], codes: Object.keys((CP.stageArts.site || {})[low] || {}).sort().join(), paths: ((CP.stagePaths.site || {})[low] || []).length,
+          site: (ph.find(x => x.key === 'site') || {}).n, retouch: (ph.find(x => x.key === 'retouch') || { n: -9 }).n, arch, ready, cached: Object.keys(JSON.parse(localStorage.getItem('cp_site_old:' + CP.archive) || '{}')).length };
       });
       const s1 = await siteNow();
       check('«Сайт» в виде «дата / буква / номер / съёмка / партия» читается: оба артикула на сайте (один — по имени файла), из ретуши они ушли, съёмка «готова к архиву» по самой папке сайта',
-        s1.pres && s1.codes === '74001,74002' && s1.paths === 2 && s1.site === 2 && !s1.retouch && s1.ready && s1.arch.site === 2 && s1.arch.rest === 0, JSON.stringify(s1));
+        s1.pres && s1.codes === '74001,74002' && s1.paths === 2 && s1.site === 2 && s1.retouch === 0 && s1.ready && s1.arch.site === 2 && s1.arch.rest === 0, JSON.stringify(s1));
+      check('пустая папка артикула на сайте (74009) сданной не считается; в подсказке у «САЙТ N» — какие артикулы и из каких папок посчитаны',
+        !/74009/.test(s1.codes) && /артикулы: 74001, 74002/.test(s1.tip) && /02\.10\.26\/Y\/1\/2026-11-06_SV_КАТ/.test(s1.tip), s1.tip);
+      /* 2.0.104: фильтр ретуши не прячет молча — сверху сказано, что лежит в папке и почему не в списке; можно показать */
+      DIRS.add(K + '/03_РЕТУШЬ/2026-10-01_SV_НЕТ_В_ИСХОДНИКАХ');
+      const rn = await page.evaluate(async () => {
+        await cpScanStages(); await cpCountStageArts();
+        const was = CP.stageFilter, has = () => !![...document.querySelectorAll('#cpShelfList .cp-shoot')].find(x => x.dataset.name === '2026-11-06_SV_КАТ');
+        CP.stageFilter = 'retouch'; CP.rtShowDone = false; cpRenderShoots();
+        const note = (document.querySelector('#cpShelfList .cp-rt-note') || {}).textContent || '', shown0 = has();
+        document.querySelector('[data-cp-rt-done]').click();
+        const shown1 = has(), leg = ([...document.querySelectorAll('#cpShelfList .cp-shoot')].find(x => x.dataset.name === '2026-11-06_SV_КАТ') || {}).textContent || '';
+        CP.rtShowDone = false; CP.stageFilter = was; cpRenderShoots();
+        return { note, shown0, shown1, leg };
+      });
+      DIRS.delete(K + '/03_РЕТУШЬ/2026-10-01_SV_НЕТ_В_ИСХОДНИКАХ');
+      check('фильтр ретуши: съёмка, где всё уже на сайте, скрыта не молча — сверху «лежат ещё съёмки… показать»; папка без съёмки в исходниках названа; «показать» — съёмка в списке с пояснением',
+        /все артикулы уже есть в папке сайта: 1/.test(rn.note) && /нет съёмки с таким именем в исходниках: 1 — 2026-10-01_sv_нет_в_исходниках/.test(rn.note) && !rn.shown0 && rn.shown1
+        && /03_РЕТУШЬ: всё сдано \(в папке ещё лежит 2\)/.test(rn.leg), JSON.stringify(rn));
       /* старые даты второй раз с Диска не читаются — взяты из запомненного (списки их папок «не отдаются») */
       LIST_FAIL = /04_САЙТ\/0[23]\.10\.26\//;
       const s2 = await siteNow();
@@ -1819,6 +1841,18 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       [D1 + '/Y_1/74001_модель/k1.jpg', D2 + '/U_2/74002_1.jpg'].forEach(f => FILES.delete(f));
       [...DIRS].filter(d => d.indexOf(SITE + '/02.10.26') === 0 || d.indexOf(SITE + '/03.10.26') === 0).forEach(d => DIRS.delete(d));
       await page.evaluate(async () => { cpSiteOldReset(); await cpScanStages(); await cpCountStageArts(); });
+      /* папка съёмки в ретуши с пометкой « +» в конце имени — та же съёмка */
+      const PL = K + '/03_РЕТУШЬ/' + SH + ' +';
+      [PL, PL + '/74005_модель'].forEach(d => DIRS.add(d));
+      FILES.set(PL + '/74005_модель/k5.jpg', Buffer.from('P'.repeat(30)));
+      const pl = await page.evaluate(async () => {
+        await cpScanStages(); await cpCountStageArts();
+        const d = CP.shoots.find(s => s.name === '2026-11-06_SV_КАТ'), low = d.name.toLowerCase();
+        return [((CP.stagePaths.retouch || {})[low] || []).length, Object.keys((CP.stageArts.retouch || {})[low] || {}).sort().join(), ((cpArtPhys(d) || []).find(x => x.key === 'retouch') || {}).n];
+      });
+      FILES.delete(PL + '/74005_модель/k5.jpg'); [PL + '/74005_модель', PL].forEach(d => DIRS.delete(d));
+      await page.evaluate(async () => { await cpScanStages(); await cpCountStageArts(); });
+      check('папка съёмки в ретуши с « +» в конце имени читается как та же съёмка: её артикулы в счёте', JSON.stringify(pl) === '[2,"74001,74002,74005",3]', JSON.stringify(pl));
     }
     RID_GEN.delete(KRT + '/74002_модель/k2.jpg');
     FILES.delete(KSTATE); PROPS.delete(K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ');
@@ -2841,6 +2875,21 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         return out;
       });
       check('карточку отправили на ретушь — витрина сразу знает: съёмка в папке ретуши, артикул карточки в счёте', nt[0] === '81004' && /03_РЕТУШЬ\/2026-11-10_SV_ОПТИКА_AUTO$/.test(nt[1]) && nt[2] === true, JSON.stringify(nt));
+    }
+    /* 2.0.104: из ретуши в Корзину — только то, что на сайт отправила сама программа, а не то, что сверка нашла в папке сайта */
+    {
+      const dn = await t.evaluate(() => {
+        const c = App.cards.find(x => x.title === '81001'), pid = cpCardPids(c)[0], m = cpMeta();
+        const keep = { del: m.delivered, cs: m.cardStatus[c.id] };
+        delete m.cardStatus[c.id];
+        m.delivered = {}; m.delivered[c.id] = { files: 1, out: 'Диск' };
+        const found = [!!cpDonePids()[pid], !!cpDonePids(true)[pid]];
+        m.delivered[c.id] = { files: 1, out: 'Y_1' };
+        const sent = [!!cpDonePids()[pid], !!cpDonePids(true)[pid]];
+        m.delivered = keep.del; if (keep.cs) m.cardStatus[c.id] = keep.cs;
+        return [found, sent];
+      });
+      check('уборка ретуши в Корзину: карточка, которую сверка только нашла в папке сайта, не трогается; отправленная программой — убирается', JSON.stringify(dn) === '[[true,false],[true,true]]', JSON.stringify(dn));
     }
     check('разбор 10.11: страница без ошибок', terr.length === 0, terr.join(' | '));
     await t.close();

@@ -296,7 +296,9 @@ function cpScanStages() {
         var next = [];
         lists.forEach(function (ds) {
           (ds || []).forEach(function (x) {
-            var bare = x.name.replace(/^(!|\d{1,2})_/, '');
+            /* «!_» или «1_» спереди — очерёдность; « +» в конце — пометка, которую ставят руками на Диске
+               (скриншот Маши 10.11.2026: «2026-10-14_SV_МОДЕЛЬ_ЖЕН_Andamane +») — это та же съёмка */
+            var bare = x.name.replace(/^(!|\d{1,2})_/, '').replace(/\s*\+\s*$/, '');
             if (known[bare.toLowerCase()] || shootLike.test(bare)) {
               into.names[bare.toLowerCase()] = true;
               (into.where[bare.toLowerCase()] = into.where[bare.toLowerCase()] || []).push(x.path);

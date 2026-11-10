@@ -58,7 +58,7 @@ function cpFindShootIn(root, shootName, maxDepth) {
       var next = [];
       lists.forEach(function (ds) {
         (ds || []).forEach(function (x) {
-          var bare = x.name.replace(CP_PRIO_RE, '');
+          var bare = x.name.replace(CP_PRIO_RE, '').replace(/\s*\+\s*$/, '');   /* « +» в конце — пометка руками, съёмка та же */
           if (bare.toLowerCase() === want) found.push({ path: x.path, name: x.name, prio: (CP_PRIO_RE.exec(x.name) || [])[1] || '' });
           else if (!shootLike.test(bare) && x.name.charAt(0) !== '_') next.push(x.path);
         });
@@ -114,7 +114,7 @@ function cpMirrorSync(quiet) {
     if (!quiet || res.changed.length) cbToast(res.changed.length ? 'Сверено с Диском: ' + res.changed.join(', ') : 'Сверено с Диском' + (res.issues ? ', расхождений: ' + res.issues : ' — всё совпадает'));
     /* сданное на сайт — из ретуши в Корзину */
     var rt = rs.filter(function (r) { return r.stage.key === 'retouch'; })[0];
-    var plan = rt ? cpRetouchCleanupPlan(rt.found, idx, letters, cpDonePids()) : [];
+    var plan = rt ? cpRetouchCleanupPlan(rt.found, idx, letters, cpDonePids(true)) : [];
     if (!plan.length) return res;
     return cpRetouchTrash(plan, quiet).then(function (n) { res.trashed = n; return res; });
   }).catch(function (e) {
@@ -167,13 +167,18 @@ function cpArtKey(c) {
   return c.cpArticle || (/(?:^|[^\d])(\d{4,7})(?!\d)/.exec(c.title || '') || [])[1] || c.id;
 }
 
-function cpDonePids() {
+/* byProgram — только карточки, которые на сайт отправила сама программа (кнопкой «На сайт»), а не те,
+   что сверка нашла в папке сайта на Диске. Для уборки ретуши в Корзину нужно именно это: пока ретушёры
+   сдают в «Сайт» руками, «лежит в папке сайта» ещё не значит «принято», а находка сверки — догадка по
+   именам (Маша, 10.11.2026: «он удалил всё из папки ретушь… правда ли они все отретушированы?»). */
+function cpDonePids(byProgram) {
   var m = cpMeta(), del = m.delivered || {}, done = {}, keep = {}, delArt = {};
+  var is = function (c) { var d = del[c.id]; return !!d && !(byProgram && d.out === 'Диск'); };
   /* сдан артикул — сданы все его карточки (собранная кнопкой и собранная руками) */
-  App.cards.forEach(function (c) { if (del[c.id]) delArt[cpArtKey(c)] = true; });
+  App.cards.forEach(function (c) { if (is(c)) delArt[cpArtKey(c)] = true; });
   App.cards.forEach(function (c) {
     var pids = cpCardPids(c);
-    if (del[c.id] || delArt[cpArtKey(c)]) pids.forEach(function (pid) { done[pid] = true; });
+    if (is(c) || delArt[cpArtKey(c)]) pids.forEach(function (pid) { done[pid] = true; });
     else {
       var cs = m.cardStatus[c.id];
       if (cs && (cs.s === 'retouch' || cs.s === 'approval')) pids.forEach(function (pid) { keep[pid] = true; });

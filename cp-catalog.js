@@ -219,6 +219,24 @@ cpStageList = (function (orig) {
    артикулов, а файлы есть — «есть». Отбор и брак — из отбора программы. */
 
 CP.stageArts = {};   /* этап -> {имя съёмки: {код: буква|''} | null — папки артикулов не нашлись} */
+CP.siteHas = {};     /* папка артикула в «Сайте» -> {mod, has}: лежат ли в ней файлы (перечитываем, когда папка изменилась) */
+
+/** В папке артикула на сайте есть хотя бы один файл (сама папка или вложенные на уровень ниже). */
+function cpSiteDirHas(x) {
+  var was = CP.siteHas[x.path];
+  if (was && was.mod === (x.modified || '')) return Promise.resolve(was.has);
+  var junk = /^(\.DS_Store|\._.*|Thumbs\.db|desktop\.ini|\.localized)$/i;
+  var real = function (items) { return (items || []).filter(function (i) { return i.type !== 'dir' && !junk.test(i.name); }).length > 0; };
+  return CPDisk.listDir(x.path).then(function (items) {
+    if (real(items)) return true;
+    var dirs = (items || []).filter(function (i) { return i.type === 'dir'; });
+    if (!dirs.length) return false;
+    return cpPool(dirs, 2, function (d) { return CPDisk.listDir(d.path).then(real, function () { return false; }); }).then(function (r) { return r.some(Boolean); });
+  }, function (e) { if (e && e.status === 404) return false; throw e; }).then(function (has) {
+    CP.siteHas[x.path] = { mod: x.modified || '', has: has };
+    return has;
+  });
+}
 var _cpArtsRun = 0;
 
 function cpCountStageArts() {
@@ -246,7 +264,7 @@ function cpCountStageArts() {
         return cpPool(paths, 4, function (p) {
           return CPDisk.listDir(p).then(null, function (e) { if (e && e.status === 404) return []; throw e; });
         }).then(function (lists) {
-          var next = [];
+          var next = [], check = [];
           lists.forEach(function (items) {
             var here = 0, files = [];
             (items || []).forEach(function (x) {
@@ -256,13 +274,18 @@ function cpCountStageArts() {
               var lm = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(name);
               if (lm && letters.indexOf(lm[1]) !== -1) { letter = lm[1]; name = lm[2]; }
               var code = cpArtCode(type, name);   /* папка-дата и папка партии («Y_1») — не артикул: идём внутрь */
-              if (code) { any = true; here++; c[code] = c[code] || letter; }
-              else next.push(x.path);
+              if (!code) { next.push(x.path); return; }
+              here++;
+              /* «Сайт»: пустая папка артикула — не «сдано» (в папку сайта могли положить всю структуру целиком) */
+              if (j.key === 'site') { check.push({ x: x, code: code, letter: letter }); return; }
+              any = true; c[code] = c[code] || letter;
             });
             /* «Сайт»: папок артикулов нет, файлы лежат россыпью — артикул по началу имени файла («74595_1.jpg») */
             if (j.key === 'site' && !here) files.forEach(function (n) { var fc = cpArtCode(type, n); if (fc) { any = true; if (c[fc] === undefined) c[fc] = ''; } });
           });
-          return walk(next, depth + 1);
+          return cpPool(check, 4, function (k) {
+            return cpSiteDirHas(k.x).then(function (has) { if (has) { any = true; c[k.code] = c[k.code] || k.letter; } });
+          }).then(function () { return walk(next, depth + 1); });
         });
       }
       return walk([root], 1).then(function () { return any ? c : null; });
@@ -341,8 +364,13 @@ function cpArtPhys(d) {
     var codes = c ? Object.keys(c).filter(function (k) { return !ahead[k]; }) : [];
     var n = c ? codes.length : -1;
     if (n >= 0 && byMarks > n) n = byMarks;
-    if (n === 0) return;   /* всё, что лежит в папке этапа, уже ушло дальше */
-    out.push({ key: key, label: cpStageLabel(key), n: n, took: c ? codes.filter(function (k) { return c[k]; }).length : 0 });
+    if (n === 0) {
+      /* всё, что лежит в папке этапа, уже ушло дальше; про ретушь всё равно говорим — папка-то лежит */
+      if (key === 'retouch' && c) out.push({ key: key, label: cpStageLabel(key), n: 0, took: 0, all: Object.keys(c).length, codes: Object.keys(c), paths: ((CP.stagePaths[key] || {})[low] || []) });
+      return;
+    }
+    out.push({ key: key, label: cpStageLabel(key), n: n, took: c ? codes.filter(function (k) { return c[k]; }).length : 0,
+      codes: codes, paths: ((CP.stagePaths[key] || {})[low] || []) });
   });
   return out;
 }
@@ -365,12 +393,54 @@ function cpArtBarPhys(sum, phys) {
   if (sum && sum.filled) leg.push('<span><i class="cp-k1"></i>отобрано <b>' + sum.filled + '</b></span>');
   if (sum && sum.empty) leg.push('<span class="cp-warn" title="Карточка заведена по папке артикула, но кадров JPG в папке нет (пустая, только видео или другой формат). Откройте съёмку — такая карточка помечена «нет кадров».">пустых карточек <b>' + sum.empty + '</b></span>');
   phys.forEach(function (x) {
-    leg.push('<span><i class="cp-' + CP_PHYS_CLS[x.key] + '"></i>' + cbEsc(x.label) + ' <b>' + (x.n < 0 ? 'есть' : x.n) + '</b>' + (x.took ? ' (забрали ' + x.took + ')' : '') + '</span>');
+    /* наведите — что именно посчитано: какие артикулы и в каких папках программа их нашла */
+    var tip = (x.codes && x.codes.length ? 'артикулы: ' + x.codes.slice().sort().slice(0, 60).join(', ') + (x.codes.length > 60 ? '…' : '') : 'папок артикулов не нашлось')
+      + (x.paths && x.paths.length ? '\nпапки: ' + x.paths.slice(0, 12).map(function (pth) { return CPDisk.showPath(pth); }).join('\n') + (x.paths.length > 12 ? '\n…' : '') : '');
+    if (x.n === 0 && x.all) {
+      leg.push('<span title="' + cbEsc(tip) + '" style="color:#8a877f">' + cbEsc(x.label) + ': всё сдано (в папке ещё лежит ' + x.all + ')</span>');
+      return;
+    }
+    leg.push('<span title="' + cbEsc(tip) + '"><i class="cp-' + CP_PHYS_CLS[x.key] + '"></i>' + cbEsc(x.label) + ' <b>' + (x.n < 0 ? 'есть' : x.n) + '</b>' + (x.took ? ' (забрали ' + x.took + ')' : '') + '</span>');
   });
   if (brak) leg.push('<span><i class="cp-k6"></i>брак <b>' + brak + '</b></span>');
   if (!leg.length) return '';
   return '<div class="cp-artbar">' + line + '<div class="cp-artbar-leg">' + leg.join(' · ') + '</div></div>';
 }
+
+/* Фильтр ретуши ничего не прячет молча (Маша, 10.11.2026: «в папке ретушь пишет, что таких съёмок нет,
+   при этом в папке лежит дохрена — он просто её не читает»). Над списком — что лежит в папке ретуши, но
+   в список не попало, и почему: всё уже есть в папке сайта (можно показать) или нет такой съёмки в исходниках. */
+CP.rtShowDone = false;
+cpRenderShoots = (function (orig) {
+  return function () {
+    var r = orig.apply(this, arguments);
+    var list = document.getElementById('cpShelfList');
+    if (!list || !cpCatalog() || CP.stageFilter !== 'retouch' || !CP.shoots) return r;
+    var pres = CP.stagePresence.retouch || {}, have = {};
+    CP.shoots.forEach(function (d) { have[d.name.toLowerCase()] = true; });
+    var done = CP.shoots.filter(function (d) { return pres[d.name.toLowerCase()] && cpArtsLeft(d, 'retouch') === 0; });
+    var orphan = Object.keys(pres).filter(function (low) { return !have[low]; }).sort();
+    if (!done.length && !orphan.length) return r;
+    var h = '<div class="cp-rt-note">';
+    if (done.length) h += '<div>В папке ретуши лежат ещё съёмки, у которых все артикулы уже есть в папке сайта: <b>' + done.length + '</b> — '
+      + '<a href="#" data-cp-rt-done="1">' + (CP.rtShowDone ? 'скрыть' : 'показать') + '</a>. Наведите на строку под съёмкой — какие артикулы и где найдены.</div>';
+    if (orphan.length) h += '<div>В папке ретуши есть папки, для которых нет съёмки с таким именем в исходниках: <b>' + orphan.length + '</b> — '
+      + cbEsc(orphan.slice(0, 8).join(', ')) + (orphan.length > 8 ? '…' : '') + '</div>';
+    list.insertAdjacentHTML('afterbegin', h + '</div>');
+    return r;
+  };
+})(cpRenderShoots);
+document.addEventListener('click', function (e) {
+  if (!e.target.closest || !e.target.closest('[data-cp-rt-done]')) return;
+  e.preventDefault();
+  CP.rtShowDone = !CP.rtShowDone;
+  cpRenderShoots();
+});
+(function () {
+  var st = document.createElement('style');
+  st.textContent = '.cp-rt-note{grid-column:1/-1;font-size:12px;color:#cfcac2;line-height:1.6;border:1px solid #3a3a37;border-radius:4px;padding:8px 12px;background:#1a1a18}.cp-rt-note b{color:#f2f2f1}.cp-rt-note a{color:#C9956B}';
+  document.head.appendChild(st);
+})();
 
 /* В каталоге фильтр этапа — только то, что лежит в его папке сейчас (не отметки программы):
    удалили папку с Диска — съёмка из фильтра пропадает. */
@@ -383,7 +453,7 @@ cpStagesFor = (function (orig) {
       st[key] = !!(CP.settings && CP.settings[CP_STAGE_SETTING[key]] && CP.stagePresence[key] && CP.stagePresence[key][low]);
     });
     /* в ретуши не осталось несданного (всё уже в 04 или на сайте) — в фильтре ретуши съёмке делать нечего */
-    if (st.retouch && cpArtsLeft(d, 'retouch') === 0) st.retouch = false;
+    if (st.retouch && cpArtsLeft(d, 'retouch') === 0 && !CP.rtShowDone) st.retouch = false;
     return st;
   };
 })(cpStagesFor);
