@@ -2659,6 +2659,37 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       check('карточка на доработке: в просмотре только её кадры, замечание к кадру видно, кнопок «на сайт / на доработку» нет',
         /^1 \/ 2$/.test(ro.count) && /на доработку: убрать складку/.test(ro.mark) && ro.btns === 'Назад|Вперёд|Закрыть', JSON.stringify(ro));
     }
+    /* 2.0.99: файл перенесли или переименовали на Диске — это тот же кадр (md5), а не «пропал» и «новый» */
+    {
+      const AS = 'disk:/Архив/2026-11-10_SV_ОПТИКА_AUTO';
+      await t.waitForFunction(() => !App.dirty && !CP.saving, null, { timeout: 8000 }).catch(() => {});
+      const b0 = await t.evaluate(() => { const g = n => App.photos.find(p => p.name === n); cpMeta().status[g('x3.jpg').id] = { s: 'retouch', by: 'тест', ts: 'x' };
+        return { n: App.photos.length, x3: g('x3.jpg').id, y1: g('y1.jpg').id, inCard: cpCardPids(App.cards.find(c => c.title === '81001')).includes(g('x3.jpg').id) }; });
+      const mv = (from, to) => { FILES.set(AS + to, FILES.get(AS + from)); FILES.delete(AS + from); };
+      mv('/brand/81001_a/x3.jpg', '/brand/x3.jpg');                       /* перенесли в папку уровнем выше */
+      mv('/brand/81003_c/y1.jpg', '/brand/81003_c/y1_новое_имя.jpg');     /* переименовали */
+      /* два одинаковых по содержимому файла, оба перенесены и переименованы — кто есть кто, не угадать */
+      FILES.set(AS + '/brand/81004_d/t1.jpg', Buffer.from('T'.repeat(90))); FILES.set(AS + '/brand/81004_d/t2.jpg', Buffer.from('T'.repeat(90)));
+      await t.evaluate(() => cpSyncPhotos(false));
+      mv('/brand/81004_d/t1.jpg', '/brand/q1.jpg'); mv('/brand/81004_d/t2.jpg', '/brand/q2.jpg');
+      const b1 = await t.evaluate(async (b0) => {
+        const n1 = App.photos.length;
+        await cpSyncPhotos(false);
+        const byId = id => App.photos.find(p => p.id === id), g = n => App.photos.filter(p => p.name === n);
+        const x3 = byId(b0.x3), y1 = byId(b0.y1);
+        return { x3: [x3.disk.split('/').slice(-2).join('/'), !!x3.missing, (cpMeta().status[x3.id] || {}).s, cpCardPids(App.cards.find(c => c.title === '81001')).includes(x3.id)],
+          y1: [y1.name, y1.disk.split('/').pop(), !!y1.missing, cpCardPids(App.cards.find(c => c.title === '81003')).includes(y1.id)],
+          grew: App.photos.length - n1, t: [g('t1.jpg').map(p => !!p.missing).join(), g('q1.jpg').length, g('q2.jpg').length],
+          ev: cpMeta().events.filter(e => e.action === 'relinked').map(e => e.count).join(), label: !!CP_ACTION_LABEL.relinked, dirty: App.dirty || CP.saving };
+      }, b0);
+      check('файл перенесли в другую папку — кадр тот же: остался в карточке, со статусом, не «пропал»', b0.inCard && JSON.stringify(b1.x3) === '["brand/x3.jpg",false,"retouch",true]', JSON.stringify(b1.x3));
+      check('файл переименовали — кадр тот же, имя и путь обновились', JSON.stringify(b1.y1) === '["y1_новое_имя.jpg","y1_новое_имя.jpg",false,true]', JSON.stringify(b1.y1));
+      check('два одинаковых файла перенесли и переименовали — не угадываем: прежние «пропали», новые заведены; в журнале — «найдены на новом месте: 2», новые пути сохраняются',
+        b1.grew === 2 && JSON.stringify(b1.t) === '["true",1,1]' && b1.ev === '2' && b1.label && b1.dirty, JSON.stringify(b1));
+      await t.waitForFunction(() => !App.dirty && !CP.saving, null, { timeout: 8000 }).catch(() => {});
+      const saved = JSON.parse(FILES.get(AS + '/_contentpulse.json').toString());
+      check('новый путь кадра записан в отбор на Диске', saved.photos.some(p => p.id === b0.x3 && /\/brand\/x3\.jpg$/.test(p.disk)), JSON.stringify(saved.photos.filter(p => p.id === b0.x3)));
+    }
     check('разбор 10.11: страница без ошибок', terr.length === 0, terr.join(' | '));
     await t.close();
   }

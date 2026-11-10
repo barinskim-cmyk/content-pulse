@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.98';
+var CP_VERSION = '2.0.99';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -597,7 +597,7 @@ function cpApplyRemote(data) {
   });
   cpMeta();
   /* файлы, которых нет в чужой версии (новая часть пришла у нас), не теряем */
-  if (CP.files.length && cpMergeFiles().length) cbMarkDirty();
+  if (CP.files.length && (cpMergeFiles().length || CP.relinkedNow)) { CP.relinkedNow = 0; cbMarkDirty(); }
   cbRenderTray(); cbRenderCards(); cbRenderConts();
   cpUpdateStatusLine();
 }
@@ -654,6 +654,8 @@ function cpSyncPhotos(initial) {
     if (added.length) {
       cpEvent(initial ? 'files_found' : 'new_batch', [], { count: added.length });
     }
+    /* кадры нашлись на новом месте — новые пути записываем в отбор */
+    if (CP.relinkedNow) { CP.relinkedNow = 0; if (!CP.readOnly) cbMarkDirty(); }
     cbRenderTray(); cbRenderCards(); cbRenderConts();
     return added.length;
   });
@@ -664,8 +666,39 @@ function cpMergeFiles() {
   var byDisk = {};
   App.photos.forEach(function (p) { if (p.disk) byDisk[p.disk] = p; });
   var seen = {}, added = [];
+  CP.files.forEach(function (f) { seen[f.path] = true; });
+  /* Файл перенесли или переименовали на Диске (руками или программой): по пути его уже нет, но
+     md5 тот же — это тот же кадр, а не «пропавший» и «новый». Кадр остаётся в своих карточках,
+     со статусами и отметками. Узнаём, только когда ошибиться нельзя: у пропавшего кадра и у нового
+     файла md5 совпал один к одному, а если таких несколько — ещё и имя. Иначе не угадываем. */
+  var goneBy = {}, freshBy = {}, relink = {};
+  App.photos.forEach(function (p) { if (p.disk && p.md5 && !seen[p.disk] && (p.kind || 'photo') !== 'ref') (goneBy[p.md5] = goneBy[p.md5] || []).push(p); });
+  CP.files.forEach(function (f) { if (f.md5 && !byDisk[f.path] && goneBy[f.md5]) (freshBy[f.md5] = freshBy[f.md5] || []).push(f); });
+  Object.keys(freshBy).forEach(function (h) {
+    var gone = goneBy[h], fresh = freshBy[h];
+    if (gone.length === 1 && fresh.length === 1) { relink[fresh[0].path] = gone[0]; return; }
+    fresh.forEach(function (f) {
+      var same = gone.filter(function (p) { return String(p.name).toLowerCase() === String(f.name).toLowerCase(); });
+      var twins = fresh.filter(function (x) { return String(x.name).toLowerCase() === String(f.name).toLowerCase(); });
+      if (same.length === 1 && twins.length === 1) relink[f.path] = same[0];
+    });
+  });
+  var moved = [];
+  Object.keys(relink).forEach(function (path) {
+    var p = relink[path], f = CP.files.filter(function (x) { return x.path === path; })[0];
+    var was = p.disk;
+    if (CP.thumbs[was] && !CP.thumbs[path]) CP.thumbs[path] = CP.thumbs[was];
+    if (CP.big && CP.big[was] && !CP.big[path]) CP.big[path] = CP.big[was];
+    delete byDisk[was];
+    p.disk = path; p.name = f.name; p.missing = false;
+    byDisk[path] = p;
+    moved.push(p.name);
+  });
+  if (moved.length) {
+    cpEvent('relinked', moved.slice(0, 40), { count: moved.length }, true);
+    CP.relinkedNow = (CP.relinkedNow || 0) + moved.length;
+  }
   CP.files.forEach(function (f) {
-    seen[f.path] = true;
     CP.previews[f.path] = f.preview;
     var p = byDisk[f.path];
     if (p) {
@@ -1331,6 +1364,7 @@ function cpEvent(action, items, extra, silent) {
 
 var CP_ACTION_LABEL = {
   open: 'открыл(а) съёмку', files_found: 'найдены файлы', new_batch: 'пришла новая часть',
+  relinked: 'кадры найдены на новом месте на Диске (перенесены или переименованы)',
   to_retouch: 'отправил(а) на ретушь', to_reshoot: 'отправил(а) в брак (пересъём)',
   to_approval: 'отправил(а) на согласование', clear_status: 'снял(а) статус',
   download_shoot: 'скачал(а) всю съёмку', download_selection: 'скачал(а) отбор',
