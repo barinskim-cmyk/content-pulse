@@ -532,19 +532,48 @@ document.getElementById('cbCards').addEventListener('click', function (e) {
   if (!a) return;
   e.preventDefault(); e.stopPropagation();
   var id = a.closest('[data-cp-rv]').getAttribute('data-cp-rv');
-  if (a.getAttribute('data-cp-rva') === 'approve') cpRvApprove([id]);
+  if (a.getAttribute('data-cp-rva') === 'approve') cpRvApprove([id], 'card');
   else cpRvRework(id);
 }, true);
 
+/* Каким способом карточку отправили на сайт (Маша, 10.11.2026: «все механики должны работать;
+   главное, чтобы мы потом узнали, какой пользуются, какая удобней») — пишется в журнал съёмки,
+   в версию ретуши и в выработка.csv (столбец «способ»). */
+var CP_RV_VIA = {
+  viewer_marks: 'просмотр: отмечен каждый кадр',
+  viewer_ask: 'просмотр: вопрос в конце карточки',
+  card: 'кнопка на карточке',
+  batch: 'галочки в списке'
+};
+function cpRvViaText(via) { return CP_RV_VIA[via] || ''; }
+/** via — одно на все карточки или {id карточки: способ} (просмотр: часть отмечена по кадрам, часть — по вопросу). */
+function cpRvViaOf(via, id) { return via && typeof via === 'object' ? via[id] || '' : via || ''; }
+function cpRvViaNote(via, ids) {
+  var seen = [];
+  ids.forEach(function (id) { var t = cpRvViaText(cpRvViaOf(via, id)); if (t && seen.indexOf(t) === -1) seen.push(t); });
+  return seen.length ? ' · способ: ' + seen.join('; ') : '';
+}
+function cpRvViaKeys(via, ids) {
+  var seen = [];
+  ids.forEach(function (id) { var k = cpRvViaOf(via, id); if (k && seen.indexOf(k) === -1) seen.push(k); });
+  return seen.join(',') || undefined;
+}
+
+/** В карточке есть кадры, отмеченные в просмотре «на доработку», — целиком на сайт её не отправить. */
+function cpRvHasReworkMarks(ver) {
+  var fm = (ver && ver.fm) || {};
+  return (ver && ver.files || []).some(function (f) { return fm[f.name] && fm[f.name].s === 'rework'; });
+}
+
 /** Согласовать ретушь: копии в «Сайт», карточка — «загружено». */
-function cpRvApprove(ids) {
+function cpRvApprove(ids, via) {
   var site = typeof cpSiteRoot === 'function' ? cpSiteRoot() : '';
   if (!site) { cbToast('Не задана папка «Сайт»: шестерёнка на витрине → «Папка сдачи (сайт)»'); return; }
   var rv = cpRv(), shoot = CP.shoot;
   var items = [], dirs = {}, todo = [];
   ids.forEach(function (id) {
     var last = cpLastRv(rv[id]);
-    if (!last || last.status !== 'review') return;
+    if (!last || last.status !== 'review' || cpRvHasReworkMarks(last)) return;
     var card = cbCardById(id), idx = App.cards.indexOf(card);
     var dir = site.replace(/\/+$/, '') + '/' + cpToday() + '/' + CPDisk.safeName(last.letter + '_' + last.n) + '/' + CPDisk.safeName(shoot.name)
       + '/' + CPDisk.safeName(cpCardExportFolder(card || { title: id }, idx < 0 ? 0 : idx));
@@ -562,9 +591,13 @@ function cpRvApprove(ids) {
     m.delivered = m.delivered || {};
     todo.forEach(function (t) {
       t.last.status = 'approved'; t.last.rby = who; t.last.rts = now; t.last.site = CPDisk.showPath(t.dir);
+      if (cpRvViaOf(via, t.id)) t.last.via = cpRvViaOf(via, t.id);
+      delete t.last.ready;
       m.delivered[t.id] = { files: t.last.files.length, letter: t.last.letter, date: cpToday(), at: CPDisk.showPath(t.dir), out: t.last.letter + '_' + t.last.n, ts: now };
     });
-    cpEvent('rt_approve', [], { card: todo.map(function (t) { var c = cbCardById(t.id); return c ? c.title : t.id; }).join(', '), note: 'в «Сайт»: ' + CPDisk.showPath(todo[0].dir) });
+    var tids = todo.map(function (t) { return t.id; });
+    cpEvent('rt_approve', [], { card: todo.map(function (t) { var c = cbCardById(t.id); return c ? c.title : t.id; }).join(', '), via: cpRvViaKeys(via, tids),
+      note: 'в «Сайт»: ' + CPDisk.showPath(todo[0].dir) + cpRvViaNote(via, tids) });
     cbRenderCards();
     cbRenderOutline();
     cbToast('На сайт: карточек ' + todo.length);
@@ -576,10 +609,11 @@ function cpRvApprove(ids) {
   });
 }
 
-function cpRvRework(id) {
+/** note задан (просмотр ретуши: замечания по кадрам) — без окна с вопросом. */
+function cpRvRework(id, note) {
   var last = cpLastRv(cpRv()[id]);
   if (!last) return;
-  var note = prompt('Что доработать? (увидит ретушёр)', '');
+  if (note === undefined) note = prompt('Что доработать? (увидит ретушёр)', '');
   if (note === null) return;
   last.status = 'rework'; last.rby = cpActor(); last.rts = new Date().toISOString(); last.note = note.trim();
   var c = cbCardById(id);
@@ -588,41 +622,8 @@ function cpRvRework(id) {
   cbRenderOutline();
 }
 
-/* просмотр версии ретуши крупно: стрелки, Esc */
-function cpRvView(ver, i) {
-  if (!ver) return;
-  var box = document.getElementById('cpRvLb');
-  if (!box) {
-    box = document.createElement('div');
-    box.id = 'cpRvLb';
-    box.className = 'cp-lb';
-    box.innerHTML = '<div class="cp-lb-head"><b id="cpRvLbName"></b><span class="cp-sp"></span><small id="cpRvLbN"></small><button data-cp-rvl="close">Закрыть</button></div>'
-      + '<div class="cp-lb-stage"><img id="cpRvLbImg" alt=""></div>';
-    document.body.appendChild(box);
-    box.addEventListener('click', function (e) { if (e.target.closest('[data-cp-rvl="close"]')) box.classList.remove('cp-open'); });
-    document.addEventListener('keydown', function (e) {
-      if (!box.classList.contains('cp-open') || !CP.rvLb) return;
-      if (e.key === 'Escape') box.classList.remove('cp-open');
-      if (e.key === 'ArrowRight') show(CP.rvLb.i + 1);
-      if (e.key === 'ArrowLeft') show(CP.rvLb.i - 1);
-    });
-  }
-  function show(k) {
-    var v = CP.rvLb.ver, n = v.files.length;
-    CP.rvLb.i = (k + n) % n;
-    var f = v.files[CP.rvLb.i];
-    document.getElementById('cpRvLbName').textContent = f.name;
-    document.getElementById('cpRvLbN').textContent = (CP.rvLb.i + 1) + ' из ' + n;
-    var img = document.getElementById('cpRvLbImg');
-    img.src = CP.rvThumb[f.path] && CP.rvThumb[f.path] !== 'wait' ? CP.rvThumb[f.path] : '';
-    CPDisk.proxyPreview(f.path, '2400x2400').then(function (b) {
-      if (CP.rvLb && v.files[CP.rvLb.i] === f) img.src = URL.createObjectURL(b);
-    }, function () { });
-  }
-  CP.rvLb = { ver: ver, i: i };
-  box.classList.add('cp-open');
-  show(i);
-}
+/* просмотр версии ретуши крупно — cp-rvview.js (как галерея исходников: вписано в экран, клик — 100 %) */
+function cpRvView(ver, i) { if (typeof cpRvvOpenVer === 'function') cpRvvOpenVer(ver, i); }
 
 /* в списке карточек справа — «Сдать ретушь» и «на проверке» */
 cbRenderOutline = (function (orig) {

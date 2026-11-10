@@ -1151,6 +1151,9 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     check('выработка: таблица в служебной папке — сдано ×4, доработка, в карточку, принято ×2, с буквой и датой', /^\uFEFFдата;время;ретушёр/.test(out) && (out.match(/;сдано;/g) || []).length === 4
       && /;новая версия после доработки: заменено 1, добавлено 0;/.test(out) && /;догрузка в карточку: заменено 0, добавлено \d;/.test(out)
       && (out.match(/;принято;/g) || []).length === 2 && /;доработка: тени;/.test(out) && out.split('\n').some(l => l.indexOf(today + ';') === 0 && /;U;/.test(l)), out);
+    check('выработка: столбец «способ» — как карточку отправили на сайт (здесь — кнопкой на карточке); в журнале то же',
+      /^\uFEFFдата;время;ретушёр;съёмка;карточка;кадров;событие;кто;версия;способ\n/.test(out) && out.split('\n').filter(l => /;принято;/.test(l)).every(l => /;кнопка на карточке$/.test(l))
+      && await page.evaluate(() => cpMeta().events.filter(e => e.action === 'rt_approve').some(e => e.via === 'card' && /способ: кнопка на карточке/.test(e.note))), out.split('\n').filter(l => /;принято;/.test(l)).join(' | '));
     await page.click('[data-cp-view-all]');
     check('«Показать все карточки» — снова все, полоски нет', !(await page.$('#cpViewBar')) && (await vis()).length > 2);
     await page.evaluate(p => { CP.stageFilter = ''; CP.viewStage = ''; CP.settings.site = p.site; if (p.retouched) CP.settings.retouched = p.retouched; else delete CP.settings.retouched; cbRenderCards(); }, prev);
@@ -2535,6 +2538,126 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       check('артикулы есть в двух съёмках: сначала выбор «в какую сдаём» (обе, ничего не выбрано), выбрали вторую — окно её сдачи, по ссылке — в первую; буква из папки «Y_81003_c»',
         w3.btns.length === 2 && /ОПТИКА_AUTO/.test(w3.btns[0]) && /2 из 2/.test(w3.btns[0]) && /LM-2001/.test(w3.btns[1]) && /1 из 2/.test(w3.btns[1]) && w3.noAccept
         && w3.second === 'LM-2001' && /ОПТИКА_AUTO/.test(w3.swTxt) && w3.first === '2026-11-10_SV_ОПТИКА_AUTO' && w3.letter === 'Y', JSON.stringify(w3));
+    }
+    /* 2.0.98: просмотр ретуши — как галерея исходников; отметки по кадрам; на сайт — когда принята вся карточка */
+    {
+      const S = await t.evaluate(() => {
+        const cs = App.cards.filter(c => ['81001', '81003', '81004'].includes(c.title));
+        const mk = (c, names) => ({ v: 1, batch: 'x', letter: 'Y', n: '1', date: cpToday(), by: 'тест', ts: '2026-11-10T10:00:00.000Z', status: 'review', dir: 'disk:/R/' + c.title,
+          files: names.map(n => ({ path: 'disk:/R/' + c.title + '/' + n, name: n, size: 10 })) });
+        const rv = cpMeta().rv = cpMeta().rv || {};
+        rv[cs[0].id] = [mk(cs[0], ['a1.tif', 'a2.tif'])];
+        rv[cs[1].id] = [mk(cs[1], ['b1.tif', 'b2.tif'])];
+        rv[cs[2].id] = [mk(cs[2], ['c1.tif'])];
+        window.__calls = { ap: [], rw: [] };
+        window.__real = { ap: window.cpRvApprove, rw: window.cpRvRework, big: window.cpLoadBig };
+        window.cpRvApprove = (ids, via) => { window.__calls.ap.push([ids.slice(), JSON.parse(JSON.stringify(via || ''))]); };
+        window.cpRvRework = (id, note) => { window.__calls.rw.push([id, note]); };
+        window.cpLoadBig = () => Promise.resolve('data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==');
+        cbRenderCards();
+        return cs.map(c => c.id);
+      });
+      const st = () => t.evaluate(() => ({ open: document.getElementById('cpRvv').classList.contains('cp-open'), name: document.getElementById('cpRvvName').textContent,
+        sub: document.getElementById('cpRvvSub').textContent, count: document.getElementById('cpRvvCount').textContent, mark: document.getElementById('cpRvvMark').textContent,
+        bar: document.getElementById('cpRvvBar').textContent, barOpen: document.getElementById('cpRvvBar').classList.contains('cp-open') }));
+      await t.evaluate(id => { document.querySelector('.cp-rv[data-cp-rv="' + id + '"] [data-cp-rvt="0"]').click(); }, S[0]);
+      await t.waitForFunction(() => /^data:/.test(document.getElementById('cpRvvImg').src || ''), null, { timeout: 5000 }).catch(() => {});
+      const geo = await t.evaluate(() => {
+        const lb = document.getElementById('cpRvv'), body = document.getElementById('cpRvvBody'), r = body.getBoundingClientRect(), img = document.getElementById('cpRvvImg');
+        const fit = getComputedStyle(img).maxWidth;
+        img.click();
+        const full = body.classList.contains('cp-full');
+        img.click();
+        return { w: Math.round(r.width), h: Math.round(r.height), vw: innerWidth, vh: innerHeight, fit, full, back: !body.classList.contains('cp-full'),
+          like: !!lb.querySelector('[data-lb="like"],[data-rvv="like"]') || /Лайк|брак|На ретушь/i.test(lb.querySelector('.cp-lb-head').textContent),
+          btns: [...lb.querySelectorAll('.cp-lb-head [data-rvv]')].filter(b => b.style.display !== 'none').map(b => b.textContent).join('|') };
+      });
+      let x = await st();
+      check('просмотр ретуши открывается как галерея: картинка на весь экран (вписана), клик — 100 % и обратно; без лайков, брака и «на ретушь»',
+        x.open && geo.w >= geo.vw - 2 && geo.h > geo.vh * 0.6 && geo.fit === '100%' && geo.full && geo.back && !geo.like && geo.btns === 'Назад|Вперёд|На доработку|На сайт|Закрыть', JSON.stringify(geo));
+      check('листаются кадры всех карточек на проверке: 1 / 5, карточка 1 из 3', x.name === 'a1.tif' && /^1 \/ 5 · карточка 1 из 3$/.test(x.count) && /карточка 81001 · кадр 1 из 2 · ретушь v1 · Y/.test(x.sub), JSON.stringify(x));
+      /* способ 1: «на сайт» на каждом кадре */
+      await t.keyboard.press('Enter');
+      await t.keyboard.press('Enter');
+      x = await st();
+      const m1 = await t.evaluate(id => { const v = cpMeta().rv[id][0]; return [Object.keys(v.fm || {}).map(k => k + ':' + v.fm[k].s).join(), App.dirty || CP.saving, window.__calls.ap.length]; }, S[0]);
+      check('«На сайт» (Enter) на кадре — кадр принят и просмотр идёт дальше; приняты все кадры карточки — на сайт она ещё не уехала (просмотр не закрыт)',
+        m1[0] === 'a1.tif:ok,a2.tif:ok' && m1[2] === 0 && x.name === 'b1.tif' && !x.barOpen, JSON.stringify([m1, x]));
+      /* одна картинка — на доработку, с комментарием */
+      await t.keyboard.press('d');
+      await t.fill('#cpRvvText', 'убрать складку');
+      if (process.env.SHOT_RVV) await t.screenshot({ path: process.env.SHOT_RVV });
+      await t.click('#cpRvvBar [data-rvv="note-save"]');
+      x = await st();
+      const m2 = await t.evaluate(id => JSON.stringify(cpMeta().rv[id][0].fm), S[1]);
+      check('«На доработку» (D) — комментарий к одному кадру, а не ко всей карточке; дальше — следующий кадр', /"b1.tif":\{"s":"rework","note":"убрать складку"/.test(m2) && x.name === 'b2.tif' && !x.barOpen, m2 + ' ' + JSON.stringify(x));
+      await t.keyboard.press('ArrowRight');
+      x = await st();
+      check('в карточке есть замечание — в конце карточки про сайт не спрашивает', x.name === 'c1.tif' && !x.barOpen, JSON.stringify(x));
+      /* способ 2: долистала карточку без замечаний — вопрос «отправить на сайт?» */
+      await t.keyboard.press('ArrowRight');
+      x = await st();
+      check('карточку пролистали до конца без замечаний и без отметок — вопрос «Отправить её на сайт?»', x.barOpen && /Карточка 81004 просмотрена, замечаний нет\. Отправить её на сайт\?/.test(x.bar) && x.name === 'c1.tif', JSON.stringify(x));
+      await t.click('#cpRvvBar [data-rvv="ask-yes"]');
+      x = await st();
+      const m3 = await t.evaluate(id => (cpMeta().rv[id][0].ready || {}).via, S[2]);
+      check('«Отправить» — карточка помечена готовой, просмотр идёт дальше по кругу', m3 === 'viewer_ask' && x.name === 'a1.tif' && /на сайт/.test(x.mark) && !x.barOpen, JSON.stringify([m3, x]));
+      /* закрыли просмотр — всё разом: готовые на сайт (со способом), с замечанием — на доработку */
+      await t.keyboard.press('Escape');
+      const fin = await t.evaluate(() => ({ open: document.getElementById('cpRvv').classList.contains('cp-open'), calls: window.__calls, toast: document.getElementById('cbToast').textContent }));
+      check('закрыли просмотр — на сайт уходят обе готовые карточки одной отправкой, у каждой свой способ; карточка с замечанием — на доработку с текстом по кадру',
+        !fin.open && fin.calls.ap.length === 1 && JSON.stringify(fin.calls.ap[0][0]) === JSON.stringify([S[0], S[2]])
+        && fin.calls.ap[0][1][S[0]] === 'viewer_marks' && fin.calls.ap[0][1][S[2]] === 'viewer_ask'
+        && fin.calls.rw.length === 1 && fin.calls.rw[0][0] === S[1] && fin.calls.rw[0][1] === 'b1.tif — убрать складку' && /на сайт — 2, на доработку — 1/.test(fin.toast), JSON.stringify(fin));
+      /* отправка не состоялась (заглушка) — отметки остались: миниатюры, итог на карточке, кнопка «Завершить просмотр» */
+      const card = await t.evaluate(ids => {
+        const box = id => document.querySelector('.cp-rv[data-cp-rv="' + id + '"]');
+        return { okT: box(ids[0]).querySelectorAll('.cp-rv-t.cp-rvv-ok').length, badT: box(ids[1]).querySelectorAll('.cp-rv-t.cp-rvv-bad').length,
+          badTitle: box(ids[1]).querySelector('.cp-rv-t.cp-rvv-bad').title, sum0: (box(ids[0]).querySelector('.cp-rvv-sum') || {}).textContent, sum1: (box(ids[1]).querySelector('.cp-rvv-sum') || {}).textContent,
+          fin: (document.querySelector('[data-cp-rvv-fin]') || {}).textContent };
+      }, S);
+      check('на карточках: принятые кадры и кадр с замечанием видны на миниатюрах, итог просмотра, «Завершить просмотр: на сайт 2, на доработку 1»',
+        card.okT === 2 && card.badT === 1 && /убрать складку/.test(card.badTitle) && /принято 2 из 2 — готова на сайт/.test(card.sum0) && /на доработку 1/.test(card.sum1)
+        && /Завершить просмотр: на сайт 2, на доработку 1/.test(card.fin), JSON.stringify(card));
+      /* способ 3: кнопка на карточке и галочки в списке; карточку с замечанием целиком на сайт не отправить */
+      const ways = await t.evaluate(ids => {
+        window.__calls = { ap: [], rw: [] };
+        document.querySelector('.cp-rv[data-cp-rv="' + ids[2] + '"] [data-cp-rva="approve"]').click();
+        CP.checked = {}; CP.checked[ids[0]] = true; CP.checked[ids[1]] = true;
+        cbRenderOutline();
+        const b = document.querySelector('#cbOutline [data-cp-o="rvsite"]');
+        const label = b ? b.textContent : '';
+        if (b) b.click();
+        CP.checked = {}; cbRenderOutline();
+        const calls = window.__calls.ap;
+        /* настоящая отправка: карточка с кадром «на доработку» не уходит */
+        window.cpRvApprove = window.__real.ap;
+        const was = { site: (CP.settings || {}).site, retouched: (CP.settings || {}).retouched, miss: window.cpCatStageMissing };
+        CP.settings = CP.settings || {}; CP.settings.site = 'disk:/Сайт'; delete CP.settings.retouched; window.cpCatStageMissing = () => false;
+        cpRvApprove([ids[1]], 'card');
+        const stay = cpMeta().rv[ids[1]][0].status;
+        CP.settings.site = was.site; if (was.retouched) CP.settings.retouched = was.retouched; window.cpCatStageMissing = was.miss;
+        return { calls, label, stay };
+      }, S);
+      check('«На сайт» на карточке и галочками в списке — тоже работают и записывают свой способ; карточка с кадром «на доработку» на сайт не уходит',
+        ways.calls.length === 2 && ways.calls[0][1] === 'card' && JSON.stringify(ways.calls[0][0]) === JSON.stringify([S[2]])
+        && ways.calls[1][1] === 'batch' && ways.calls[1][0].length === 2 && /На сайт: 2/.test(ways.label) && ways.stay === 'review', JSON.stringify(ways));
+      /* карточка на доработке: просмотр только её кадров, без кнопок, замечание видно */
+      const ro = await t.evaluate(ids => {
+        const v = cpMeta().rv[ids[1]][0];
+        v.status = 'rework'; v.note = 'b1.tif — убрать складку';
+        cpRvvOpen(ids[1], 0);
+        const lb = document.getElementById('cpRvv');
+        const r = { count: document.getElementById('cpRvvCount').textContent, mark: document.getElementById('cpRvvMark').textContent,
+          btns: [...lb.querySelectorAll('.cp-lb-head [data-rvv]')].filter(b => b.style.display !== 'none').map(b => b.textContent).join('|') };
+        cpRvvClose();
+        ids.forEach(id => { delete cpMeta().rv[id]; });
+        window.cpRvRework = window.__real.rw; window.cpLoadBig = window.__real.big;
+        cbRenderCards();
+        return r;
+      }, S);
+      check('карточка на доработке: в просмотре только её кадры, замечание к кадру видно, кнопок «на сайт / на доработку» нет',
+        /^1 \/ 2$/.test(ro.count) && /на доработку: убрать складку/.test(ro.mark) && ro.btns === 'Назад|Вперёд|Закрыть', JSON.stringify(ro));
     }
     check('разбор 10.11: страница без ошибок', terr.length === 0, terr.join(' | '));
     await t.close();

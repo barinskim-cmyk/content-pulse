@@ -25,7 +25,8 @@
    ============================================================ */
 
 var CP_OUTPUT_FILE = 'выработка.csv';
-var CP_OUTPUT_HEAD = 'дата;время;ретушёр;съёмка;карточка;кадров;событие;кто;версия';
+var CP_OUTPUT_HEAD_OLD = 'дата;время;ретушёр;съёмка;карточка;кадров;событие;кто;версия';
+var CP_OUTPUT_HEAD = CP_OUTPUT_HEAD_OLD + ';способ';   /* способ — как отправили на сайт (2.0.98) */
 
 function cpReviewRoot() { return (CP.settings && CP.settings.retouched) || ''; }
 
@@ -49,6 +50,8 @@ function cpOutputAppend(rows, file, head) {
   return CPDisk.proxyFile(path).then(function (b) { return b.text(); }, function (e) { if (e && e.status === 404) return ''; throw e; })
     .then(function (old) {
       old = String(old || '').replace(/^﻿/, '').replace(/\s+$/, '');
+      /* таблица заведена до столбца «способ» — дописываем его в заголовок */
+      if (file === CP_OUTPUT_FILE && old.indexOf(CP_OUTPUT_HEAD_OLD) === 0 && old.indexOf(CP_OUTPUT_HEAD) !== 0) old = CP_OUTPUT_HEAD + old.slice(CP_OUTPUT_HEAD_OLD.length);
       var body = '﻿' + (old || head) + '\n' + text + '\n';   /* BOM — Excel открывает кириллицу */
       return CPDisk.ensureDir(CP_CONFIG.serviceDir).then(function () {
         return CPDisk.uploadBlob(path, new Blob([body], { type: 'text/csv;charset=utf-8' }), true);
@@ -56,9 +59,10 @@ function cpOutputAppend(rows, file, head) {
     }).catch(function (e) { if (window.console) console.warn('[CP] ' + file + ' не записался', e && (e.body || e.message || e)); });
 }
 
-function cpOutputRow(ver, shootName, card, event) {
+function cpOutputRow(ver, shootName, card, event, via) {
   var d = new Date(), z = function (n) { return (n < 10 ? '0' : '') + n; };
-  return [cpToday(), z(d.getHours()) + ':' + z(d.getMinutes()), ver.letter || '', shootName, card ? card.title || '' : '', (ver.files || []).length, event, cpActor(), 'v' + ver.v];
+  return [cpToday(), z(d.getHours()) + ':' + z(d.getMinutes()), ver.letter || '', shootName, card ? card.title || '' : '', (ver.files || []).length, event, cpActor(), 'v' + ver.v,
+    typeof cpRvViaText === 'function' ? cpRvViaText(via) : ''];
 }
 
 /* ---------- сдача: в 04/<съёмка>/<папка артикула> ---------- */
@@ -265,18 +269,19 @@ function cpWaitThere(path, tries) {
 }
 
 var cpRvApproveLegacy = cpRvApprove;
-cpRvApprove = function (ids) {
+cpRvApprove = function (ids, via) {
   var root = cpReviewRoot(), site = typeof cpSiteRoot === 'function' ? cpSiteRoot() : '';
-  if (!root) { if (cpCatStageMissing('retouched')) return; return cpRvApproveLegacy(ids); }
+  if (!root) { if (cpCatStageMissing('retouched')) return; return cpRvApproveLegacy(ids, via); }
   if (!site) { cbToast('Нет папки сайта в каталоге: шестерёнка на витрине'); return; }
   var rv = cpRv(), shoot = CP.shoot, todo = [], skip = [];
   ids.forEach(function (id) {
     var last = cpLastRv(rv[id]);
-    if (!last || last.status !== 'review' || !cpRvDirOf(last)) {
+    if (!last || last.status !== 'review' || !cpRvDirOf(last) || cpRvHasReworkMarks(last)) {
       /* раньше — молча; теперь говорим, почему карточка не уехала */
       var c0 = cbCardById(id);
       skip.push((c0 && (c0.title || c0.category) || 'карточка') + ' — ' + (!last ? 'ретушь не сдана'
-        : last.status === 'approved' ? 'уже на сайте' : last.status === 'rework' ? 'на доработке, ждёт новой версии' : 'нет папки версии в 04'));
+        : last.status === 'approved' ? 'уже на сайте' : last.status === 'rework' ? 'на доработке, ждёт новой версии'
+        : cpRvHasReworkMarks(last) ? 'в просмотре есть кадры «на доработку» — завершите просмотр или снимите отметки' : 'нет папки версии в 04'));
       return;
     }
     var card = cbCardById(id), idx = App.cards.indexOf(card);
@@ -298,18 +303,20 @@ cpRvApprove = function (ids) {
       }, function (e) {
         queued.push(t);
         CPQ.add(shoot, { kind: 'move', label: 'На сайт: ' + (t.card ? t.card.title || t.card.category || 'карточка' : t.id), items: [{ from: t.from, path: t.to }],
-          after: { type: 'rv-approve', id: t.id, from: t.from, to: t.to, who: who, date: cpToday(), base: base }, err: (e && e.message) || '' });
+          after: { type: 'rv-approve', id: t.id, from: t.from, to: t.to, who: who, date: cpToday(), base: base, via: cpRvViaOf(via, t.id) }, err: (e && e.message) || '' });
       });
     });
   }, Promise.resolve()).then(function () {
     cbBusyHide();
     var m = cpMeta();
     moved.forEach(function (t) {
-      cpRvApplyApproved(m, t.id, t.from, t.to, who, now, cpToday());
-      rows.push(cpOutputRow(t.last, shoot.name, t.card, 'принято'));
+      cpRvApplyApproved(m, t.id, t.from, t.to, who, now, cpToday(), cpRvViaOf(via, t.id));
+      rows.push(cpOutputRow(t.last, shoot.name, t.card, 'принято', cpRvViaOf(via, t.id)));
     });
     if (moved.length) {
-      cpEvent('rt_approve', [], { card: moved.map(function (t) { return t.card ? t.card.title : t.id; }).join(', '), note: 'на сайт: ' + CPDisk.showPath(cpParentDir(moved[0].to)) });
+      var mids = moved.map(function (t) { return t.id; });
+      cpEvent('rt_approve', [], { card: moved.map(function (t) { return t.card ? t.card.title : t.id; }).join(', '), via: cpRvViaKeys(via, mids),
+        note: 'на сайт: ' + CPDisk.showPath(cpParentDir(moved[0].to)) + cpRvViaNote(via, mids) });
       cbToast('На сайт: карточек ' + moved.length + ' → ' + CPDisk.showPath(cpParentDir(moved[0].to))
         + (queued.length ? '. Не перенеслись сразу: ' + queued.length + ' — переношу повторно (плашка сверху)' : ''));
     } else if (queued.length) cbToast('Не перенеслось сразу: ' + queued.length + ' — переношу повторно, не закрывайте страницу (плашка сверху)');
@@ -331,9 +338,11 @@ cpRvApprove = function (ids) {
 };
 
 /** Записать в отбор: версия ретуши карточки на сайте (to — папка в 05). Общая для сразу и для очереди. */
-function cpRvApplyApproved(m, id, from, to, who, ts, date) {
+function cpRvApplyApproved(m, id, from, to, who, ts, date, via) {
   var last = cpLastRv((m.rv || {})[id]);
   if (!last) return;
+  if (via) last.via = via;
+  delete last.ready;
   (last.files || []).forEach(function (f) { if (f.path.indexOf(from + '/') === 0) f.path = to + f.path.slice(from.length); });
   last.dir = to;
   last.status = 'approved'; last.rby = who; last.rts = ts; last.site = CPDisk.showPath(to);
@@ -347,9 +356,9 @@ function cpRvApplyApproved(m, id, from, to, who, ts, date) {
 
 CPQ.after['rv-approve'] = function (op, m, shoot) {
   var a = op.after;
-  cpRvApplyApproved(m, a.id, a.from, a.to, a.who, new Date().toISOString(), a.date);
+  cpRvApplyApproved(m, a.id, a.from, a.to, a.who, new Date().toISOString(), a.date, a.via);
   var last = cpLastRv((m.rv || {})[a.id]), card = CP.shoot && CP.shoot.path === shoot.path ? cbCardById(a.id) : null;
-  if (last) cpOutputAppend([cpOutputRow(last, shoot.name, card || { title: a.id }, 'принято')]);
+  if (last) cpOutputAppend([cpOutputRow(last, shoot.name, card || { title: a.id }, 'принято', a.via)]);
   if (a.base) cpTrashEmptyUp(cpParentDir(a.from), cpParentDir(a.base));
   if (CP.shoot && CP.shoot.path === shoot.path) {
     if (typeof cpSiteMarkNew === 'function') cpSiteMarkNew([cpParentDir(a.to)]);
@@ -360,12 +369,12 @@ CPQ.after['rv-approve'] = function (op, m, shoot) {
 /* ---------- на доработку: остаётся в 04 с припиской «_доработка» ---------- */
 
 var cpRvReworkLegacy = cpRvRework;
-cpRvRework = function (id) {
+cpRvRework = function (id, note) {
   var root = cpReviewRoot();
-  if (!root) { if (cpCatStageMissing('retouched')) return; return cpRvReworkLegacy(id); }
+  if (!root) { if (cpCatStageMissing('retouched')) return; return cpRvReworkLegacy(id, note); }
   var last = cpLastRv(cpRv()[id]);
   if (!last) return;
-  var note = prompt('Что доработать? (увидит ретушёр)', '');
+  if (note === undefined) note = prompt('Что доработать? (увидит ретушёр)', '');
   if (note === null) return;
   var from = cpRvDirOf(last), card = cbCardById(id);
   var to = from.replace(/_доработка$/i, '') + '_доработка';
@@ -1450,6 +1459,10 @@ function cpRvCardUpload(id, files) {
       if (p2 && p2.status === 'review') p2.status = 'replaced';
       var ver = { v: l2.length + 1, batch: cpToday() + '_' + letter + '_' + (last.n || '1'), letter: letter, n: last.n || '1', date: cpToday(), by: who, ts: now,
         files: nFiles, status: 'review', dir: dir, kind: kind, added: ok.length - gone.length, replaced: gone.length };
+      /* кадры, которые старший уже отметил «на сайт» и которые не заменяли, второй раз смотреть не нужно */
+      var fmOld = (p2 && p2.fm) || (last && last.fm) || {}, fmNew = {};
+      keep.forEach(function (o) { if (fmOld[o.name] && fmOld[o.name].s === 'ok') fmNew[o.name] = fmOld[o.name]; });
+      if (Object.keys(fmNew).length) ver.fm = fmNew;
       l2.push(ver);
       var c = (data.cards || []).filter(function (x) { return x.id === id; })[0];
       row = cpOutputRow(ver, shoot.name, c, kind + ': заменено ' + gone.length + ', добавлено ' + Math.max(0, ok.length - gone.length));
