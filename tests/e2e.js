@@ -1990,6 +1990,43 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     });
     check('правка с витрины по открытой съёмке: исходная версия для склейки — та, что теперь на Диске', bs[0] && bs[1] && !bs[2], JSON.stringify(bs));
     await t.evaluate(async () => { await cpMutateState({ path: CP.shoot.path, name: CP.shoot.name }, d => { delete d.meta.cp.folderTags['аудит']; }); });
+    /* A3: папка на новом месте уже есть — приписка к исходному имени, а не «LOOK_12» -> «LOOK_2» */
+    const mv = await t.evaluate(() => {
+      const calls = [], pm = CPDisk.proxyMove, mt = CPDisk.meta;
+      CPDisk.proxyMove = (items) => { calls.push(items[0].path); return Promise.resolve({ results: [{ from: items[0].from, status: calls.length < 3 ? 'exists' : 'done' }] }); };
+      CPDisk.meta = () => Promise.resolve({});
+      return cpMoveFolder('disk:/К/04/с/LOOK_12', 'disk:/К/05/2026-11-10/с/LOOK_12').then(to => { CPDisk.proxyMove = pm; CPDisk.meta = mt; return { calls, to }; });
+    });
+    check('«На сайт» повторно: «LOOK_12» -> «LOOK_12_2» -> «LOOK_12_3», а не «LOOK_2»', mv.to === 'disk:/К/05/2026-11-10/с/LOOK_12_3' && mv.calls[1] === 'disk:/К/05/2026-11-10/с/LOOK_12_2', JSON.stringify(mv.calls));
+    /* B3: очередь шлёт прослойке пачки; файл без ответа остаётся в очереди */
+    const qc = await t.evaluate(async () => {
+      const pc = CPDisk.proxyCopy, pm = CPDisk.proxyMove, mt = CPDisk.meta, sizes = [], out = {};
+      const items = []; for (let i = 0; i < 130; i++) items.push({ from: 'disk:/a/' + i + '.jpg', path: 'disk:/b/' + i + '.jpg' });
+      /* 1) прослойка отвечает про все — три пачки, всё сделано */
+      CPDisk.proxyCopy = (ch) => { sizes.push(ch.length); return Promise.resolve({ results: ch.map(x => ({ from: x.from, status: 'done' })) }); };
+      let op = { kind: 'copy', items: items.slice(), dirs: ['disk:/b'] };
+      out.all = (await cpqRun(op)).ok; out.sizes = sizes.slice(); out.left0 = op.items.length;
+      /* 2) прослойка ответила только про первые 20 из пачки — остальные не считаются сделанными */
+      CPDisk.proxyCopy = (ch) => Promise.resolve({ results: ch.slice(0, 20).map(x => ({ from: x.from, status: 'done' })) });
+      op = { kind: 'copy', items: items.slice(), dirs: [] };
+      const r2 = await cpqRun(op); out.partOk = r2.ok; out.left = op.items.length;
+      /* 3) одна пачка упала целиком — остальные всё равно ушли */
+      let n = 0;
+      CPDisk.proxyCopy = (ch) => (++n === 2 ? Promise.reject({ status: 0, message: 'сеть' }) : Promise.resolve({ results: ch.map(x => ({ from: x.from, status: 'exists' })) }));
+      op = { kind: 'copy', items: items.slice(), dirs: [] };
+      const r3 = await cpqRun(op); out.netOk = r3.ok; out.netLeft = op.items.length;
+      /* 4) перенос: пачки по 100, проверка нового места по каждой */
+      const ms = [];
+      CPDisk.proxyMove = (ch) => { ms.push(ch.length); return Promise.resolve({ results: ch.map(x => ({ from: x.from, status: 'done' })) }); };
+      CPDisk.meta = () => Promise.resolve({});
+      op = { kind: 'move', items: items.slice() };
+      out.mv = (await cpqRun(op)).ok; out.ms = ms;
+      CPDisk.proxyCopy = pc; CPDisk.proxyMove = pm; CPDisk.meta = mt;
+      return out;
+    });
+    check('очередь: копии уходят пачками по 50, всё подтверждено — готово', qc.all === true && qc.sizes.join(',') === '50,50,30' && qc.left0 === 0, JSON.stringify(qc.sizes));
+    check('очередь: файл, про который прослойка не ответила, остаётся в очереди', qc.partOk === false && qc.left === 130 - 60, 'осталось ' + qc.left);
+    check('очередь: пачка, упавшая целиком, остаётся, остальные ушли; перенос — пачками по 100', qc.netOk === false && qc.netLeft === 50 && qc.mv === true && qc.ms.join(',') === '100,30', JSON.stringify([qc.netLeft, qc.ms]));
     check('разбор 10.11: страница без ошибок', terr.length === 0, terr.join(' | '));
     await t.close();
   }

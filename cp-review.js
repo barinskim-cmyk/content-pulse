@@ -234,10 +234,12 @@ function cpTrashEmptyUp(dir, stop) {
    свидетельствовать, что всё в нужное место переехало»). Статус ставит вызывающий —
    только после того, как эта функция вернула путь. Диск переносит большие папки в
    фоне: если прослойка не дождалась (timeout), ждём сами до 90 с и проверяем. */
-function cpMoveFolder(from, to, tries) {
+function cpMoveFolder(from, to, tries, base) {
   return CPDisk.proxyMove([{ from: from, path: to }]).then(function (r) {
     var st = r && r.results && r.results[0];
-    if (st && st.status === 'exists' && (tries || 0) < 5) return cpMoveFolder(from, to.replace(/_\d+$/, '') + '_' + ((tries || 0) + 2), (tries || 0) + 1);
+    /* на новом месте такая папка уже есть — приписка «_2», «_3» к ИСХОДНОМУ имени: раньше перед припиской
+       срезалось любое окончание «_цифры», и «LOOK_12» уезжала под чужим именем «LOOK_2» */
+    if (st && st.status === 'exists' && (tries || 0) < 5) return cpMoveFolder(from, (base || to) + '_' + ((tries || 0) + 2), (tries || 0) + 1, base || to);
     var why = (st && (st.error || st.status)) || 'не перенеслось';
     var done = st && st.status === 'done';
     return cpWaitThere(to, done ? 1 : (why === 'timeout' ? 18 : 2)).then(function (ok) {

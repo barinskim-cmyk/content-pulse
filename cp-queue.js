@@ -35,8 +35,16 @@ var CPQ = {
   after: {},        /* type -> function (op, meta, shootPath) — модули регистрируют свои */
   delays: [5000, 10000, 20000, 40000, 60000],
   redraw: { 'rv-approve': true, 'rv-rework': true },
-  alarmAfter: 3
+  alarmAfter: 3,
+  copyChunk: 50,    /* копий за один вызов прослойки */
+  moveChunk: 100    /* переносов за один вызов */
 };
+
+function cpqChunks(list, n) {
+  var out = [];
+  for (var i = 0; i < list.length; i += n) out.push(list.slice(i, i + n));
+  return out;
+}
 
 function cpqId() { return 'q' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 
@@ -138,39 +146,63 @@ function cpqTick() {
 
 /** Выполнить перенос и проверить результат по Диску. -> {ok} | {ok:false, err, stuck} */
 function cpqRun(op) {
+  /* Пачками: прослойка берёт за вызов не больше 1000 копий и 200 переносов, остальное молча
+     отбрасывает. Раньше файл, о котором прослойка не ответила, считался сделанным — большая
+     очередь (тысячи кадров на ретушь после сбоя сети) «заканчивалась», не докопировав хвост.
+     Теперь файл без ответа остаётся в очереди. */
   if (op.kind === 'copy') {
-    return CPDisk.proxyCopy(op.items, op.dirs || []).then(function (out) {
-      var left = [], err = '', gone = 0;
-      (out.results || []).forEach(function (x, i) {
-        if (x.status === 'done' || x.status === 'exists') return;
-        left.push(op.items[i]);
-        if (x.status === 'gone' || /404|not found|не найден/i.test(String(x.error || ''))) gone++;
-        err = x.error || x.status;
+    var all = op.items || [], dirs = op.dirs || [], left = [], err = '', gone = 0, firstOk = false;
+    return cpqChunks(all, CPQ.copyChunk).reduce(function (p, ch, ci) {
+      return p.then(function () {
+        return CPDisk.proxyCopy(ch, ci === 0 ? dirs : []).then(function (out) {
+          var res = (out && out.results) || [];
+          if (ci === 0) firstOk = true;
+          ch.forEach(function (it, k) {
+            var x = res[k];
+            if (x && (x.status === 'done' || x.status === 'exists')) return;
+            left.push(it);
+            if (!x) { err = err || 'прослойка не ответила про файл'; return; }
+            if (x.status === 'gone' || /404|not found|не найден/i.test(String(x.error || ''))) gone++;
+            err = x.error || x.status;
+          });
+        }, function (e) {
+          /* пачка не прошла целиком — она остаётся в очереди, остальные пробуем */
+          ch.forEach(function (it) { left.push(it); });
+          err = (e && (e.message || e.status)) || String(e);
+        });
       });
+    }, Promise.resolve()).then(function () {
       op.items = left;
-      op.dirs = [];
+      if (firstOk) op.dirs = [];
       if (!left.length) return { ok: true };
       return { ok: false, err: 'не скопировано ' + left.length + ': ' + err, stuck: gone === left.length };
     });
   }
   if (op.kind === 'move') {
-    return CPDisk.proxyMove(op.items).then(function (out) {
-      var r = out.results || [];
-      return Promise.all(op.items.map(function (it, i) {
-        var x = r[i] || {};
-        if (x.status === 'done') return cpqThere(it.path).then(function (y) { return y ? null : 'на новом месте нет'; });
-        /* исходника нет — значит, уже перенесли (мы раньше или коллега); проверяем новое место */
-        return cpqThere(it.path).then(function (y) {
-          if (y) return null;
-          return x.status === 'gone' ? 'GONE' : (x.error || x.status || 'не перенеслось');
+    var mAll = op.items || [], mLeft = [], mErr = '', mGone = 0;
+    return cpqChunks(mAll, CPQ.moveChunk).reduce(function (p, ch) {
+      return p.then(function () {
+        return CPDisk.proxyMove(ch).then(function (out) { return (out && out.results) || []; }, function (e) {
+          mErr = (e && (e.message || e.status)) || String(e);
+          return [];
+        }).then(function (r) {
+          return Promise.all(ch.map(function (it, i) {
+            var x = r[i] || {};
+            if (x.status === 'done') return cpqThere(it.path).then(function (y) { return y ? null : 'на новом месте нет'; });
+            /* исходника нет — значит, уже перенесли (мы раньше или коллега); проверяем новое место */
+            return cpqThere(it.path).then(function (y) {
+              if (y) return null;
+              return x.status === 'gone' ? 'GONE' : (x.error || x.status || mErr || 'не перенеслось');
+            });
+          })).then(function (errs) {
+            errs.forEach(function (e, i) { if (e) { mLeft.push(ch[i]); if (e === 'GONE') mGone++; else mErr = e; } });
+          });
         });
-      })).then(function (errs) {
-        var left = [], err = '', gone = 0;
-        errs.forEach(function (e, i) { if (e) { left.push(op.items[i]); if (e === 'GONE') gone++; else err = e; } });
-        op.items = left;
-        if (!left.length) return { ok: true };
-        return { ok: false, err: gone === left.length ? 'нет ни на старом, ни на новом месте' : err, stuck: gone === left.length };
       });
+    }, Promise.resolve()).then(function () {
+      op.items = mLeft;
+      if (!mLeft.length) return { ok: true };
+      return { ok: false, err: mGone === mLeft.length ? 'нет ни на старом, ни на новом месте' : mErr, stuck: mGone === mLeft.length };
     });
   }
   if (op.kind === 'trash') {
