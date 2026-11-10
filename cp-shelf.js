@@ -771,7 +771,9 @@ function cpMutateState(sel, fn) {
   return attempt(true).then(function (data) {
     /* если эта съёмка открыта — подтянуть изменения в отбор */
     if (CP.shoot && CP.shoot.path === sel.path && !App.dirty) {
-      return CPDisk.readState(sel.path).then(function (st) { CP.rev = st.rev; cpApplyRemote(st.data); return data; });
+      /* CP.base — то, что лежит на Диске: без этого следующая склейка считала бы эти поля
+         «нашими правками» и ставила их поверх более новых чужих */
+      return CPDisk.readState(sel.path).then(function (st) { CP.rev = st.rev; CP.base = cpClone(st.data) || null; cpApplyRemote(st.data); return data; });
     }
     return data;
   });
@@ -902,7 +904,7 @@ function cpShelfDownload() {
       items.forEach(function (x) {
         var pid = pidByDisk[x.file.path];
         if (!pid) {   /* кадр ещё не в отборе — заводим запись, чтобы помнить скачивание */
-          pid = 'p' + (d.nextId = (d.nextId || 1) + 1) + 'x';
+          pid = 'p' + (d.nextId = (d.nextId || 1) + 1) + 'x' + (CP.idTag || '');   /* метка вкладки: у двух людей номера не совпадут */
           d.photos = d.photos || [];
           d.photos.push({ id: pid, name: x.file.name, disk: x.file.path, size: x.file.size, md5: x.file.md5, w: 0, h: 0, kind: 'photo' });
           pidByDisk[x.file.path] = pid;

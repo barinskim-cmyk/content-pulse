@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.84';
+var CP_VERSION = '2.0.85';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -920,7 +920,21 @@ function cpMerge3(base, local, remote) {
   var bm = (base.meta || {}).cp || {}, lm = (local.meta || {}).cp || {}, rm = (remote.meta || {}).cp || {};
   out.meta = out.meta || {};
   var cp = out.meta.cp = cpClone(rm) || {};
-  ['status', 'cardStatus', 'downloads', 'likes', 'folderTags', 'delivered', 'rv', 'ap2', 'q'].forEach(function (k) { cp[k] = cpMergeMap(bm[k], lm[k], rm[k]); });
+  /* Склеиваются ВСЕ поля отметок, а не перечисленные: новое поле (так было с «brak» в 2.0.82)
+     иначе при конфликте молча бралось из чужой версии и наша запись пропадала.
+     Поле-словарь (кадр или карточка -> запись) склеивается по записям; остальное — целиком:
+     наше, если мы его меняли, иначе их. Журнал (events) — отдельно, ниже. */
+  var isMap = function (x) { return !!x && typeof x === 'object' && !Array.isArray(x); };
+  var mkeys = {};
+  [bm, lm, rm].forEach(function (m) { Object.keys(m).forEach(function (k) { mkeys[k] = true; }); });
+  Object.keys(mkeys).forEach(function (k) {
+    if (k === 'events') return;
+    var vals = [bm[k], lm[k], rm[k]].filter(function (v) { return v !== undefined && v !== null; });
+    if (vals.length && vals.every(isMap)) { cp[k] = cpMergeMap(bm[k], lm[k], rm[k]); return; }
+    var v = !cpSame(lm[k], bm[k]) ? lm[k] : rm[k];
+    if (v === undefined) delete cp[k]; else cp[k] = cpClone(v);
+  });
+  ['status', 'cardStatus', 'downloads', 'likes', 'folderTags', 'delivered', 'rv', 'ap2', 'q'].forEach(function (k) { if (!isMap(cp[k])) cp[k] = {}; });
   var seen = {}, ev = [];
   (rm.events || []).concat(lm.events || []).forEach(function (e) {
     var key = e.ts + '|' + e.action + '|' + e.actor + '|' + JSON.stringify(e.items || []);

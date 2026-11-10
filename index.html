@@ -2469,12 +2469,12 @@ document.getElementById('cbTplSave').onclick = function () {
       var base = t.name;
       if (linked && base.slice(-suffix.length) !== suffix) base = base + suffix;
       t.name = cbUniqueTplName(base);
-      t.id = 'tpl' + (App.nextId++);
+      t.id = 'tpl' + cbId();   /* cbId — с меткой вкладки: у двух людей номера не совпадут */
       App.templates.push(JSON.parse(JSON.stringify(t)));
     }
   } else {
     /* Новый шаблон из редактора (кнопка «Создать шаблон» / галерея). */
-    t.id = 'tpl' + (App.nextId++);
+    t.id = 'tpl' + cbId();   /* cbId — с меткой вкладки: у двух людей номера не совпадут */
     App.templates.push(JSON.parse(JSON.stringify(t)));
   }
 
@@ -2537,7 +2537,7 @@ document.getElementById('cbGalGrid').addEventListener('click', function (e) {
   if (el.getAttribute('data-gal-dup')) {
     var t = cbTplById(id);
     var copy = JSON.parse(JSON.stringify(t));
-    copy.id = 'tpl' + (App.nextId++);
+    copy.id = 'tpl' + cbId();
     copy.name = t.name + ' (копия)';
     App.templates.push(copy);
     cbStoreTemplates(); cbGalRender();
@@ -3317,23 +3317,23 @@ cbHistoryReset();
 /* при запуске — «лаунчер»: cp-app.js показывает вместо него витрину съёмок */
 setTimeout(function () { cbProjModalOpen('launcher', true); }, 150);
 </script>
-<script src="cp-disk.js?v=2.0.84"></script>
-<script src="cp-app.js?v=2.0.84"></script>
-<script src="cp-queue.js?v=2.0.84"></script>
-<script src="cp-shelf.js?v=2.0.84"></script>
-<script src="cp-rules.js?v=2.0.84"></script>
-<script src="cp-guard.js?v=2.0.84"></script>
-<script src="cp-deliver.js?v=2.0.84"></script>
-<script src="cp-stages.js?v=2.0.84"></script>
-<script src="cp-accept.js?v=2.0.84"></script>
-<script src="cp-mirror.js?v=2.0.84"></script>
-<script src="cp-catalog.js?v=2.0.84"></script>
-<script src="cp-review.js?v=2.0.84"></script>
-<script src="cp-brak.js?v=2.0.84"></script>
-<script src="cp-site.js?v=2.0.84"></script>
-<script src="cp-upload.js?v=2.0.84"></script>
-<script src="cp-speed.js?v=2.0.84"></script>
-<script src="cp-archive.js?v=2.0.84"></script>
-<script src="cp-catalogs.js?v=2.0.84"></script>
+<script src="cp-disk.js?v=2.0.85"></script>
+<script src="cp-app.js?v=2.0.85"></script>
+<script src="cp-queue.js?v=2.0.85"></script>
+<script src="cp-shelf.js?v=2.0.85"></script>
+<script src="cp-rules.js?v=2.0.85"></script>
+<script src="cp-guard.js?v=2.0.85"></script>
+<script src="cp-deliver.js?v=2.0.85"></script>
+<script src="cp-stages.js?v=2.0.85"></script>
+<script src="cp-accept.js?v=2.0.85"></script>
+<script src="cp-mirror.js?v=2.0.85"></script>
+<script src="cp-catalog.js?v=2.0.85"></script>
+<script src="cp-review.js?v=2.0.85"></script>
+<script src="cp-brak.js?v=2.0.85"></script>
+<script src="cp-site.js?v=2.0.85"></script>
+<script src="cp-upload.js?v=2.0.85"></script>
+<script src="cp-speed.js?v=2.0.85"></script>
+<script src="cp-archive.js?v=2.0.85"></script>
+<script src="cp-catalogs.js?v=2.0.85"></script>
 </body>
 </html>

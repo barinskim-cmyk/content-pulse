@@ -1952,6 +1952,48 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
   await page.waitForSelector('.cp-shoot');
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-shelf.png') });
 
+  /* ---------- разбор кода 10.11.2026 (аудит 2.0.84) ---------- */
+  {
+    const t = await ctx.newPage();
+    const terr = [];
+    t.on('pageerror', e => terr.push(e.message));
+    await t.goto(base);
+    await t.waitForSelector('.cp-shoot', { timeout: 8000 });
+    /* A2: при склейке версий пропадала запись о копии в _БРАК (поле brak не было в списке склейки) */
+    const mg = await t.evaluate(() => {
+      const mk = (cp) => ({ cards: [], containers: [], templates: [], photos: [], nextId: 5, meta: { cp } });
+      const b = mk({ status: {}, brak: {}, events: [], note: 'было' });
+      const l = mk({ status: { p1: { s: 'reshoot' } }, brak: { p1: 'disk:/К/00_АРХИВ/_БРАК/с/1/a.jpg' }, novoe: { x1: 1 }, events: [], note: 'стало' });
+      const r = mk({ status: {}, brak: { p9: 'disk:/К/00_АРХИВ/_БРАК/с/1/z.jpg' }, likes: { p2: { by: 'B' } }, novoe: { x2: 2 }, events: [], note: 'было' });
+      const m = cpMerge3(b, l, r).meta.cp;
+      return { brak: m.brak, likes: m.likes, novoe: m.novoe, note: m.note, st: m.status, q: m.q, rv: m.rv };
+    });
+    check('склейка: запись о браке не теряется, чужая тоже остаётся', !!(mg.brak && mg.brak.p1 && mg.brak.p9) && !!(mg.likes && mg.likes.p2) && !!mg.st.p1, JSON.stringify(mg.brak));
+    check('склейка: любое новое поле отметок склеивается по записям, простое значение — наше, если меняли', !!(mg.novoe && mg.novoe.x1 === 1 && mg.novoe.x2 === 2) && mg.note === 'стало' && !!mg.q && !!mg.rv, JSON.stringify([mg.novoe, mg.note]));
+    /* номера, которые не совпадают у двух людей: шаблоны */
+    const tid = await t.evaluate(() => {
+      cbTeOpen(null); document.getElementById('cbTplName').value = 'Тест номера шаблона'; document.getElementById('cbTplSave').click();
+      const x = App.templates.filter(q => q.name === 'Тест номера шаблона')[0];
+      document.getElementById('cbGalModal').classList.remove('cb-open');
+      const id = x ? x.id : '';
+      App.templates = App.templates.filter(q => q !== x); cbStoreTemplates();
+      return [id, CP.idTag];
+    });
+    check('новый шаблон получает номер с меткой вкладки (у двух людей не совпадёт)', !!tid[0] && tid[0].indexOf('tpl') === 0 && tid[0].slice(-tid[1].length) === tid[1], JSON.stringify(tid));
+    /* B6: правка с витрины по открытой съёмке — исходная версия для склейки должна обновиться */
+    await t.evaluate(() => cpOpenShoot('disk:/Архив/LM-2001', 'LM-2001'));
+    await t.waitForFunction(() => CP.shoot && CP.shoot.path === 'disk:/Архив/LM-2001' && !document.getElementById('cpShelf').classList.contains('cp-open'), null, { timeout: 8000 });
+    await t.waitForFunction(() => !App.dirty && !CP.saving, null, { timeout: 8000 }).catch(() => {});
+    const bs = await t.evaluate(async () => {
+      await cpMutateState({ path: CP.shoot.path, name: CP.shoot.name }, d => { d.meta.cp.folderTags['аудит'] = ['T1']; });
+      return [!!(CP.base && CP.base.meta && CP.base.meta.cp && CP.base.meta.cp.folderTags && CP.base.meta.cp.folderTags['аудит']), !!cpMeta().folderTags['аудит'], App.dirty];
+    });
+    check('правка с витрины по открытой съёмке: исходная версия для склейки — та, что теперь на Диске', bs[0] && bs[1] && !bs[2], JSON.stringify(bs));
+    await t.evaluate(async () => { await cpMutateState({ path: CP.shoot.path, name: CP.shoot.name }, d => { delete d.meta.cp.folderTags['аудит']; }); });
+    check('разбор 10.11: страница без ошибок', terr.length === 0, terr.join(' | '));
+    await t.close();
+  }
+
   /* медленная сеть: наши файлы грузятся дольше таймера лаунчера Cardboard — всё равно витрина, а не «Проекты» */
   {
     const slow = await ctx.newPage();
