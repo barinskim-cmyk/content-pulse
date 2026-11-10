@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.89';
+var CP_VERSION = '2.0.90';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -410,9 +410,47 @@ document.getElementById('cpShelfList').addEventListener('click', function (e) {
 });
 document.getElementById('cpShelfSearch').oninput = cpRenderShoots;
 document.getElementById('cpShelfRefresh').onclick = cpLoadShoots;
+/* Открыта съёмка, а витрина переходит в другую папку (другой архив или каталог — переключатель
+   папок, 2.0.84). Папки этапов (02–05) берутся из настроек папки, открытой на витрине, поэтому
+   «Вернуться к съёмке» вело в съёмку, чьи «На ретушь» и «На сайт» ушли бы в этапы ЧУЖОЙ папки.
+   Теперь такая съёмка закрывается: её отбор дописывается, переносы из очереди идут дальше сами. */
+function cpShootForeign(archive) {
+  var a = String(archive || '').replace(/\/+$/, '');
+  return !!(CP.shoot && a && CP.shoot.path.indexOf(a + '/') !== 0);
+}
+function cpCloseShoot() {
+  if (!CP.shoot) return;
+  clearInterval(CP.pollTimer);
+  CP.shoot = null;
+  CP.readOnly = false;
+  CP.saveState = null;
+  cbClearDirty();
+  cpSetTitle();
+  cpUpdateStatusLine();
+  var back = document.getElementById('cpShelfClose');
+  if (back) back.style.display = 'none';
+}
+
 document.getElementById('cpArchiveApply').onclick = function () {
   var v = cpNormArchive(document.getElementById('cpArchiveInput').value);
   if (!v) return;
+  if (cpShootForeign(v)) {
+    var btn = this, was = CP.shoot.name;
+    if (App.dirty || CP.saving) {
+      /* сначала дописать отбор открытой съёмки, потом переходить */
+      cbBusyShow('Сохраняю отбор съёмки ' + was + '...', 0.05);
+      cpFlushSave().then(function () {
+        cbBusyHide();
+        var lost = App.dirty || CP.saving;
+        cpCloseShoot();
+        if (lost) cbToast('Отбор съёмки ' + was + ' не успел сохраниться — правки лежат в этом браузере и вернутся, когда откроете её снова');
+        btn.onclick();
+      });
+      return;
+    }
+    cpCloseShoot();
+    cbToast('Съёмка ' + was + ' закрыта: она из другой папки');
+  }
   document.getElementById('cpArchiveInput').value = v;
   CP.archive = v;
   cpSet('cp_archive', v);

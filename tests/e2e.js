@@ -2153,6 +2153,35 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       check('«Сайт»: «Обновить» перечитывает и старые даты', sr.forced.length === 4, JSON.stringify(sr.forced));
       check('витрина: при опросе папок этапов в даты «Сайта» старше 7 дней не заходим', sr.stage.join() === [nm[0], nm[1]].sort().join() && sr.presence.length === 1, JSON.stringify([sr.stage, sr.presence]));
     }
+    /* переключили папку на витрине — открытая съёмка из прежней папки закрывается (иначе её этапы ушли бы в чужую папку) */
+    {
+      await t.evaluate(() => cpOpenShoot('disk:/Архив/LM-2001', 'LM-2001'));
+      await t.waitForFunction(() => CP.shoot && CP.shoot.name === 'LM-2001' && !document.getElementById('cpShelf').classList.contains('cp-open'), null, { timeout: 8000 }).catch(() => {});
+      await t.waitForFunction(() => !App.dirty && !CP.saving, null, { timeout: 8000 }).catch(() => {});
+      const sw = await t.evaluate(async () => {
+        const keep = { ls: window.cpLoadShoots, sr: window.cpServiceReset, arch: CP.archive, sd: CP_CONFIG.serviceDir, prev: cpGet('cp_prev_service', '') };
+        window.cpLoadShoots = function () { return Promise.resolve(); };
+        window.cpServiceReset = function () { };
+        const out = {};
+        cpShowShelf.call(null);
+        const inp = document.getElementById('cpArchiveInput'), btn = document.getElementById('cpArchiveApply');
+        /* та же папка — съёмка остаётся открытой */
+        inp.value = 'disk:/Архив'; btn.click();
+        out.same = !!CP.shoot && document.getElementById('cpShelfClose').style.display !== 'none';
+        /* другая папка — съёмка закрыта, «Вернуться к съёмке» нет */
+        inp.value = 'disk:/Другая папка'; btn.click();
+        await new Promise(r => setTimeout(r, 100));
+        out.closed = !CP.shoot && document.getElementById('cpShelfClose').style.display === 'none' && CP.archive === 'disk:/Другая папка';
+        out.toast = document.getElementById('cbToast').textContent;
+        window.cpLoadShoots = keep.ls; window.cpServiceReset = keep.sr;
+        CP.archive = keep.arch; cpSet('cp_archive', keep.arch); CP_CONFIG.serviceDir = keep.sd;
+        if (keep.prev) cpSet('cp_prev_service', keep.prev); else cpDel('cp_prev_service');
+        document.getElementById('cpArchiveInput').value = keep.arch;
+        return out;
+      });
+      check('та же папка на витрине — открытая съёмка остаётся', sw.same === true, JSON.stringify(sw));
+      check('перешли в другую папку — съёмка из прежней закрыта, «Вернуться к съёмке» убрано', sw.closed === true && /закрыта/.test(sw.toast), JSON.stringify(sw));
+    }
     check('разбор 10.11: страница без ошибок', terr.length === 0, terr.join(' | '));
     await t.close();
   }
