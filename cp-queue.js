@@ -319,8 +319,15 @@ function cpqRender() {
 }
 
 /* ---------- не уходить, пока не сохранено и не перенесено ---------- */
+/** Идёт долгая работа с окном прогресса: загрузка исходников, сдача ретуши, сборка архива, копирование. */
+function cpBusyNow() {
+  var b = document.getElementById('cbBusy');
+  return !!(b && b.classList.contains('cb-open'));
+}
+
 window.addEventListener('beforeunload', function (e) {
-  if (cpqCount() || (CP.shoot && (App.dirty || CP.saving))) {
+  /* разбор 10.11: во время загрузки исходников и сборки архива страница закрывалась без вопроса */
+  if (cpqCount() || cpBusyNow() || (CP.shoot && (App.dirty || CP.saving))) {
     e.preventDefault();
     e.returnValue = 'Изменения ещё не сохранены на Диске';
     return e.returnValue;

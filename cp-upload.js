@@ -480,7 +480,9 @@ function cpTransitWatch(st) {
       cpSrcRender();
       if (left) { cpTransitSave(st); setTimeout(tick, CP.transitPollMs); }
       else {
-        CPDisk.removeTemp(st.transitPath).catch(function () { });
+        /* есть файлы, которые Диск так и не забрал, — запись «в пути» остаётся: витрина покажет их у съёмки */
+        if (st.transitItems.some(function (x) { return x.st === 'lost'; })) cpTransitSave(st);
+        else CPDisk.removeTemp(st.transitPath).catch(function () { });
         if (CP.shoots && typeof cpLoadShoots === 'function') cpLoadShoots();
       }
     });
@@ -504,14 +506,19 @@ function cpTransitScan() {
       return CPDisk.proxyFile(f.path).then(function (b) { return b.text(); }).then(function (t) {
         var m = JSON.parse(t), items = m.items || [];
         return cpTransitCheck(items).then(function (left) {
+          var nLost = 0;
           items.forEach(function (x) {
+            if (x.st === 'lost') nLost++;
             var sh = (CP.shoots || []).filter(function (d) { return x.path.indexOf(d.path.replace(/\/+$/, '') + '/') === 0; })[0];
             if (!sh) return;
-            var e = map[sh.path] = map[sh.path] || { n: 0, done: 0 };
+            var e = map[sh.path] = map[sh.path] || { n: 0, done: 0, lost: [], src: [] };
             e.n++;
             if (x.st === 'done') e.done++;
+            if (x.st === 'lost') { e.lost.push(x.path.split('/').pop()); if (e.src.indexOf(f.path) === -1) e.src.push(f.path); }
           });
-          if (!left) return CPDisk.removeTemp(f.path);
+          /* Разбор 10.11: раньше запись удалялась, как только не осталось едущих, — и про файлы, которые
+             Диск так и не забрал («не удалось»), никто не узнавал. Теперь она остаётся, пока её не уберут. */
+          if (!left && !nLost) return CPDisk.removeTemp(f.path);
           m.items = items;
           return CPDisk.uploadBlob(f.path, new Blob([JSON.stringify(m)], { type: 'application/json' }), true);
         });
@@ -519,7 +526,7 @@ function cpTransitScan() {
     }).then(function () {
       CP.transit = map;
       if (CP.shoots) cpRenderShoots();
-      return Object.keys(map).some(function (k) { return map[k].done < map[k].n; });
+      return Object.keys(map).some(function (k) { return map[k].done + map[k].lost.length < map[k].n; });
     });
   }, function () { CP.transit = {}; return false; }).then(function (more) {
     _cpTransitBusy = false;
@@ -546,7 +553,13 @@ cpRenderShoots = (function (orig) {
     if (list) Object.keys(CP.transit || {}).forEach(function (p) {
       var t = CP.transit[p], row = list.querySelector('.cp-shoot[data-path="' + (window.CSS && CSS.escape ? CSS.escape(p) : p) + '"]');
       if (!row || t.done >= t.n || row.querySelector('.cp-transit')) return;
-      row.insertAdjacentHTML('beforeend', '<div class="cp-transit">едет на Диск: ' + t.done + ' из ' + t.n + '</div>');
+      var lost = t.lost || [];
+      if (t.done + lost.length < t.n) row.insertAdjacentHTML('beforeend', '<div class="cp-transit">едет на Диск: ' + t.done + ' из ' + t.n + '</div>');
+      if (lost.length) {
+        row.insertAdjacentHTML('beforeend', '<div class="cp-transit cp-transit-lost" title="' + cbEsc(lost.join(', ')) + '">не доехало до Диска: ' + lost.length
+          + ' — загрузите ещё раз: ' + cbEsc(lost.slice(0, 4).join(', ')) + (lost.length > 4 ? '…' : '')
+          + ' <a href="#" data-cp-transit-clear="' + cbEsc((t.src || []).join('|')) + '">убрать отметку</a></div>');
+      }
     });
     if (!list || CP.stageFilter || !CP.shoots || document.getElementById('cpSrcDrop')) return r;
     list.insertAdjacentHTML('afterbegin', '<div class="cp-src-drop" id="cpSrcDrop"><b>Загрузить съёмку</b> — перетащите папку сюда или '
@@ -554,6 +567,21 @@ cpRenderShoots = (function (orig) {
     return r;
   };
 })(cpRenderShoots);
+
+(function () {
+  var st = document.createElement('style');
+  st.textContent = '.cp-transit-lost{color:#f2b8a0}.cp-transit-lost a{color:#a3a09a;margin-left:6px}';
+  document.head.appendChild(st);
+  /* «убрать отметку» у файлов, которые не доехали (их загрузили заново или решили не загружать) */
+  document.getElementById('cpShelfList').addEventListener('click', function (e) {
+    var a = e.target.closest('[data-cp-transit-clear]');
+    if (!a) return;
+    e.preventDefault(); e.stopPropagation();
+    if (!window.confirm('Убрать отметку «не доехало»?\nФайлы от этого на Диске не появятся — их нужно загрузить ещё раз.')) return;
+    var paths = (a.getAttribute('data-cp-transit-clear') || '').split('|').filter(Boolean);
+    Promise.all(paths.map(function (p) { return CPDisk.removeTemp(p).catch(function () { }); })).then(function () { CP.transit = {}; return cpTransitScan(); });
+  }, true);
+})();
 
 (function () {
   var list = document.getElementById('cpShelfList');

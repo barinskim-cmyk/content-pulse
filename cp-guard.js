@@ -459,6 +459,7 @@ function cpShowUpdate(ver) {
     el.addEventListener('click', function (e) {
       if (e.target.closest('[data-cp-upd="go"]')) {
         if (typeof App !== 'undefined' && App.dirty) { cbToast('Сохраняю правки на Диск — нажмите «Обновить» ещё раз через пару секунд'); return; }
+        if ((typeof cpqCount === 'function' && cpqCount()) || (typeof cpBusyNow === 'function' && cpBusyNow())) { cbToast('Идёт загрузка или перенос на Диске — обновите страницу, когда закончится'); return; }
         location.replace(location.pathname + '?v=' + encodeURIComponent(el.getAttribute('data-ver')) + location.hash);
       } else if (e.target.closest('[data-cp-upd="later"]')) el.remove();
     });

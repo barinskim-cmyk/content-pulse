@@ -1952,6 +1952,20 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     for (let i = 0; i < 30 && FILES.has(MAN); i++) await page.waitForTimeout(100);
     check('следующая сверка: доехало — «в пути» удалено, метки нет', !FILES.has(MAN) && String(FILES.get(LATE) || '') === 'L'.repeat(33) && !/едет на Диск/.test(await page.textContent('#cpShelfList')),
       JSON.stringify([FILES.has(MAN), await page.textContent('#cpShelfList')]));
+    /* разбор 10.11: файл, который Диск так и не забрал («не удалось»), не забывается */
+    {
+      const MAN2 = SD + '/_в_пути/lost.json', LOSTF = 'disk:/Архив/' + CS + '/1/lost.jpg';
+      FILES.set(MAN2, Buffer.from(JSON.stringify({ ts: '2026-11-09T10:00:00Z', items: [{ path: LOSTF, key: 'exports/in_test/9', size: 44, op: '', st: 'lost', tries: 3 }] })));
+      await page.evaluate(() => cpTransitScan());
+      await page.waitForFunction(() => /не доехало до Диска: 1/.test(document.getElementById('cpShelfList').textContent), null, { timeout: 5000 }).catch(() => {});
+      check('файл не доехал до Диска — запись «в пути» остаётся, у съёмки на витрине «не доехало: 1» с именем файла', FILES.has(MAN2) && /не доехало до Диска: 1.*lost\.jpg/.test(await page.textContent('#cpShelfList')),
+        JSON.stringify([FILES.has(MAN2), (await page.textContent('#cpShelfList')).slice(0, 300)]));
+      page.once('dialog', d => d.accept());
+      await page.evaluate(() => document.querySelector('[data-cp-transit-clear]').click());
+      for (let i = 0; i < 30 && FILES.has(MAN2); i++) await page.waitForTimeout(100);
+      await page.waitForTimeout(300);
+      check('«убрать отметку» — запись «в пути» удалена, метки на витрине нет', !FILES.has(MAN2) && !/не доехало/.test(await page.textContent('#cpShelfList')));
+    }
     /* Облако не взялось — сами грузим напрямую на Диск, без вопросов */
     CLOUD_START_FAIL = true;
     await page.evaluate(() => { CP.srcVia = ''; cpSrcOpen(null); cpSrcAdd([{ file: new File(['F'.repeat(40)], 'f.jpg'), rel: '2026-11-09_SV_ЗАПАС/f.jpg' }]); });
@@ -2196,6 +2210,19 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       });
       check('Cmd+Z в названии карточки — карточки не откатываются (отмену текста делает браузер)', hk.hasInput && hk.afterInput === hk.n0 + 1 && hk.p1 === false, JSON.stringify(hk));
       check('Cmd+Z в русской раскладке (Cmd+Я) отменяет правку карточек', hk.afterBody === hk.n0 && hk.p2 === true, JSON.stringify(hk));
+    }
+    /* идёт загрузка или сборка архива (окно прогресса) — страницу нельзя закрыть без вопроса */
+    {
+      const bu = await t.evaluate(() => {
+        const fire = () => { const e = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(e); return e.defaultPrevented; };
+        App.dirty = false;
+        const idle = fire();
+        cbBusyShow('Загружаю: файлов 1 из 10', 0.1);
+        const busy = fire();
+        cbBusyHide();
+        return { idle, busy, after: fire() };
+      });
+      check('пока идёт загрузка (окно прогресса) — закрыть страницу молча нельзя; закончилась — можно', bu.idle === false && bu.busy === true && bu.after === false, JSON.stringify(bu));
     }
     check('разбор 10.11: страница без ошибок', terr.length === 0, terr.join(' | '));
     await t.close();
