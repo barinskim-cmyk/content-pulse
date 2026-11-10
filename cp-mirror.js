@@ -152,7 +152,7 @@ function cpMirrorMatch(idx, raw, name, letters) {
       return cpRelDir(c) === dir || (card && card.cpArticleDir === dir);
     })[0];
   }
-  return { p: p || null, letter: letter };
+  return { p: p || null, letter: letter, rel: rel };
 }
 
 /** Кадры, чьи карточки сданы на сайт (и нет несданной карточки на ретуши / согласовании с ними). */
@@ -246,7 +246,8 @@ function cpMirrorApply(rs, letters, idx) {
         var mt = cpMirrorMatch(idx, segs, name, letters), p = mt.p, letter = mt.letter;
         if (!p) { unmatched.push({ stage: r.stage.label, path: file.path }); return; }
         var pr = pres[p.id] = pres[p.id] || {};
-        pr[r.stage.key] = { path: file.path, name: file.name, size: file.size, letter: letter, prio: f.prio };
+        pr[r.stage.key] = { path: file.path, name: file.name, size: file.size, letter: letter, prio: f.prio, key: mt.rel,
+          rid: typeof cpRidShort === 'function' ? cpRidShort(file) : '' };
       });
     });
   });
@@ -271,8 +272,15 @@ function cpMirrorApply(rs, letters, idx) {
     var anyR = pids.some(function (pid) { return pres[pid].retouch; }), anyA = pids.some(function (pid) { return pres[pid].approval; });
     var want = anyR ? 'retouch' : anyA ? 'approval' : '';
     if (want && !(cs && (cs.s === 'reshoot' || cpStatusRank(cs.s) >= cpStatusRank(want)))) { m.cardStatus[c.id] = { s: want, by: who, ts: now }; nStat++; }
-    var letter = '';
+    var letter = '', dlTs = '';
     pids.forEach(function (pid) { if (pres[pid].retouch && pres[pid].retouch.letter) letter = pres[pid].retouch.letter; });
+    /* из папки ретуши скачали программой (cp-review.js, запись rtdl) — буква по последней записи:
+       папку на Диске при этом не переименовывают, и буква из её имени вернула бы прежнего ретушёра */
+    pids.forEach(function (pid) {
+      var x = pres[pid].retouch, rec = x && m.rtdl ? m.rtdl[x.key] : null;
+      if (rec && rec.rid && x.rid && rec.rid !== x.rid) rec = null;   /* запись о прежней копии */
+      if (rec && rec.l && (rec.ts || '') >= dlTs) { dlTs = rec.ts || ''; letter = rec.l; }
+    });
     if (letter && (c.tags || []).indexOf(letter) === -1) { c.tags = cpTagsWith(c.tags, letter); nLetter++; }
     var rvFiles = pids.filter(function (pid) { return pres[pid].review; }).map(function (pid) { var x = pres[pid].review; return { path: x.path, name: x.name, size: x.size }; });
     if (rvFiles.length && !(cs && cs.s === 'reshoot') && rvFiles.some(function (f) { return !knownAny[f.path]; })) {

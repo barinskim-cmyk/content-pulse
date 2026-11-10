@@ -723,6 +723,46 @@ cpSelectShoot = (function (orig) {
    и буква ретушёра из имени папки («Y_74595_…»); ещё — кадр, карточка, брак. */
 var CP_NO_RT = '__без_ретушёра__';
 
+/* ---------- папка ретуши: кто скачал ----------
+   Маша, 10.11.2026: «из папки ретушь нельзя скачать, не поставив галку тега — иначе непонятно,
+   кто скачал, кто забрал и что вообще произошло»; «скачанное не показываем в том, что можно
+   забрать, — фильтр сверху «показать скачанное»: один ретушёр скачал, но заболел, не отдал —
+   чтобы другой мог скачать с переменой буквы; а когда ретушёр идёт за тем, что ещё не скачивали,
+   лишнего шума нет»; «галка внизу перед кнопкой «Скачать» — скачать уже скачанные: потерял
+   файлы — загрузил ещё раз, но чтобы случайно не взял то, что уже скачал, и не делал дважды».
+   В панели съёмки в фильтре папки ретуши:
+     - сверху «Кто скачивает» — буквы ретушёров из словаря; без буквы кнопка «Скачать» не
+       работает (букв в словаре нет — правило не действует, скачивается как раньше);
+     - скачали — каждому файлу в отборе съёмки пишется запись «скачано» (meta.cp.rtdl: буква,
+       кто, когда, какой архив, сколько раз), карточкам этих файлов ставится буква ретушёра,
+       в журнал — событие. Папки на Диске программа не переименовывает;
+     - скачанное и забранное (буква в имени папки — «Y_74595_…») в списке и в счётчиках не
+       показывается, пока не отмечено «показать скачанное»;
+     - даже показанное скачанное в архив не попадает, пока не отмечено «и уже скачанные»;
+       скачали с другой буквой — запись и буква карточки меняются на новую. */
+
+/** Ключ файла этапа: путь внутри папки съёмки на этапе без буквы ретушёра и «_доработка» в
+    именах папок, строчными. -> {key, letter, segs, name} */
+function cpStageKey(rel, letters) {
+  var segs = String(rel || '').split('/'), name = segs.pop(), letter = '';
+  segs = segs.map(function (sg) {
+    var mm = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(sg);
+    if (mm && letters.indexOf(mm[1]) !== -1) { letter = mm[1]; return mm[2]; }
+    return sg.replace(/_доработка$/i, '');
+  });
+  return { key: segs.concat([name]).join('/').toLowerCase(), letter: letter, segs: segs, name: name };
+}
+
+/* Запись «скачано» относится к тому файлу, который скачали: копию из папки ретуши могли убрать
+   (артикул сдан — в Корзину) и позже положить заново — это уже другой файл с тем же путём, и он
+   снова «не скачан». Различаем по номеру файла на Диске (resource_id; у копии он новый). */
+function cpRidShort(f) { var r = String((f && f.resource_id) || ''); return r ? r.slice(-16) : ''; }
+
+/** Файл папки ретуши уже скачан (запись в отборе) или забран (буква в имени папки). */
+function cpStageTaken(sel, f) { return sel.stage === 'retouch' && !!f.cpTook; }
+/** Виден в панели: скачанное из папки ретуши прячем, пока не отмечено «показать скачанное». */
+function cpStageShown(sel, f) { return !cpStageTaken(sel, f) || !!sel.showTaken; }
+
 function cpStageTagIndex(sel) {
   var data = sel.data || {}, photos = data.photos || [], cards = data.cards || [];
   var m = (data.meta && data.meta.cp) || {}, status = m.status || {}, cst = m.cardStatus || {};
@@ -743,18 +783,24 @@ function cpStageTagIndex(sel) {
       (cardOf[pid] = cardOf[pid] || []).push(c.id);   /* у артикула бывает две карточки */
     });
   });
-  var index = function (x) {
+  var rtdl = sel.stage === 'retouch' ? (m.rtdl || {}) : null;
+  var index = function (x, own) {
     x.files.forEach(function (f) {
       var rel = f.path.indexOf(x.root + '/') === 0 ? f.path.slice(x.root.length + 1) : f.name;
-      var segs = rel.split('/'), name = segs.pop(), tags = {};
-      segs = segs.map(function (sg) {
-        var mm = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(sg);
-        if (mm && letters.indexOf(mm[1]) !== -1) { tags[mm[1]] = true; return mm[2]; }
-        return sg.replace(/_доработка$/i, '');
-      });
-      var pid = byRel[segs.concat([name]).join('/').toLowerCase()];
+      var k = cpStageKey(rel, letters), name = k.name, tags = {};
+      if (k.letter) tags[k.letter] = true;
+      var pid = byRel[k.key];
       if (!pid) { var c = byStem[cpStem(name)] || []; if (c.length === 1) pid = c[0]; }
       if (pid && tagsOf[pid]) Object.keys(tagsOf[pid]).forEach(function (t) { tags[t] = true; });
+      /* папка ретуши: запись «скачано» из отбора; буква в имени папки — забрали руками на Диске */
+      f.cpKey = k.key;
+      f.cpTook = null;
+      if (rtdl && own) {
+        var rec = rtdl[k.key], rid = cpRidShort(f);
+        if (rec && rec.rid && rid && rec.rid !== rid) rec = null;   /* на этом месте лежит уже другая копия */
+        f.cpTook = rec || (k.letter ? { l: k.letter, folder: true } : null);
+        if (rec && rec.l) tags[rec.l] = true;
+      }
       if (letters.length && !Object.keys(tags).some(function (t) { return letters.indexOf(t) !== -1; })) tags[CP_NO_RT] = true;
       f.cpTags = Object.keys(tags);
       f.cpPid = pid || '';
@@ -762,9 +808,9 @@ function cpStageTagIndex(sel) {
       f.cpBrak = !!(pid && ((status[pid] && status[pid].s === 'reshoot') || f.cpCards.some(function (c) { return cst[c] && cst[c].s === 'reshoot'; })));
     });
   };
-  (sel.stageFiles || []).forEach(index);
-  (sel.rtFiles || []).forEach(index);
-  (sel.srcFiles || []).forEach(index);
+  (sel.stageFiles || []).forEach(function (x) { index(x, true); });
+  (sel.rtFiles || []).forEach(function (x) { index(x, false); });
+  (sel.srcFiles || []).forEach(function (x) { index(x, false); });
 }
 
 /** Файл этапа проходит отмеченные теги (отмечено несколько — подходит любой). */
@@ -773,8 +819,9 @@ function cpStageTagOk(sel, f) {
   return !on.length || (f.cpTags || []).some(function (t) { return on.indexOf(t) !== -1; });
 }
 
-/** Все фильтры панели этапа: теги, видео, брак. */
+/** Все фильтры панели этапа: теги, видео, брак; в папке ретуши — без уже скачанного, пока не попросили. */
 function cpStageOk(sel, f) {
+  if (cpStageTaken(sel, f) && !sel.againTaken) return false;
   if (!cpStageTagOk(sel, f)) return false;
   var v = typeof cpIsVideo === 'function' && cpIsVideo(f.name);
   if (sel.media === 'video' && !v) return false;
@@ -805,7 +852,7 @@ function cpStagePool(sel, scope) {
     (groups || []).forEach(function (x) {
       var pre = cpStagePre(sel, groups, x);
       x.files.forEach(function (f) {
-        if (f.name === CPDisk.STATE_FILE || (keep && !keep(f))) return;
+        if (f.name === CPDisk.STATE_FILE || (keep && !keep(f)) || !cpStageShown(sel, f)) return;
         out.push({ f: f, name: prefix + pre + (f.path.indexOf(x.root + '/') === 0 ? f.path.slice(x.root.length + 1) : f.name) });
       });
     });
@@ -837,6 +884,26 @@ function cpStageChips(sel) {
     + keys.map(function (t) {
       return '<button class="cp-fchip' + (sel.stageTags[t] ? ' cp-on' : '') + '" data-cp-stag="' + cbEsc(t) + '">' + cbEsc(t === CP_NO_RT ? 'без ретушёра' : t) + ' <small>' + n[t] + '</small></button>';
     }).join('') + (any ? '<a href="#" data-cp-stag-reset="1">сбросить</a>' : '') + '</div>';
+}
+
+/** Папка ретуши: «Кто скачивает» (буква обязательна) и «показать скачанное». */
+function cpStageWhoChips(sel, taken) {
+  if (sel.stage !== 'retouch') return '';
+  var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  var h = '';
+  if (letters.length) {
+    h += '<div class="cp-fchips cp-stg-who"><span class="cp-fchips-l">Кто скачивает — отметьте свою букву' + (sel.who ? ':' : ' (без неё скачать нельзя):') + '</span>'
+      + letters.map(function (t) {
+        return '<button class="cp-fchip' + (sel.who === t ? ' cp-on' : '') + '" data-cp-swho="' + cbEsc(t) + '">' + cbEsc(t) + '</button>';
+      }).join('') + '</div>';
+  } else {
+    h += '<div class="cp-note cp-warn">Букв ретушёров нет в словаре тегов (группа «[Ретушёры: один]») — скачивание не подписывается буквой.</div>';
+  }
+  if (taken) {
+    h += '<div class="cp-fchips"><label class="cp-stg-ck" title="Что уже скачали или забрали (буква в имени папки). По умолчанию скрыто, чтобы было видно только то, что ещё можно забрать">'
+      + '<input type="checkbox" data-cp-staken="1"' + (sel.showTaken ? ' checked' : '') + '> показать скачанное <small>' + taken + '</small></label></div>';
+  }
+  return h;
 }
 
 /** Охват, видео, брак — над тегами. */
@@ -876,9 +943,11 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
   if (!sel || !sel.stage) return;
   var b = e.target.closest('[data-cp-stag]'), r = e.target.closest('[data-cp-stag-reset]');
   var sc = e.target.closest('[data-cp-scope]'), md = e.target.closest('[data-cp-smedia]'), bk = e.target.closest('[data-cp-sbrak]');
-  if (!b && !r && !sc && !md && !bk) return;
+  var wh = e.target.closest('[data-cp-swho]');
+  if (!b && !r && !sc && !md && !bk && !wh) return;
   e.preventDefault();
-  if (r) sel.stageTags = {};
+  if (wh) { var w = wh.getAttribute('data-cp-swho'); sel.who = sel.who === w ? '' : w; }
+  else if (r) sel.stageTags = {};
   else if (b) { var t = b.getAttribute('data-cp-stag'); sel.stageTags[t] = !sel.stageTags[t]; }
   else if (md) { var k = md.getAttribute('data-cp-smedia'); sel.media = sel.media === k ? '' : k; }
   else if (bk) { var k2 = bk.getAttribute('data-cp-sbrak'); sel.brak = sel.brak === k2 ? '' : k2; }
@@ -898,6 +967,26 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
   cpRenderPanel();
 });
 
+/* галки «показать скачанное» (сверху) и «и уже скачанные» (перед кнопкой «Скачать») */
+document.getElementById('cpPanel').addEventListener('change', function (e) {
+  var sel = CP.sel;
+  if (!sel || sel.stage !== 'retouch') return;
+  var tk = e.target.closest('[data-cp-staken]'), ag = e.target.closest('[data-cp-sagain]');
+  if (!tk && !ag) return;
+  if (tk) { sel.showTaken = tk.checked; if (!tk.checked) sel.againTaken = false; }
+  else { sel.againTaken = ag.checked; if (ag.checked) sel.showTaken = true; }   /* что скачается повторно — должно быть видно */
+  cpRenderPanel();
+});
+
+(function cpStageRtCss() {
+  var st = document.createElement('style');
+  st.textContent = '.cp-stg-ck{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#cfcac2;cursor:pointer}'
+    + '.cp-stg-ck small{color:#8a877f}.cp-stg-ck input{accent-color:#C9956B}'
+    + '.cp-panel-actions .cp-stg-again{order:5;margin-left:auto}.cp-panel-actions .cp-stg-again + .cb-primary{margin-left:0}'
+    + '.cp-stg-who .cp-fchip{min-width:34px;font-weight:600}';
+  document.head.appendChild(st);
+})();
+
 (function cpStageChipCss() {
   if (document.getElementById('cpStageChipCss') || document.getElementById('cpMediaChipCss')) return;
   var st = document.createElement('style');
@@ -915,8 +1004,19 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
 function cpStageTree(sel) {
   var stageRoot = String((CP.settings || {})[CP_STAGE_SETTING[sel.stage]] || '').replace(/\/+$/, '');
   var all = {}, agg = {}, nFiles = 0, bytes = 0;
+  var rt = sel.stage === 'retouch', taken = 0;
   var many = sel.stageFiles.length > 1;
   sel.stageFiles.forEach(function (x) {
+    /* папка ретуши: папку, где всё уже скачано, не показываем вместе с её файлами */
+    var has = {}, vis = {};
+    if (rt) {
+      x.files.forEach(function (f) {
+        if (f.name === CPDisk.STATE_FILE) return;
+        var rel0 = f.path.indexOf(x.root + '/') === 0 ? f.path.slice(x.root.length + 1) : f.name;
+        var ps = cpParentDir(rel0) ? cpParentDir(rel0).split('/') : [], shown = cpStageShown(sel, f);
+        for (var i = 1; i <= ps.length; i++) { var d = ps.slice(0, i).join('/'); has[d] = true; if (shown) vis[d] = true; }
+      });
+    }
     /* в «Сайте» съёмка лежит в нескольких датах — дата и есть верхний уровень */
     var pre = '';
     if (many) {
@@ -931,18 +1031,32 @@ function cpStageTree(sel) {
       return full;
     };
     if (pre) add('');
-    x.dirs.forEach(function (d) { if (d.indexOf(x.root + '/') === 0) add(d.slice(x.root.length + 1)); });
+    x.dirs.forEach(function (d) {
+      if (d.indexOf(x.root + '/') !== 0) return;
+      var r = d.slice(x.root.length + 1);
+      if (rt && has[r] && !vis[r]) return;
+      add(r);
+    });
     x.files.forEach(function (f) {
       if (f.name === CPDisk.STATE_FILE) return;
       var rel = f.path.indexOf(x.root + '/') === 0 ? f.path.slice(x.root.length + 1) : f.name;
-      var dir = add(cpParentDir(rel)) || '';
-      nFiles++;
-      bytes += f.size || 0;
+      var tk = rt ? f.cpTook : null, hide = !!tk && !sel.showTaken;
+      if (tk) taken++;
+      var dir = hide ? (pre ? pre + (cpParentDir(rel) ? '/' + cpParentDir(rel) : '') : cpParentDir(rel)) : (add(cpParentDir(rel)) || '');
+      if (!hide) { nFiles++; bytes += f.size || 0; }
       var parts = dir ? dir.split('/') : [];
       for (var i = 0; i <= parts.length; i++) {
         var k = parts.slice(0, i).join('/');
         var a = agg[k] || (agg[k] = { n: 0, bytes: 0 });
+        if (hide) { a.hid = (a.hid || 0) + 1; continue; }
         a.n++; a.bytes += f.size || 0;
+        /* запись «скачано» из отбора: кто (буква) и когда — в отметку у папки */
+        if (tk && !tk.folder) {
+          a.dl = (a.dl || 0) + 1;
+          a.dlBy = a.dlBy || {};
+          a.dlBy[tk.l || tk.by || '?'] = true;
+          if (!a.dlTs || (tk.ts || '') > a.dlTs) a.dlTs = tk.ts || '';
+        }
       }
     });
   });
@@ -952,7 +1066,7 @@ function cpStageTree(sel) {
     (kids[par] = kids[par] || []).push(r);
   });
   Object.keys(kids).forEach(function (k) { kids[k].sort(function (a, b) { return a.split('/').pop().localeCompare(b.split('/').pop(), undefined, { numeric: true }); }); });
-  return { kids: kids, agg: agg, files: nFiles, bytes: bytes };
+  return { kids: kids, agg: agg, files: nFiles, bytes: bytes, taken: taken };
 }
 
 cpRenderPanel = (function (orig) {
@@ -973,9 +1087,13 @@ cpRenderPanel = (function (orig) {
     var picked = 0, pickedBytes = 0, anyTag = Object.keys(sel.stageTags || {}).some(function (k) { return sel.stageTags[k]; });
     var narrowed = anyTag || sel.media || sel.brak || (sel.scope && sel.scope !== 'stage' && sel.scope !== 'done');
     cpStagePool(sel).forEach(function (x) { if (cpStageOk(sel, x.f)) { picked++; pickedBytes += x.f.size || 0; } });
-    var body = cpStageScopeChips(sel) + cpStageChips(sel) + '<div class="cp-fold cp-fold-all"><span class="cp-fold-name">' + cbEsc(label) + ' <small>· файлов ' + t.files + ' · ' + cpMb(t.bytes) + '</small></span></div>';
+    var rt = sel.stage === 'retouch', rtLetters = rt && typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+    if (rt && sel.who && rtLetters.indexOf(sel.who) === -1) sel.who = '';
+    var needWho = rt && rtLetters.length > 0 && !sel.who;
+    var body = cpStageWhoChips(sel, t.taken) + cpStageScopeChips(sel) + cpStageChips(sel) + '<div class="cp-fold cp-fold-all"><span class="cp-fold-name">' + cbEsc(label) + ' <small>· файлов ' + t.files + ' · ' + cpMb(t.bytes) + '</small></span></div>';
     var top = t.kids[''] || [];
-    if (!top.length) body += '<div class="cp-note">' + (t.files ? 'Вложенных папок нет — файлы лежат прямо в папке съёмки.' : 'Папка пустая.') + '</div>';
+    if (!top.length) body += '<div class="cp-note">' + (t.files ? 'Вложенных папок нет — файлы лежат прямо в папке съёмки.'
+      : rt && t.taken ? 'Забирать нечего: всё, что здесь лежит, уже скачано. Посмотреть — «показать скачанное» вверху.' : 'Папка пустая.') + '</div>';
     var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
     if (top.length === 1 && sel.open[top[0]] === undefined) sel.open[top[0]] = true;   /* одна папка — сразу раскрыта */
     var row = function (fp, depth) {
@@ -985,6 +1103,12 @@ cpRenderPanel = (function (orig) {
       var lm = /^([A-Za-zА-Яа-яЁё]{1,3})_/.exec(nm);
       if (lm && letters.indexOf(lm[1]) !== -1) marks += '<span class="cp-state cp-state-retouch">забрал ' + cbEsc(lm[1]) + '</span>';
       if (/_доработка$/i.test(nm)) marks += '<span class="cp-state cp-state-reshoot">на доработке</span>';
+      if (rt && a.dl) {
+        marks += '<span class="cp-state cp-state-dl" title="Скачано из папки ретуши' + (a.dlTs ? ': ' + cbEsc(cpFmtDate(a.dlTs)) : '') + '">'
+          + (a.dl >= a.n ? 'скачано' : 'скачано ' + a.dl + ' из ' + a.n) + ': ' + cbEsc(Object.keys(a.dlBy || {}).join(', '))
+          + (a.dlTs ? ' · ' + cbEsc(cpFmtDate(a.dlTs).slice(0, 5)) : '') + '</span>';
+      }
+      if (rt && a.hid) marks += '<span class="cp-state" title="В этой папке есть файлы, которые уже скачали, — они скрыты">уже скачано: ' + a.hid + '</span>';
       body += '<div class="cp-fold' + (depth ? ' cp-fold-sub' : '') + '" style="padding-left:' + (depth * 18) + 'px"><span>' + cbEsc(nm)
         + ' <small>· ' + a.n + (a.bytes ? ' · ' + cpMb(a.bytes) : '') + '</small></span>'
         + (ch.length ? '<button class="cp-fold-exp" data-cp-exp="' + cbEsc(fp) + '">' + (open ? 'свернуть' : 'папок: ' + ch.length) + '</button>' : '')
@@ -996,10 +1120,20 @@ cpRenderPanel = (function (orig) {
     if (errs.length) body += '<div class="cp-note cp-warn">Не прочиталось: ' + errs.map(function (x) { return cbEsc(CPDisk.showPath(x.root)); }).join(', ') + '</div>';
     body += '<div class="cp-note">' + sel.stagePaths.map(function (p) { return cbEsc(CPDisk.showPath(p)); }).join('<br>') + '</div>';
     panel.setAttribute('data-path', sel.path);
-    panel.innerHTML = head + '<div class="cp-panel-body">' + body + '</div><div class="cp-panel-actions"><div class="cp-sum">Здесь файлов: <b>' + t.files + '</b> · ' + cpMb(t.bytes)
-      + (narrowed ? ' · к скачиванию: <b>' + picked + '</b> · ' + cpMb(pickedBytes) : '') + '</div>'
-      + acts + '<button class="cb-primary" data-cp-stdl="1"' + (picked ? '' : ' disabled') + '>' + (sel.scope === 'all' ? 'Скачать файлы съёмки'
-        : sel.scope === 'todo' ? 'Скачать без ретуши' : sel.scope === 'both' ? 'Скачать всё: с ретушью и без' : anyTag ? 'Скачать по тегам' : 'Скачать всё из ' + cbEsc(label)) + ' · ' + picked + '</button></div>';
+    var hidden = rt && !sel.showTaken ? t.taken : 0;
+    var sum = (rt ? (sel.showTaken ? 'Здесь файлов' : 'Можно забрать') : 'Здесь файлов') + ': <b>' + t.files + '</b> · ' + cpMb(t.bytes)
+      + (hidden ? ' · уже скачано (скрыто): ' + hidden : '')
+      + (narrowed || (rt && sel.showTaken && t.taken) ? ' · к скачиванию: <b>' + picked + '</b> · ' + cpMb(pickedBytes) : '');
+    /* перед кнопкой «Скачать»: взять и то, что уже скачивали (потерял файлы, забирает другой ретушёр) */
+    var again = rt && t.taken ? '<label class="cp-stg-ck cp-stg-again" title="Без галки уже скачанное в архив не попадёт — чтобы не взять в работу второй раз. '
+      + 'С галкой — попадёт; скачали с другой буквой — артикул переходит к ней"><input type="checkbox" data-cp-sagain="1"' + (sel.againTaken ? ' checked' : '') + '> и уже скачанные <small>' + t.taken + '</small></label>' : '';
+    var btn = needWho ? 'Отметьте свою букву — без неё не скачать'
+      : (sel.scope === 'all' ? 'Скачать файлы съёмки'
+        : sel.scope === 'todo' ? 'Скачать без ретуши' : sel.scope === 'both' ? 'Скачать всё: с ретушью и без'
+        : rt && sel.who ? (anyTag ? 'Скачать по тегам как ' : 'Скачать как ') + cbEsc(sel.who)
+        : anyTag ? 'Скачать по тегам' : 'Скачать всё из ' + cbEsc(label)) + ' · ' + picked;
+    panel.innerHTML = head + '<div class="cp-panel-body">' + body + '</div><div class="cp-panel-actions"><div class="cp-sum">' + sum + '</div>'
+      + acts + again + '<button class="cb-primary" data-cp-stdl="1"' + (picked && !needWho ? '' : ' disabled') + '>' + btn + '</button></div>';
   };
 })(cpRenderPanel);
 
@@ -1007,16 +1141,72 @@ cpRenderPanel = (function (orig) {
 document.getElementById('cpPanel').addEventListener('click', function (e) {
   if (!e.target.closest('[data-cp-stdl]') || !CP.sel || !CP.sel.stage || !CP.sel.stageFiles) return;
   e.preventDefault();
-  var sel = CP.sel, entries = [];
-  cpStagePool(sel).forEach(function (x) { if (cpStageOk(sel, x.f)) entries.push({ from: x.f.path, size: x.f.size, name: x.name }); });
-  var on = Object.keys(sel.stageTags || {}).filter(function (k) { return sel.stageTags[k]; }).map(function (t) { return t === CP_NO_RT ? 'без ретушёра' : t; });
+  var sel = CP.sel, entries = [], got = [];
+  var rt = sel.stage === 'retouch', who = rt ? (sel.who || '') : '';
+  if (rt && !who && typeof cpRetoucherTags === 'function' && cpRetoucherTags().length) { cbToast('Отметьте вверху свою букву — без неё из папки ретуши не скачать'); return; }
+  cpStagePool(sel).forEach(function (x) { if (cpStageOk(sel, x.f)) { entries.push({ from: x.f.path, size: x.f.size, name: x.name }); got.push(x.f); } });
+  if (!entries.length) { cbToast('Нечего скачивать'); return; }
+  var on = Object.keys(sel.stageTags || {}).filter(function (k) { return sel.stageTags[k] && k !== who; }).map(function (t) { return t === CP_NO_RT ? 'без ретушёра' : t; });
+  if (who) on.unshift(who);
   var extra = { all: 'все файлы', todo: 'без ретуши', both: 'с ретушью и без' }[sel.scope] || '';
   if (sel.media) extra += (extra ? '+' : '') + (sel.media === 'video' ? 'видео' : 'без видео');
   if (sel.brak) extra += (extra ? '+' : '') + (sel.brak === 'only' ? 'брак' : 'без брака');
   var name = CPDisk.safeName(sel.name) + '_' + CPDisk.safeName(cpStageLabel(sel.stage)) + (extra ? '_' + CPDisk.safeName(extra) : '')
     + (on.length ? '_' + CPDisk.safeName(on.join('+')) : '') + '_' + cpToday();
-  cpExportBundle(name, entries, cpStageLabel(sel.stage) + ': файлов ' + entries.length + '.').catch(function (err) { cpHandleError(err, 'Скачивание'); });
+  cpExportBundle(name, entries, cpStageLabel(sel.stage) + ': файлов ' + entries.length + '.' + (rt ? ' После скачивания файлы отмечаются как скачанные' + (who ? ' (' + who + ')' : '') + '.' : ''))
+    .then(function (r) { return rt ? cpStageMarkTaken(sel, got, who, name, r) : null; })
+    .catch(function (err) { cpHandleError(err, 'Скачивание'); });
 });
+
+/** Скачали из папки ретуши: запись у каждого файла, буква — карточкам, событие в журнал. */
+function cpStageMarkTaken(sel, files, who, name, r) {
+  var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  var actor = cpActor(), now = new Date().toISOString();
+  var again = files.filter(function (f) { return f.cpTook; }).length;
+  /* записи о файлах, которых в папке ретуши давно нет (старше 30 дней), убираем — чтобы отбор не рос */
+  var live = {}, whole = !(sel.stageFiles || []).some(function (x) { return x.error; });
+  (sel.stageFiles || []).forEach(function (x) { x.files.forEach(function (f) { if (f.cpKey) live[f.cpKey] = true; }); });
+  var old = new Date(Date.now() - 30 * 86400000).toISOString();
+  return cpMutateState(sel, function (d) {
+    var m = d.meta.cp, map = m.rtdl = m.rtdl || {};
+    if (whole) Object.keys(map).forEach(function (k) { if (!live[k] && (map[k].ts || '') < old) delete map[k]; });
+    var cardIds = {};
+    files.forEach(function (f) {
+      var cur = map[f.cpKey], rid = cpRidShort(f);
+      if (cur && cur.rid && rid && cur.rid !== rid) cur = null;   /* прежняя запись — о другой копии */
+      var rec = { l: who, by: actor, ts: now, export: name, n: (cur && cur.n ? cur.n : 0) + 1 };
+      if (rid) rec.rid = rid;
+      map[f.cpKey] = rec;
+      (f.cpCards || []).forEach(function (id) { cardIds[id] = true; });
+    });
+    /* «забрал»: буква ретушёра у карточки; другая буква (забирает второй ретушёр) заменяется */
+    var titles = [], moved = [];
+    (d.cards || []).forEach(function (c) {
+      if (!cardIds[c.id]) return;
+      titles.push(c.title || 'карточка');
+      if (!who) return;
+      var was = (c.tags || []).filter(function (t) { return letters.indexOf(t) !== -1 && t !== who; });
+      if (was.length) moved.push((c.title || 'карточка') + ' (' + was.join(', ') + ' → ' + who + ')');
+      c.tags = (c.tags || []).filter(function (t) { return letters.indexOf(t) === -1 && t !== who; });
+      c.tags.push(who);
+    });
+    var note = [];
+    if (who) note.push('буква ' + who);
+    if (again) note.push('повторно: ' + again);
+    if (moved.length) note.push('сменили ретушёра: ' + moved.join(', '));
+    cpShelfEvent(d, 'download_retouch', { export: name, count: (r && r.files) || files.length, parts: r && r.parts ? r.parts.length : undefined,
+      card: titles.length ? titles.join(', ') : undefined, letter: who || undefined, note: note.join(' · ') || undefined });
+  }).then(function () {
+    if (CP.sel !== sel) return;
+    sel.againTaken = false;
+    cpStageTagIndex(sel);
+    cpRenderPanel();
+    cbToast('Скачано из папки ретуши: файлов ' + files.length + (who ? ' — отмечено за ' + who : '') + '. В списке осталось то, что ещё не забрали.');
+  }, function (e) {
+    if (window.console) console.error('[CP] отметка «скачано» не записалась', e && (e.body || e.message || e));
+    cbToast('Архив собран, но отметка «скачано' + (who ? ' (' + who + ')' : '') + '» не записалась в отбор съёмки — другим эти файлы всё ещё видны как не забранные.');
+  });
+}
 
 /* ---------- витрина, фильтр «отретушировано»: перетащить папку как на Диск ---------- */
 

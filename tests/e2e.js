@@ -69,11 +69,13 @@ const TRASHED = [], MOVED = [], ZIPPART_CALLS = [];
 const CRC_CALLS = [], ZIP_SLICES = [];
 let ZIPPART_FAIL_ONCE = null, ZIPPART_BAD = null;   /* ZIPPART_BAD — файл, который Яндекс не отдаёт (HTTP 500) */   /* оборвать один кусок архива — страница должна повторить */   /* что ушло в Корзину Диска / перенесено между этапами */
 const PROPS = new Map();   /* custom_properties папок (сводка съёмки) */
+const RID_GEN = new Map();   /* путь -> поколение: файл убрали и положили заново — у новой копии другой resource_id */
 const meta = (p) => {
   const name = p.split('/').pop();
   if (DIRS.has(p)) return { path: p, name, type: 'dir', modified: '2026-11-0' + (p.length % 9) + 'T10:00:00+00:00', ...(PROPS.has(p) ? { custom_properties: PROPS.get(p) } : {}) };
   const b = FILES.get(p);
   return { path: p, name, type: 'file', size: b.length, md5: md5(b), modified: '2026-11-04T10:00:00+00:00',
+    resource_id: '1130000000000001:' + md5(Buffer.from(p + '|' + (RID_GEN.get(p) || 0))),
     preview: 'https://downloader.disk.yandex.ru/preview/x?p=' + encodeURIComponent(p) };
 };
 const API = 'https://cloud-api.yandex.net/v1/disk';
@@ -1638,22 +1640,76 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     check('под съёмкой — где сейчас её артикулы, по папкам: 02_ОТБОР есть, 03_РЕТУШЬ 2 (забрали 1)', /02_ОТБОР есть/.test(katCard) && /03_РЕТУШЬ 2 \(забрали 1\)/.test(katCard) && !/ждут ретушёра/.test(katCard), katCard);
     /* в фильтре этапа панель съёмки показывает, что лежит в папке этапа сейчас */
     await page.keyboard.press('Escape');
+    /* папка ретуши (2.0.95): без буквы не скачать, скачанное и забранное скрыто, «и уже скачанные» — отдельной галкой */
+    const KSTATE = K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ/_contentpulse.json', KRT = K + '/03_РЕТУШЬ/2026-11-06_SV_КАТ';
+    FILES.set(KSTATE, Buffer.from(JSON.stringify({ app: 'cardboard', version: 3, name: '2026-11-06_SV_КАТ', nextId: 10,
+      photos: [{ id: 'p1', name: 'k1.jpg', disk: K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ/k1.jpg', kind: 'photo', w: 0, h: 0 }],
+      cards: [{ id: 'c1', title: '74001', mode: 'auto', pids: ['p1'], slots: [], tags: ['Y'] }], containers: [], templates: [],
+      meta: { cp: { status: {}, cardStatus: {}, events: [] } } })));
+    const kState = () => JSON.parse(FILES.get(KSTATE).toString());
+    const stBtn = () => page.evaluate(() => { const b = document.querySelector('[data-cp-stdl]'); return [b.textContent, b.disabled]; });
     await page.click('[data-cp-stage="retouch"]');
     await page.click('#cpShelfList .cp-shoot[data-name="2026-11-06_SV_КАТ"]');
-    await page.waitForFunction(() => /файлов 2/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
-    const pan = await page.textContent('#cpPanel');
-    check('панель в фильтре 03_РЕТУШЬ: структура папки этапа — Y_74001_модель (забрал Y), 74002_модель, файлов 2; не исходники', /в папке 03_РЕТУШЬ/.test(pan)
-      && /Y_74001_модель/.test(pan) && /забрал Y/.test(pan) && /74002_модель/.test(pan) && /Здесь файлов: 2/.test(pan) && !/k1\.jpg · 1/.test(pan) && /Скачать всё из 03_РЕТУШЬ · 2/.test(pan), pan.slice(0, 400));
-    /* теги сверху: буква ретушёра из имени папки и «без ретушёра»; отметил тег — скачивается только он */
+    await page.waitForFunction(() => /Можно забрать: 1/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
+    let pan = await page.textContent('#cpPanel');
+    check('панель в фильтре 03_РЕТУШЬ: только то, что ещё можно забрать (74002_модель); забранное Y_74001_модель скрыто; не исходники', /в папке 03_РЕТУШЬ/.test(pan)
+      && !/Y_74001_модель/.test(pan) && /74002_модель/.test(pan) && /Можно забрать: 1/.test(pan) && /уже скачано \(скрыто\): 1/.test(pan) && !/k1\.jpg · 1/.test(pan), pan.slice(0, 500));
+    check('из папки ретуши не скачать без буквы ретушёра: кнопка выключена, сверху «Кто скачивает» — буквы из словаря', await page.evaluate(() => {
+      const b = document.querySelector('[data-cp-stdl]');
+      return b.disabled && /Отметьте свою букву/.test(b.textContent) && [...document.querySelectorAll('#cpPanel [data-cp-swho]')].map(x => x.textContent).join() === 'Y,U'; }), JSON.stringify(await stBtn()));
+    await page.check('#cpPanel [data-cp-staken]');
+    pan = await page.textContent('#cpPanel');
+    check('галка «показать скачанное» сверху — видно и забранное: Y_74001_модель (забрал Y), файлов 2', /Y_74001_модель/.test(pan) && /забрал Y/.test(pan) && /Здесь файлов: 2/.test(pan), pan.slice(0, 500));
+    /* теги сверху: буква ретушёра из имени папки и «без ретушёра» */
     check('панель этапа: сверху теги — Y 1, «без ретушёра» 1', await page.evaluate(() => {
       const t = [...document.querySelectorAll('#cpPanel [data-cp-stag]')].map(b => b.textContent.trim());
       return t.includes('Y 1') && t.includes('без ретушёра 1'); }), await page.evaluate(() => [...document.querySelectorAll('#cpPanel [data-cp-stag]')].map(b => b.textContent.trim()).join(' | ')));
+    await page.click('#cpPanel [data-cp-swho="U"]');
+    let sb = await stBtn();
+    check('отметила свою букву U — «Скачать как U · 1»: показанное скачанное в архив само не идёт', /Скачать как U · 1/.test(sb[0]) && !sb[1], JSON.stringify(sb));
     await page.click('#cpPanel [data-cp-stag="Y"]');
-    check('отметила тег Y — кнопка «Скачать по тегам · 1»', /Скачать по тегам · 1/.test(await page.textContent('[data-cp-stdl]')), await page.textContent('[data-cp-stdl]'));
+    sb = await stBtn();
+    check('тег Y — это уже забранное: без галки «и уже скачанные» скачивать нечего', /Скачать по тегам как U · 0/.test(sb[0]) && sb[1], JSON.stringify(sb));
+    await page.check('#cpPanel [data-cp-sagain]');
+    sb = await stBtn();
+    check('галка «и уже скачанные» перед кнопкой — «Скачать по тегам как U · 1»', /Скачать по тегам как U · 1/.test(sb[0]) && !sb[1], JSON.stringify(sb));
     await page.click('[data-cp-stdl]');
     await page.waitForFunction(() => /Архив готов/.test((document.getElementById('cpDlCard') || {}).textContent || ''), null, { timeout: 10000 }).catch(() => {});
-    const zY = [...ZIPS.entries()].filter(([k]) => /2026-11-06_SV_КАТ_03_РЕТУШЬ_Y_/.test(k)).flatMap(([, v]) => v);
-    check('скачалось только с тегом Y — папка Y_74001_модель, без 74002', zY.length === 1 && /Y_74001_модель\/k1\.jpg$/.test(zY[0]), JSON.stringify([...ZIPS.keys()].slice(-2)) + ' ' + zY.join(' | '));
+    for (let i = 0; i < 60 && !(kState().meta.cp.rtdl || {})['74001_модель/k1.jpg']; i++) await page.waitForTimeout(100);
+    const zY = [...ZIPS.entries()].filter(([k]) => /2026-11-06_SV_КАТ_03_РЕТУШЬ_U\+Y_/.test(k)).flatMap(([, v]) => v);
+    check('скачалось только с тегом Y — папка Y_74001_модель, без 74002; в имени архива — буква того, кто скачал', zY.length === 1 && /Y_74001_модель\/k1\.jpg$/.test(zY[0]), JSON.stringify([...ZIPS.keys()].slice(-2)) + ' ' + zY.join(' | '));
+    let ks = kState(), rec = (ks.meta.cp.rtdl || {})['74001_модель/k1.jpg'] || {};
+    const evDl = (ks.meta.cp.events || []).filter(e => e.action === 'download_retouch').pop() || {};
+    check('скачали — в отборе съёмки запись: кто (буква U), когда, какой архив; в журнале — событие', rec.l === 'U' && rec.n === 1 && !!rec.ts && /03_РЕТУШЬ_U\+Y_/.test(rec.export || '') && !!rec.rid
+      && evDl.letter === 'U' && evDl.count === 1 && /74001/.test(evDl.card || ''), JSON.stringify([rec, evDl]));
+    check('забрал другой ретушёр — буква карточки сменилась: была Y, стала U (в журнале — «сменили ретушёра»)', JSON.stringify(ks.cards[0].tags) === '["U"]' && /сменили ретушёра: 74001 \(Y → U\)/.test(evDl.note || ''), JSON.stringify([ks.cards[0].tags, evDl.note]));
+    await page.waitForFunction(() => /скачано: U/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => {});
+    pan = await page.textContent('#cpPanel');
+    sb = await stBtn();
+    check('после скачивания у папки — «скачано: U», галка «и уже скачанные» снята сама', /скачано: U/.test(pan) && await page.evaluate(() => !document.querySelector('#cpPanel [data-cp-sagain]').checked) && sb[1], pan.slice(0, 600));
+    /* обычный путь: ничего не отмечая, кроме буквы, — только то, что ещё не забрали */
+    await page.click('#cpPanel [data-cp-stag-reset]');
+    await page.uncheck('#cpPanel [data-cp-staken]');
+    sb = await stBtn();
+    check('сняла «показать скачанное» — снова только незабранное: «Скачать как U · 1»', /Скачать как U · 1/.test(sb[0]) && !sb[1] && !/Y_74001_модель/.test(await page.textContent('#cpPanel')), JSON.stringify(sb));
+    const zb2 = new Set(ZIPS.keys());
+    await page.click('[data-cp-stdl]');
+    for (let i = 0; i < 80 && !(kState().meta.cp.rtdl || {})['74002_модель/k2.jpg']; i++) await page.waitForTimeout(100);
+    await page.waitForFunction(() => /Забирать нечего/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => {});
+    const z2 = [...ZIPS.entries()].filter(([k]) => !zb2.has(k)).flatMap(([, v]) => v);
+    pan = await page.textContent('#cpPanel');
+    check('скачала как U остальное — в архиве только 74002_модель/k2.jpg; в списке пусто: «Забирать нечего», скрыто 2', z2.length === 1 && /74002_модель\/k2\.jpg$/.test(z2[0])
+      && /Забирать нечего/.test(pan) && /Можно забрать: 0/.test(pan) && /уже скачано \(скрыто\): 2/.test(pan) && (await stBtn())[1], JSON.stringify(z2) + ' ' + pan.slice(0, 400));
+    /* копию убрали из папки ретуши и положили заново (тот же путь, другой файл) — она снова не скачана */
+    RID_GEN.set(KRT + '/74002_модель/k2.jpg', 1);
+    await page.click('[data-cp-p="close"]');
+    await page.click('#cpShelfList .cp-shoot[data-name="2026-11-06_SV_КАТ"]');
+    await page.waitForFunction(() => /Можно забрать: 1/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
+    pan = await page.textContent('#cpPanel');
+    check('файл в папке ретуши заменили новой копией — он снова в списке «можно забрать», буква не запомнена (отметить заново)', /Можно забрать: 1/.test(pan) && /74002_модель/.test(pan)
+      && await page.evaluate(() => !document.querySelector('#cpPanel [data-cp-swho].cp-on') && document.querySelector('[data-cp-stdl]').disabled), pan.slice(0, 400));
+    RID_GEN.delete(KRT + '/74002_модель/k2.jpg');
+    FILES.delete(KSTATE); PROPS.delete(K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ');
     await page.click('[data-cp-p="close"]');
     /* 02_ОТБОР (Маша, 09.11): «только отбор» или «все файлы съёмки», с видео / без видео */
     {
@@ -2326,6 +2382,31 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         dated.titles === '81001,81003,81004,81005' && dated.dir === '2026-11-09/brand/81005_e' && dated.loose === '' && dated.deep === '81005'
         && dated.codes === '||2026|74595|' && dated.stage === '81001,81002,81003,81004,81005', JSON.stringify(dated));
       await t.waitForFunction(() => !App.dirty && !CP.saving, null, { timeout: 8000 }).catch(() => {});
+    }
+    /* 2.0.95: из папки ретуши скачал другой ретушёр (запись U), папка на Диске ещё «Y_…» — сверка ставит карточке U, а не Y */
+    {
+      const mr = await t.evaluate(() => {
+        const dictWas = CP.dict, groupsWas = CP.dictGroups;
+        CP.dict = cpParseDict('[Ретушёры: один]\nY\nU');
+        const card = App.cards.find(c => c.title === '81003'), p = cbPhotoById(cpCardPids(card)[0]);
+        const rs = [{ stage: { key: 'retouch', label: 'Ретушь' }, found: [{ path: 'disk:/R/съёмка', files: [{ path: 'disk:/R/съёмка/brand/Y_81003_c/' + p.name, name: p.name, size: 5, resource_id: 'u:aaaaaaaaaaaaaaaa1111111111111111' }] }] }];
+        card.tags = [];
+        cpMirrorApply(rs, ['Y', 'U']);
+        const byFolder = card.tags.join();
+        card.tags = [];
+        cpMeta().rtdl = { ['brand/81003_c/' + p.name.toLowerCase()]: { l: 'U', by: 'тест', ts: new Date().toISOString(), export: 'x', n: 1, rid: '1111111111111111' } };
+        cpMirrorApply(rs, ['Y', 'U']);
+        const byRecord = card.tags.join();
+        card.tags = [];
+        cpMeta().rtdl['brand/81003_c/' + p.name.toLowerCase()].rid = '2222222222222222';   /* запись о прежней копии файла */
+        cpMirrorApply(rs, ['Y', 'U']);
+        const stale = card.tags.join();
+        delete cpMeta().rtdl; card.tags = [];
+        CP.dict = dictWas; CP.dictGroups = groupsWas;
+        return [byFolder, byRecord, stale, cpStageKey('1/Y_74595_модель/A.JPG', ['Y']).key, cpStageKey('1/74595_модель_доработка/A.JPG', ['Y']).key];
+      });
+      check('сверка с Диском: буква карточки — по записи «скачано» (U), без записи или с записью о прежней копии — по имени папки (Y)',
+        mr[0] === 'Y' && mr[1] === 'U' && mr[2] === 'Y' && mr[3] === '1/74595_модель/a.jpg' && mr[4] === mr[3], JSON.stringify(mr));
     }
     check('разбор 10.11: страница без ошибок', terr.length === 0, terr.join(' | '));
     await t.close();

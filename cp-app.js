@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.94';
+var CP_VERSION = '2.0.95';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1334,6 +1334,7 @@ var CP_ACTION_LABEL = {
   to_retouch: 'отправил(а) на ретушь', to_reshoot: 'отправил(а) в брак (пересъём)',
   to_approval: 'отправил(а) на согласование', clear_status: 'снял(а) статус',
   download_shoot: 'скачал(а) всю съёмку', download_selection: 'скачал(а) отбор',
+  download_retouch: 'скачал(а) из папки ретуши',
   changed_after_download: 'изменил(а) карточку после скачивания',
   merged: 'склеены версии отбора', restored: 'восстановлены несохранённые правки',
   collect_cards: 'собрал(а) карточки по папкам', auto_cards: 'карточки собраны по папкам артикулов',
