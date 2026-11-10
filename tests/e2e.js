@@ -322,7 +322,13 @@ async function route(r) {
       const results = (b.items || []).map(it => {
         const parent = it.path.slice(0, it.path.lastIndexOf('/'));
         const parts = parent.split('/'); for (let i = 2; i <= parts.length; i++) DIRS.add(parts.slice(0, i).join('/'));
-        if (FILES.has(it.path)) return { from: it.from, status: 'exists' };
+        if (FILES.has(it.path) || DIRS.has(it.path)) return { from: it.from, status: 'exists' };
+        if (DIRS.has(it.from)) {   /* папка целиком */
+          const pre = it.from + '/';
+          for (const d of [...DIRS]) if (d === it.from || d.indexOf(pre) === 0) DIRS.add(it.path + d.slice(it.from.length));
+          for (const k of [...FILES.keys()]) if (k.indexOf(pre) === 0) FILES.set(it.path + k.slice(it.from.length), FILES.get(k));
+          return { from: it.from, status: 'done' };
+        }
         FILES.set(it.path, FILES.get(it.from)); return { from: it.from, status: 'done' };
       });
       return json(200, { results });
@@ -2029,6 +2035,13 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       await page.evaluate(() => document.querySelector('#cpStages [data-cp-stage=""]').click());
       await page.evaluate(() => { var d = CP.shoots.find(s => s.name === '2026-11-06_SV_КАТ'); d.custom_properties = {}; d.cpSum = { k: [0, 0, 0, 0, 0, 2, 1], filled: 3 }; cpRenderShoots(); });
       check('все артикулы на сайте или в браке — «готова к архиву»', /готова к архиву/.test(await page.evaluate(() => [...document.querySelectorAll('#cpShelfList .cp-shoot')].find(b => b.dataset.name === '2026-11-06_SV_КАТ').textContent)));
+      /* 2.0.106: у съёмки есть копии в 02 и 03, готовое в «Сайте» и брак в 00_АРХИВ/_БРАК */
+      const SR = await page.evaluate(() => CP.settings.site);
+      const AN = '2026-11-06_SV_КАТ', AP = K + '/02_ОТБОР/' + AN, AS = SR + '/02.11.26/Y/1/' + AN, AB = K + '/00_АРХИВ/_БРАК/' + AN;
+      [AP, AP + '/74001', SR + '/02.11.26', SR + '/02.11.26/Y', SR + '/02.11.26/Y/1', AS, AS + '/Y_1', K + '/00_АРХИВ/_БРАК', AB].forEach(x => DIRS.add(x));
+      FILES.set(AP + '/74001/k1.jpg', Buffer.from('a1')); FILES.set(AS + '/Y_1/74001_1.jpg', Buffer.from('s1')); FILES.set(AB + '/k9.jpg', Buffer.from('b1'));
+      const rtWas = [...DIRS].filter(x => x.indexOf(K + '/03_РЕТУШЬ/' + AN) === 0).length;
+      await page.evaluate(async () => { cpSiteOldReset(); await cpScanStages(); });
       await page.evaluate(() => { var d = CP.shoots.find(s => s.name === '2026-11-06_SV_КАТ'); cpSelectShoot(d.path, d.name, d.modified); });
       await page.waitForSelector('#cpPanel [data-cp-arch-go]', { timeout: 8000 }).catch(() => {});
       let dlg = '';
@@ -2039,6 +2052,12 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       check('«В архив»: съёмка целиком в 00_АРХИВ (с отбором), из исходников ушла, с витрины тоже',
         DIRS.has(K + '/00_АРХИВ/2026-11-06_SV_КАТ') && FILES.has(K + '/00_АРХИВ/2026-11-06_SV_КАТ/k1.jpg') && !DIRS.has(K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ')
         && /на сайте \(2\) или в браке \(1\)/.test(dlg) && await page.evaluate(() => !CP.shoots.some(s => s.name === '2026-11-06_SV_КАТ')), dlg);
+      for (let i = 0; i < 60 && !FILES.has(K + '/00_АРХИВ/' + AN + '/Брак/k9.jpg'); i++) await page.waitForTimeout(100);
+      for (let i = 0; i < 40 && DIRS.has(AP); i++) await page.waitForTimeout(100);
+      check('«В архив» целиком: готовое — копией в <съёмка>/Готово/02.11.26_Y_1, сайт не тронут; брак — в <съёмка>/Брак; копии в 02 и 03 — в Корзину',
+        FILES.get(K + '/00_АРХИВ/' + AN + '/Готово/02.11.26_Y_1/Y_1/74001_1.jpg') + '' === 's1' && FILES.has(K + '/00_АРХИВ/' + AN + '/Готово/2026-11-10/74001/k1.jpg') && FILES.has(AS + '/Y_1/74001_1.jpg')
+        && FILES.has(K + '/00_АРХИВ/' + AN + '/Брак/k9.jpg') && !DIRS.has(AB) && !DIRS.has(AP) && rtWas > 0 && !DIRS.has(K + '/03_РЕТУШЬ/' + AN)
+        && TRASHED.includes(AP) && /Готово|готовое/.test(dlg) && /Корзин/.test(dlg), JSON.stringify([FILES.has(K + '/00_АРХИВ/' + AN + '/Готово/02.11.26_Y_1/Y_1/74001_1.jpg'), FILES.has(AS + '/Y_1/74001_1.jpg'), FILES.has(K + '/00_АРХИВ/' + AN + '/Брак/k9.jpg'), DIRS.has(AB), DIRS.has(AP), rtWas, DIRS.has(K + '/03_РЕТУШЬ/' + AN), TRASHED.slice(-4), [...FILES.keys(), ...DIRS].filter(k => /Готово/.test(k))]) + ' ' + dlg.replace(/\n/g, ' / '));
       if (!(await page.isVisible('#cpArchiveInput'))) await page.click('#cpGear');
     }
     /* несколько папок (Маша, 09.11): соседний каталог находится сам, переключение — в один клик; добавить руками — общий список */

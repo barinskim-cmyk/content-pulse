@@ -131,6 +131,42 @@ function cpArchBusy(sel) {
   return mine || !!(q && Object.keys(q).length);
 }
 
+/* ---------- «В архив» целиком (Маша, 10.11.2026) ----------
+   «Съёмка, у которой все артикулы на сайте или в браке, переносится в архив и отовсюду удаляется,
+   кроме сайта / готово. Готовое тоже копируется в архив — в папку «Готово» внутри папки съёмки:
+   исходный и готовый материал в одной точке, легко хранить на прекрасное далёко. Внутри — «Брак»
+   (что забраковали) и «Готово» (что не забраковали)». Запуск — кнопкой с подтверждением.
+   Порядок — сначала то, что нужно сохранить, потом уборка; убираем только после проверки:
+     1. 01_ИСХОДНИКИ/<съёмка> → 00_АРХИВ/<съёмка>; ждём, пока папки в исходниках не станет;
+     2. каждая папка съёмки в «Сайте» / «Готово» копируется в 00_АРХИВ/<съёмка>/Готово/<дата_буква_номер>;
+     3. брак 00_АРХИВ/_БРАК/<съёмка> переезжает в 00_АРХИВ/<съёмка>/Брак;
+     4. только если 2 прошло целиком — копии в 02 и 03 в Корзину Диска (30 дней можно вернуть).
+   Сайт не трогаем: через неделю после архива его папки можно будет убрать — отметка archivedAt. */
+
+/** Где лежит съёмка на этапе (по последней сверке витрины): [пути]. */
+function cpArchStagePaths(key, name) {
+  return ((CP.stagePaths || {})[key] || {})[String(name).toLowerCase()] || [];
+}
+
+/** Папка в «Сайте» → имя внутри «Готово»: путь от корня папки сайта до папки съёмки через «_». */
+function cpArchDoneName(sitePath, shootName) {
+  var roots = [CP.settings && CP.settings.site].concat((CP.settings && CP.settings.siteMore) || []).filter(Boolean);
+  var root = roots.filter(function (r) { return sitePath.indexOf(r.replace(/\/+$/, '') + '/') === 0; })[0] || '';
+  var rel = root ? sitePath.slice(root.replace(/\/+$/, '').length + 1) : sitePath.split('/').pop();
+  var segs = rel.split('/');
+  segs.pop();   /* сама папка съёмки */
+  if (root && roots.indexOf(root) > 0) segs.unshift(cpFolderBase(root));
+  return CPDisk.safeName(segs.join('_') || 'сайт');
+}
+
+/** Ждать, пока папки не станет (Диск переносит большие папки в фоне). */
+function cpWaitGone(path, tries) {
+  return CPDisk.meta(path).then(function () {
+    if (tries <= 1) return false;
+    return new Promise(function (r) { setTimeout(r, CP.waitThereMs || 5000); }).then(function () { return cpWaitGone(path, tries - 1); });
+  }, function (e) { return !!(e && e.status === 404); });
+}
+
 function cpArchiveShoot(sel) {
   var root = cpArchRoot();
   if (!root) { cpCatStageMissing('archive'); return; }
@@ -139,31 +175,100 @@ function cpArchiveShoot(sel) {
   var why = !c ? 'сводки по артикулам нет — не знаю, всё ли сдано'
     : !c.n ? 'в съёмке нет артикулов'
       : c.rest ? 'не на сайте и не в браке: ' + c.rest + ' из ' + c.n + ' артикулов' : '';
+  var site = cpArchStagePaths('site', sel.name);
+  var junk = cpArchStagePaths('approval', sel.name).concat(cpArchStagePaths('retouch', sel.name))
+    .filter(function (p) { return p.indexOf(root.replace(/\/+$/, '') + '/') !== 0 && p !== sel.path; });
+  var base = root.replace(/\/+$/, '') + '/' + sel.name;
   var msg = 'Перенести съёмку «' + sel.name + '» в ' + cpFolderBase(root) + '?\n\n'
     + (why ? 'Она ещё не закрыта: ' + why + '.\n\n' : 'Все артикулы на сайте (' + c.site + ') или в браке (' + c.brak + ').\n\n')
-    + 'Папка переедет целиком, вместе с отбором и отметками брака. С витрины исходников съёмка уйдёт, найти её можно в фильтре «' + cpFolderBase(root) + '».';
+    + '1. Исходники переедут целиком: ' + CPDisk.showPath(base) + '\n'
+    + '2. Готовое скопируется в «Готово» внутри неё: ' + (site.length ? site.length + ' папк(и) из сайта' : 'в сайте этой съёмки не найдено') + '\n'
+    + '3. Брак переедет в «Брак» внутри неё\n'
+    + '4. В Корзину Диска (30 дней можно вернуть): ' + (junk.length ? junk.map(function (p) { return CPDisk.showPath(p); }).join(', ') : 'нечего') + '\n'
+    + (junk.length && !site.length ? '   — только если готовое найдено; сейчас не найдено, поэтому копии в 02/03 останутся\n' : '')
+    + '\nСайт не трогается.';
   if (!window.confirm(msg)) return;
-  var to = root.replace(/\/+$/, '') + '/' + sel.name;
   var shoot = { path: sel.path, name: sel.name };
   var ready = CP.shoot && CP.shoot.path === sel.path ? cpFlushSave() : Promise.resolve();
-  cbBusyShow('Переношу в архив: ' + sel.name + '...', 0.3);
+  var report = [], moved = '';
+  cbBusyShow('Переношу в архив: ' + sel.name + '...', 0.2);
   ready.then(function () {
-    return cpMoveFolder(sel.path, to).then(function (moved) {
-      cbBusyHide();
-      if (CP.shoot && CP.shoot.path === sel.path) { CP.shoot = null; cpShowShelf(); }
-      /* запись в отборе уехавшей съёмки: кто и когда отправил в архив */
-      cpMutateState({ path: moved, name: sel.name }, function (data) {
-        data.meta.cp.events.push({ ts: new Date().toISOString(), action: 'to_archive', actor: cpActor(), items: [], note: 'в архив: ' + CPDisk.showPath(moved) + (why ? ' (не закрыта: ' + why + ')' : '') });
-      }).catch(function () { });
-      cbToast('В архиве: ' + sel.name);
-      CP.sel = null;
-      CP.archShoots = null;
-      cpLoadShoots();
-    }, function (e) {
-      cbBusyHide();
-      CPQ.add(shoot, { kind: 'move', label: 'В архив: ' + sel.name, items: [{ from: sel.path, path: to }], err: (e && e.message) || '' });
-      cbToast('В архив сразу не перенеслось — переношу повторно, не закрывайте страницу (плашка сверху)');
+    return cpMoveFolder(sel.path, base);
+  }).then(function (to) {
+    moved = to;
+    /* «В архиве» — только когда в исходниках папки больше нет: раньше хватало того, что она появилась
+       в архиве, и при оборванном фоновом переносе съёмка оказывалась разорвана надвое (Маша, 10.11) */
+    cbBusyShow('Проверяю, что исходники переехали целиком...', 0.4);
+    return cpWaitGone(sel.path, 18).then(function (gone) {
+      if (!gone) throw { message: 'Диск ещё переносит или перенос оборвался: папка в исходниках осталась (' + CPDisk.showPath(sel.path) + ')' };
     });
+  }).then(function () {
+    if (CP.shoot && CP.shoot.path === sel.path) { CP.shoot = null; cpShowShelf(); }
+    /* 2. готовое — копией в «Готово» */
+    cbBusyShow('Копирую готовое в архив...', 0.6);
+    var used = {};
+    var items = site.map(function (p) {
+      var nm = cpArchDoneName(p, sel.name), k = 2;
+      while (used[nm]) nm = cpArchDoneName(p, sel.name) + '_' + (k++);
+      used[nm] = true;
+      return { from: p, path: moved + '/Готово/' + nm };
+    });
+    if (!items.length) return 0;
+    return CPDisk.proxyCopy(items, [moved + '/Готово']).then(function (r) {
+      var res = (r && r.results) || [];
+      return Promise.all(items.map(function (it, i) {
+        var st = res[i] && res[i].status;
+        if (st === 'done' || st === 'exists') return true;
+        return cpWaitThere(it.path, st === 'timeout' ? 18 : 2);
+      })).then(function (oks) {
+        var bad = items.filter(function (it, i) { return !oks[i]; });
+        if (bad.length) report.push('готовое скопировалось не всё: ' + bad.map(function (it) { return CPDisk.showPath(it.from); }).join(', '));
+        return items.length - bad.length === items.length ? items.length : -1;
+      });
+    }, function (e) { report.push('готовое не скопировалось: ' + ((e && e.message) || e)); return -1; });
+  }).then(function (doneCopied) {
+    /* 3. брак — внутрь съёмки */
+    var brak = root.replace(/\/+$/, '') + '/_БРАК/' + CPDisk.safeName(sel.name);
+    var stepBrak = CPDisk.meta(brak).then(function () {
+      cbBusyShow('Переношу брак...', 0.75);
+      return cpMoveFolder(brak, moved + '/Брак').then(function () { return 1; }, function (e) { report.push('брак не перенёсся: ' + ((e && e.message) || e)); return 0; });
+    }, function () { return 0; });
+    return stepBrak.then(function () { return doneCopied; });
+  }).then(function (doneCopied) {
+    /* 4. уборка 02/03 — только если готовое сохранено целиком */
+    if (!junk.length) return 0;
+    if (doneCopied <= 0) { report.push('копии в 02/03 оставлены: готовое ' + (doneCopied === 0 ? 'не найдено' : 'сохранилось не целиком')); return 0; }
+    cbBusyShow('Убираю копии из 02 и 03 в Корзину...', 0.9);
+    return CPDisk.trash(junk).then(function (res) {
+      var bad = res.filter(function (x) { return x.status === 'failed'; });
+      if (bad.length) report.push('в Корзину не ушло: ' + bad.map(function (x) { return CPDisk.showPath(x.path); }).join(', '));
+      return junk.length - bad.length;
+    }, function (e) { report.push('копии в 02/03 не убраны: ' + ((e && e.message) || e)); return 0; });
+  }).then(function (trashed) {
+    cbBusyHide();
+    var now = new Date().toISOString();
+    cpMutateState({ path: moved, name: sel.name }, function (data) {
+      var m = data.meta.cp;
+      m.archivedAt = now;
+      m.archiveSite = site;   /* какие папки сайта скопированы — их можно будет убрать через неделю */
+      m.events.push({ ts: now, action: 'to_archive', actor: cpActor(), items: [], note: 'в архив: ' + CPDisk.showPath(moved)
+        + (site.length ? '; готовое: ' + site.length : '') + (trashed ? '; из 02/03 в Корзину: ' + trashed : '')
+        + (why ? ' (не закрыта: ' + why + ')' : '') + (report.length ? '; ' + report.join('; ') : '') });
+    }).catch(function () { });
+    cbToast('В архиве: ' + sel.name + (report.length ? '. Не всё получилось: ' + report.join('; ') : ''));
+    CP.sel = null;
+    CP.archShoots = null;
+    cpLoadShoots();
+  }, function (e) {
+    cbBusyHide();
+    if (moved) {
+      /* папка в архиве появилась, а в исходниках осталась — честно говорим, дальше ничего не убираем */
+      cbToast('Перенос в архив не закончился: ' + ((e && e.message) || e) + '. Ничего не удалено. Откройте 00_АРХИВ и 01_ИСХОДНИКИ на Диске и проверьте, что где лежит.');
+      cpLoadShoots();
+      return;
+    }
+    CPQ.add(shoot, { kind: 'move', label: 'В архив: ' + sel.name, items: [{ from: sel.path, path: base }], err: (e && e.message) || '' });
+    cbToast('В архив сразу не перенеслось — переношу повторно, не закрывайте страницу (плашка сверху)');
   });
 }
 
