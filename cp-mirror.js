@@ -247,7 +247,7 @@ function cpMirrorApply(rs, letters, idx) {
   var m = cpMeta(), who = 'Диск', now = new Date().toISOString();
   idx = idx || cpMirrorIndex();
   var cardOf = idx.cardOf;
-  var pres = {}, unmatched = [];
+  var pres = {}, unmatched = [], artPres = {};
   rs.forEach(function (r) {
     (r.found || []).forEach(function (f) {
       f.files.forEach(function (file) {
@@ -255,6 +255,19 @@ function cpMirrorApply(rs, letters, idx) {
         var segs = file.path.slice(f.path.length + 1).split('/');
         var name = segs.pop();
         var mt = cpMirrorMatch(idx, segs, name, letters), p = mt.p, letter = mt.letter;
+        /* артикул файла — по ближайшей папке артикула, иначе по началу имени файла («74595_1.jpg») */
+        var code = '', stype = typeof cpShootType === 'function' && CP.shoot ? cpShootType(CP.shoot.name) : null;
+        for (var si = segs.length - 1; si >= 0 && !code; si--) {
+          var sg = segs[si], lm = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(sg);
+          if (lm && letters.indexOf(lm[1]) !== -1) sg = lm[2];
+          code = typeof cpArtCode === 'function' ? cpArtCode(stype, sg) : '';
+        }
+        if (!code && typeof cpArtCode === 'function') code = cpArtCode(stype, name);
+        if (code) {
+          var ap = (artPres[code] = artPres[code] || {});
+          if (!ap[r.stage.key]) ap[r.stage.key] = { path: file.path, letter: letter, n: 0 };
+          ap[r.stage.key].n++;
+        }
         if (!p) { unmatched.push({ stage: r.stage.label, path: file.path }); return; }
         var pr = pres[p.id] = pres[p.id] || {};
         pr[r.stage.key] = { path: file.path, name: file.name, size: file.size, letter: letter, prio: f.prio, key: mt.rel,
@@ -276,6 +289,27 @@ function cpMirrorApply(rs, letters, idx) {
   var knownAny = {}, rvAll = cpRv();
   Object.keys(rvAll).forEach(function (id) { (rvAll[id] || []).forEach(function (v) { (v.files || []).forEach(function (f) { knownAny[f.path] = true; }); }); });
   /* карточки: статус, буква ретушёра, версия ретуши, «загружено» */
+  /* Карточка товара — по артикулу, даже если ни один файл на этапе не узнан как её кадр (Маша, 11.11.2026:
+     «открываю из исходников — не вижу в карточке, что уже есть на сайте и в ретуши»). Ретушёры
+     переименовывают файлы («74595_1.jpg») и раскладывают их по партиям, и по имени кадр не находится;
+     а папка артикула (или код в начале имени файла) на этапе есть. Тогда статус и «загружено» ставятся
+     карточке этого артикула. Кадрам ничего не ставим — не знаем, какие именно. */
+  App.cards.forEach(function (c) {
+    if (!c.cpArticle || c.cpArticle.indexOf(',') !== -1) return;
+    var ap = artPres[c.cpArticle];
+    if (!ap) return;
+    var cs = m.cardStatus[c.id];
+    var want = ap.retouch || ap.review || ap.site ? 'retouch' : ap.approval ? 'approval' : '';
+    if (want && !(cs && (cs.s === 'reshoot' || cpStatusRank(cs.s) >= cpStatusRank(want)))) { m.cardStatus[c.id] = { s: want, by: who, ts: now }; nStat++; }
+    var lt = (ap.retouch && ap.retouch.letter) || (ap.site && ap.site.letter) || '';
+    if (lt && !(c.tags || []).some(function (t) { return letters.indexOf(t) !== -1; })) { c.tags = cpTagsWith(c.tags, lt); nLetter++; }
+    if (ap.site && !(m.delivered || {})[c.id]) {
+      m.delivered = m.delivered || {};
+      var sp0 = ap.site.path;
+      m.delivered[c.id] = { files: ap.site.n, letter: lt || cpCardLetter(c) || '', date: cpToday(), at: CPDisk.showPath(sp0.slice(0, sp0.lastIndexOf('/'))), out: 'Диск', ts: now, byArt: true };
+      nSite++;
+    }
+  });
   App.cards.forEach(function (c) {
     var pids = cpCardPids(c).filter(function (pid) { return pres[pid]; });
     if (!pids.length) return;

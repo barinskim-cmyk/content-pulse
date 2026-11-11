@@ -3050,6 +3050,26 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       });
       check('уборка ретуши в Корзину: карточка, которую сверка только нашла в папке сайта, не трогается; отправленная программой — убирается', JSON.stringify(dn) === '[[true,false],[true,true]]', JSON.stringify(dn));
     }
+    /* 2.0.109: файлы на этапах переименованы и разложены по партиям — карточка товара узнаётся по артикулу */
+    {
+      const ma = await t.evaluate(() => {
+        const c1 = App.cards.find(x => x.title === '81001'), c3 = App.cards.find(x => x.title === '81003'), m = cpMeta();
+        const keep = { cs1: m.cardStatus[c1.id], cs3: m.cardStatus[c3.id], d1: (m.delivered || {})[c1.id], d3: (m.delivered || {})[c3.id], t1: c1.tags, t3: c3.tags };
+        delete m.cardStatus[c1.id]; delete m.cardStatus[c3.id]; if (m.delivered) { delete m.delivered[c1.id]; delete m.delivered[c3.id]; }
+        c1.tags = []; c3.tags = [];
+        const rs = [
+          { stage: { key: 'retouch', label: 'Ретушь' }, found: [{ path: 'disk:/R/s', files: [{ path: 'disk:/R/s/brand/Y_81003_c/ретушь_001.jpg', name: 'ретушь_001.jpg', size: 5 }] }] },
+          { stage: { key: 'site', label: 'Сайт' }, found: [{ path: 'disk:/S/02.11.26/Y/1/s', files: [{ path: 'disk:/S/02.11.26/Y/1/s/Y_1/81001_1.jpg', name: '81001_1.jpg', size: 5 }] }] }];
+        cpMirrorApply(rs, ['Y', 'U']);
+        const out = [(m.cardStatus[c3.id] || {}).s, c3.tags.join(), (m.cardStatus[c1.id] || {}).s, !!(m.delivered || {})[c1.id], ((m.delivered || {})[c1.id] || {}).files];
+        m.cardStatus[c1.id] = keep.cs1; m.cardStatus[c3.id] = keep.cs3; if (!keep.cs1) delete m.cardStatus[c1.id]; if (!keep.cs3) delete m.cardStatus[c3.id];
+        if (m.delivered) { if (keep.d1) m.delivered[c1.id] = keep.d1; else delete m.delivered[c1.id]; if (keep.d3) m.delivered[c3.id] = keep.d3; else delete m.delivered[c3.id]; }
+        c1.tags = keep.t1; c3.tags = keep.t3; cbRenderCards();
+        return out;
+      });
+      check('сверка с Диском по артикулу: переименованный файл в папке «Y_81003_c» в ретуши — карточка 81003 «на ретуши» с буквой Y; «81001_1.jpg» в партии на сайте — карточка 81001 загружена',
+        JSON.stringify(ma) === '["retouch","Y","retouch",true,1]', JSON.stringify(ma));
+    }
     check('разбор 10.11: страница без ошибок', terr.length === 0, terr.join(' | '));
     await t.close();
   }
