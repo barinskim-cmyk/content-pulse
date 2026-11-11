@@ -254,7 +254,7 @@ function cpCountStageArts() {
     var w = CP.stagePaths[key] || {};
     Object.keys(w).forEach(function (low) { if (known[low]) jobs.push({ key: key, low: low, name: known[low], paths: w[low] }); });
   });
-  var fresh = {};
+  var fresh = {}, dirsNow = {};
   var oldOf = (CP.siteOldFor === archive && CP.siteOldOf) || {}, oldCache = (CP.siteOldFor === archive && CP.siteOld) || {}, oldDirty = false;
   return cpPool(jobs, 4, function (j) {
     var type = typeof cpShootType === 'function' ? cpShootType(j.name) : null;
@@ -283,6 +283,8 @@ function cpCountStageArts() {
               /* «Сайт»: пустая папка артикула — не «сдано» (в папку сайта могли положить всю структуру целиком) */
               if (j.key === 'site') { check.push({ x: x, code: code, letter: letter }); return; }
               any = true; c[code] = c[code] || letter;
+              /* где лежит папка артикула — для «Убрать из ретуши сданное» */
+              if (j.key === 'retouch') { var dm = (dirsNow[j.low] = dirsNow[j.low] || {}); (dm[code] = dm[code] || []).push(x.path); }
             });
             /* «Сайт»: папок артикулов нет, файлы лежат россыпью — артикул по началу имени файла («74595_1.jpg») */
             if (j.key === 'site' && !here) files.forEach(function (n) { var fc = cpArtCode(type, n); if (fc) { any = true; if (c[fc] === undefined) c[fc] = ''; } });
@@ -318,6 +320,7 @@ function cpCountStageArts() {
     if (run !== _cpArtsRun || CP.archive !== archive) return;
     if (oldDirty && typeof cpSiteOldSave === 'function') cpSiteOldSave(archive, oldCache);
     CP.stageArts = fresh;
+    CP.rtArtDirs = dirsNow;   /* съёмка -> код -> папки артикула в 03 */
     CP.stageArtsFor = archive;
     if (typeof cpStageRecentApply === 'function') cpStageRecentApply();   /* только что отправленное — в счёте, пока Диск не покажет сам */
     cpRenderShoots();
@@ -424,8 +427,11 @@ cpRenderShoots = (function (orig) {
     CP.shoots.forEach(function (d) { have[d.name.toLowerCase()] = true; });
     var done = CP.shoots.filter(function (d) { return pres[d.name.toLowerCase()] && cpArtsLeft(d, 'retouch') === 0; });
     var orphan = Object.keys(pres).filter(function (low) { return !have[low]; }).sort();
-    if (!done.length && !orphan.length) return r;
+    var clean = cpRtCleanPlan();
+    if (!done.length && !orphan.length && !clean.n) return r;
     var h = '<div class="cp-rt-note">';
+    if (clean.n) h += '<div>В папке ретуши лежат артикулы, которые уже есть на сайте: <b>' + clean.n + '</b> в ' + clean.shoots + ' съёмк(ах) — '
+      + '<a href="#" data-cp-rt-clean="1">убрать их из ретуши</a> (в Корзину Диска, 30 дней можно вернуть).</div>';
     if (done.length) h += '<div>В папке ретуши лежат ещё съёмки, у которых все артикулы уже есть в папке сайта: <b>' + done.length + '</b> — '
       + '<a href="#" data-cp-rt-done="1">' + (CP.rtShowDone ? 'скрыть' : 'показать') + '</a>. Наведите на строку под съёмкой — какие артикулы и где найдены.</div>';
     if (orphan.length) h += '<div>В папке ретуши есть папки, для которых нет съёмки с таким именем в исходниках: <b>' + orphan.length + '</b> — '
@@ -434,6 +440,38 @@ cpRenderShoots = (function (orig) {
     return r;
   };
 })(cpRenderShoots);
+/* «Убрать из ретуши сданное» (Маша, 11.11.2026: «то, что попало в папку сайта, выкидывается из папки ретуши
+   как лишнее» — по кнопке). Сданным считается артикул, у которого на сайте есть непустая папка (или файлы
+   с его кодом). Уходит в Корзину только папка артикула в 03; папка съёмки и несданные артикулы остаются. */
+function cpRtCleanPlan() {
+  var out = { n: 0, shoots: 0, paths: [], list: [] };
+  if (!cpCatalog() || CP.stageArtsFor !== CP.archive || !CP.rtArtDirs) return out;
+  Object.keys(CP.rtArtDirs).forEach(function (low) {
+    var site = ((CP.stageArts.site || {})[low]) || {}, dm = CP.rtArtDirs[low], codes = [];
+    Object.keys(dm).forEach(function (code) {
+      if (site[code] === undefined) return;
+      codes.push(code);
+      dm[code].forEach(function (p) { out.paths.push(p); });
+    });
+    if (codes.length) { out.n += codes.length; out.shoots++; out.list.push(low + ': ' + codes.sort().join(', ')); }
+  });
+  return out;
+}
+document.addEventListener('click', function (e) {
+  if (!e.target.closest || !e.target.closest('[data-cp-rt-clean]')) return;
+  e.preventDefault();
+  var plan = cpRtCleanPlan();
+  if (!plan.n) return;
+  if (!window.confirm('Убрать из 03_РЕТУШЬ артикулы, которые уже есть на сайте?\n\n' + plan.list.slice(0, 30).join('\n') + (plan.list.length > 30 ? '\n…' : '')
+    + '\n\nПапок: ' + plan.paths.length + '. Уйдут в Корзину Диска — 30 дней можно вернуть.')) return;
+  cbBusyShow('Убираю сданное из ретуши...', 0.5);
+  CPDisk.trash(plan.paths).then(function (res) {
+    cbBusyHide();
+    var bad = res.filter(function (x) { return x.status === 'failed'; });
+    cbToast('Убрано из ретуши: ' + (plan.paths.length - bad.length) + ' папок артикулов' + (bad.length ? '. Не ушло: ' + bad.length : ''));
+    return cpScanStages();
+  }, function (err) { cbBusyHide(); cpHandleError(err, 'Убрать из ретуши'); }).then(function () { return cpCountStageArts(); });
+});
 document.addEventListener('click', function (e) {
   if (!e.target.closest || !e.target.closest('[data-cp-rt-done]')) return;
   e.preventDefault();

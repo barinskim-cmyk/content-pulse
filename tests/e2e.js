@@ -1846,6 +1846,23 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       LIST_FAIL = null;
       await page.evaluate(() => { CP.siteFreshDates = 2; });
       /* 2.0.108: при каждой сверке перечитываются только две самых свежих даты, остальные — из запомненного */
+      /* 2.0.110: «убрать из ретуши» — только артикулы, которые есть на сайте, и только по кнопке */
+      {
+        await page.evaluate(async () => { CP.siteFreshDates = 0; await cpScanStages(); await cpCountStageArts(); CP.stageFilter = 'retouch'; cpRenderShoots(); });
+        const rtBefore = [...DIRS].filter(d => d.indexOf(K + '/03_РЕТУШЬ/' + SH + '/') === 0).map(d => d.split('/').pop()).sort();
+        const note = await page.evaluate(() => (document.querySelector('#cpShelfList .cp-rt-note') || {}).textContent || '');
+        let cdlg = '';
+        page.once('dialog', d => { cdlg = d.message(); d.accept(); });
+        await page.evaluate(() => document.querySelector('[data-cp-rt-clean]').click());
+        for (let i = 0; i < 40 && DIRS.has(K + '/03_РЕТУШЬ/' + SH + '/74002_модель'); i++) await page.waitForTimeout(100);
+        const rtAfter = [...DIRS].filter(d => d.indexOf(K + '/03_РЕТУШЬ/' + SH + '/') === 0).map(d => d.split('/').pop()).sort();
+        await page.evaluate(() => { CP.stageFilter = ''; CP.siteFreshDates = 2; cpRenderShoots(); });
+        check('«убрать из ретуши» по кнопке: папки артикулов, которые есть на сайте, уходят в Корзину; папка съёмки и прочее — на месте',
+          /уже есть на сайте: 2/.test(note) && /74001, 74002/.test(cdlg) && rtBefore.includes('Y_74001_модель') && rtBefore.includes('74002_модель')
+          && !rtAfter.includes('Y_74001_модель') && !rtAfter.includes('74002_модель') && DIRS.has(K + '/03_РЕТУШЬ/' + SH), JSON.stringify([note, rtBefore, rtAfter]));
+        [K + '/03_РЕТУШЬ/' + SH + '/Y_74001_модель', K + '/03_РЕТУШЬ/' + SH + '/74002_модель'].forEach(d => DIRS.add(d));
+        FILES.set(K + '/03_РЕТУШЬ/' + SH + '/Y_74001_модель/k1.jpg', Buffer.from('K'.repeat(60))); FILES.set(K + '/03_РЕТУШЬ/' + SH + '/74002_модель/k2.jpg', Buffer.from('K'.repeat(60)));
+      }
       ['05.11.26', '06.11.26', '07.11.26'].forEach(x => { DIRS.add(SITE + '/' + x); DIRS.add(SITE + '/' + x + '/' + SH); });
       const fr = await page.evaluate(async () => {
         cpSiteOldReset(); await cpScanStages();
