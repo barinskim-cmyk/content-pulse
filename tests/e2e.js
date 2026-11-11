@@ -1818,6 +1818,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         return { tip, pres: !!(CP.stagePresence.site || {})[low], codes: Object.keys((CP.stageArts.site || {})[low] || {}).sort().join(), paths: ((CP.stagePaths.site || {})[low] || []).length,
           site: (ph.find(x => x.key === 'site') || {}).n, retouch: (ph.find(x => x.key === 'retouch') || { n: -9 }).n, arch, ready, cached: Object.keys(JSON.parse(localStorage.getItem('cp_site_old:' + CP.archive) || '{}')).length };
       });
+      await page.evaluate(() => { CP.siteFreshDates = 0; });   /* обе тестовые даты — «прошлые»: читаются один раз и запоминаются */
       const s1 = await siteNow();
       check('«Сайт» в виде «дата / буква / номер / съёмка / партия» читается: оба артикула на сайте (один — по имени файла), из ретуши они ушли, съёмка «готова к архиву» по самой папке сайта',
         s1.pres && s1.codes === '74001,74002' && s1.paths === 2 && s1.site === 2 && s1.retouch === 0 && s1.ready && s1.arch.site === 2 && s1.arch.rest === 0, JSON.stringify(s1));
@@ -1843,6 +1844,19 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       LIST_FAIL = /04_САЙТ\/0[23]\.10\.26\//;
       const s2 = await siteNow();
       LIST_FAIL = null;
+      await page.evaluate(() => { CP.siteFreshDates = 2; });
+      /* 2.0.108: при каждой сверке перечитываются только две самых свежих даты, остальные — из запомненного */
+      ['05.11.26', '06.11.26', '07.11.26'].forEach(x => { DIRS.add(SITE + '/' + x); DIRS.add(SITE + '/' + x + '/' + SH); });
+      const fr = await page.evaluate(async () => {
+        cpSiteOldReset(); await cpScanStages();
+        const orig = window.cpListDirs, seen = [];
+        window.cpListDirs = p => { seen.push(p.split('/').pop()); return orig(p); };
+        await cpScanStages();
+        window.cpListDirs = orig;
+        return ['05.11.26', '06.11.26', '07.11.26', '02.10.26'].map(x => seen.includes(x));
+      });
+      ['05.11.26', '06.11.26', '07.11.26'].forEach(x => { DIRS.delete(SITE + '/' + x + '/' + SH); DIRS.delete(SITE + '/' + x); });
+      check('сверка «Сайта»: перечитываются только две самых свежих даты (06.11 и 07.11), остальные — из запомненного', JSON.stringify(fr) === '[false,true,true,false]', JSON.stringify(fr));
       check('старые даты «Сайта» запомнены в браузере: при следующей сверке их папки не перечитываются, картина та же', s2.cached >= 2 && s2.codes === '74001,74002' && s2.site === 2 && s2.ready, JSON.stringify(s2));
       [D1 + '/Y_1/74001_модель/k1.jpg', D2 + '/U_2/74002_1.jpg'].forEach(f => FILES.delete(f));
       [...DIRS].filter(d => d.indexOf(SITE + '/02.10.26') === 0 || d.indexOf(SITE + '/03.10.26') === 0).forEach(d => DIRS.delete(d));
@@ -2090,7 +2104,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       for (let i = 0; i < 60 && !FILES.has(K + '/00_АРХИВ/' + AN + '/Брак/k9.jpg'); i++) await page.waitForTimeout(100);
       for (let i = 0; i < 40 && DIRS.has(AP); i++) await page.waitForTimeout(100);
       check('«В архив» целиком: готовое — копией в <съёмка>/Готово/02.11.26_Y_1, сайт не тронут; брак — в <съёмка>/Брак; копии в 02 и 03 — в Корзину',
-        FILES.get(K + '/00_АРХИВ/' + AN + '/Готово/02.11.26_Y_1/Y_1/74001_1.jpg') + '' === 's1' && FILES.has(K + '/00_АРХИВ/' + AN + '/Готово/2026-11-10/74001/k1.jpg') && FILES.has(AS + '/Y_1/74001_1.jpg')
+        FILES.get(K + '/00_АРХИВ/' + AN + '/Готово/02.11.26_Y_1/Y_1/74001_1.jpg') + '' === 's1' && [...FILES.keys()].some(k => new RegExp('/00_АРХИВ/' + AN + '/Готово/\\d{4}-\\d{2}-\\d{2}/74001/k1\\.jpg$').test(k)) && FILES.has(AS + '/Y_1/74001_1.jpg')
         && FILES.has(K + '/00_АРХИВ/' + AN + '/Брак/k9.jpg') && !DIRS.has(AB) && !DIRS.has(AP) && rtWas > 0 && !DIRS.has(K + '/03_РЕТУШЬ/' + AN)
         && TRASHED.includes(AP) && /Готово|готовое/.test(dlg) && /Корзин/.test(dlg), JSON.stringify([FILES.has(K + '/00_АРХИВ/' + AN + '/Готово/02.11.26_Y_1/Y_1/74001_1.jpg'), FILES.has(AS + '/Y_1/74001_1.jpg'), FILES.has(K + '/00_АРХИВ/' + AN + '/Брак/k9.jpg'), DIRS.has(AB), DIRS.has(AP), rtWas, DIRS.has(K + '/03_РЕТУШЬ/' + AN), TRASHED.slice(-4), [...FILES.keys(), ...DIRS].filter(k => /Готово/.test(k))]) + ' ' + dlg.replace(/\n/g, ' / '));
       /* 2.0.107: перенос в архив оборвался (до 2.0.106) — часть в архиве, часть в исходниках: «Доперенести в архив» */

@@ -212,6 +212,8 @@ function cpSiteTooOld(name) {
   return !!d && d < cpSiteRecentFrom();
 }
 
+CP.siteFreshDates = 2;   /* сколько самых свежих папок-дат «Сайта» перечитывать при каждой сверке */
+
 /** Какие съёмки лежат в папках этапов: по одному обходу на этап (до 3 уровней). */
 /* запомненное про старые даты «Сайта» — в браузере, отдельно для каждой папки исходников */
 function cpSiteOldKey(archive) { return 'cp_site_old:' + archive; }
@@ -295,6 +297,15 @@ function cpScanStages() {
       return cpPool(paths, 4, function (p) { return cpListDirs(p); }).then(function (lists) {
         var next = [];
         lists.forEach(function (ds) {
+          /* «Сайт»: среди соседних папок-дат каждый раз читаем только две самых свежих; остальные — из
+             запомненного, перечитываем, только если папка даты изменилась (Маша, 11.11.2026: «очень долго
+             сверяет сайт — хранить прошлые даты, считывать только последние две, не добавили ли новое») */
+          var fresh = {};
+          if (key === 'site' && !inOld && typeof cpSiteDateName === 'function') {
+            (ds || []).map(function (x) { return { x: x, d: cpSiteDateName(x.name) }; }).filter(function (o) { return o.d; })
+              .sort(function (a, b) { return a.d < b.d ? 1 : a.d > b.d ? -1 : 0; })
+              .slice(0, CP.siteFreshDates).forEach(function (o) { fresh[o.x.path] = true; });
+          }
           (ds || []).forEach(function (x) {
             /* «!_» или «1_» спереди — очерёдность; « +» в конце — пометка, которую ставят руками на Диске
                (скриншот Маши 10.11.2026: «2026-10-14_SV_МОДЕЛЬ_ЖЕН_Andamane +») — это та же съёмка */
@@ -306,7 +317,7 @@ function cpScanStages() {
             }
             else if (x.name.charAt(0) !== '_') {
               /* «Сайт»: папки дат старше 7 дней каждый раз не перечитываем (Маша, 10.11) — берём запомненное, см. ниже */
-              if (key === 'site' && !inOld && cpSiteTooOld(x.name)) { oldDates.push({ x: x, depth: depth }); return; }
+              if (key === 'site' && !inOld && cpSiteDateName(x.name) && !fresh[x.path]) { oldDates.push({ x: x, depth: depth }); return; }
               next.push(x.path);
             }
           });
