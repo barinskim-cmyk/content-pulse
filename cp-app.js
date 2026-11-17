@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.110';
+var CP_VERSION = '2.0.111';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1521,6 +1521,7 @@ function cpRetouchCopy(pids, card, label, after) {
     var used = {};
     items = files.map(function (p) {
       var target = folder + '/' + cpRetouchRel(p, card, shootPath);
+      if (typeof cpRtLetteredPath === 'function') target = cpRtLetteredPath(target, shootPath);   /* папка артикула с буквой ретушёра */
       /* два разных файла с одним именем в одну папку — второму суффикс, чтобы не потерялся */
       if (used[target] && used[target] !== p.disk) {
         var dot = target.lastIndexOf('.'), n = 2;
