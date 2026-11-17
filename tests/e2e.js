@@ -70,6 +70,7 @@ const CRC_CALLS = [], ZIP_SLICES = [];
 let ZIPPART_FAIL_ONCE = null, ZIPPART_BAD = null;   /* ZIPPART_BAD — файл, который Яндекс не отдаёт (HTTP 500) */   /* оборвать один кусок архива — страница должна повторить */   /* что ушло в Корзину Диска / перенесено между этапами */
 const PROPS = new Map();   /* custom_properties папок (сводка съёмки) */
 let LIST_FAIL = null;   /* список этих папок Диск «не отдаёт» (403) — проверка сверки витрины */
+let LIST_SLOW = null;   /* {re, ms}: списки этих папок Диск отдаёт с задержкой — «Сайт» большой и читается долго */
 let CLOUD_PUT_FAIL = null, UPLOAD_FAIL = null;   /* {re, n}: n раз «уронить» загрузку куска в Облако (по началу содержимого) / файла на Диск (по пути) */
 const RID_GEN = new Map();   /* путь -> поколение: файл убрали и положили заново — у новой копии другой resource_id */
 /* как на Яндекс Диске: перенос и переименование resource_id не меняют (RID_KEEP: новый путь -> id до переноса) */
@@ -108,6 +109,7 @@ async function route(r) {
     } else if (pn.indexOf('/v1/disk/resources') === 0 && vdPath) return json(400, { error: 'DiskPathFormatError', message: 'путь общего диска — в /virtual-disks' });
     const vmeta = x => { const o = meta(x); if (vdMode) o.path = o.path.replace(/^vd:[^:]+:/, ''); return o; };
     if (pn === '/v1/disk/resources' && m === 'GET') {
+      if (LIST_SLOW && LIST_SLOW.re.test(p)) await new Promise(res => setTimeout(res, LIST_SLOW.ms));
       if (LIST_FAIL && LIST_FAIL.test(p)) return json(403, { error: 'тест: Диск не отдал список' });
       if (DIRS.has(p)) {
         const kids = [...DIRS, ...FILES.keys()].filter(x => x !== p && x.slice(0, x.lastIndexOf('/')) === p && !(FRESH.has(x) && Date.now() - FRESH.get(x) < 3000)).sort();
@@ -1989,6 +1991,39 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       check('2.0.113: архив читается последним — после того, как прочитаны папки этапов и артикулы на них', JSON.stringify(aft) === '[0,1,0]', JSON.stringify(aft));
       check('2.0.113: «готово» с датами внутри папки сайта читается (74001); отдельная папка «ГОТОВО» в каталоге — нет (витрина её обходит)',
         JSON.stringify(gt) === '["skip,review,skip","74001",1,""]', JSON.stringify(gt));
+      /* 2.0.114: ретушь не ждёт «Сайт» (Маша, 17.11.2026: «исходники появляются моментально, а ретушь по несколько минут») */
+      const S114 = SITE + '/17.11.26/Y/1/' + SH;
+      [SITE + '/17.11.26', SITE + '/17.11.26/Y', SITE + '/17.11.26/Y/1', S114, S114 + '/Y_1', S114 + '/Y_1/74001_модель'].forEach(d => DIRS.add(d));
+      FILES.set(S114 + '/Y_1/74001_модель/s114.jpg', Buffer.from('S'.repeat(33)));
+      LIST_SLOW = { re: /04_САЙТ/, ms: 2500 };
+      const wave = await page.evaluate(async () => {
+        const low = '2026-11-06_sv_кат', arch = CP.archive;
+        cpSiteOldReset();
+        CP.stageFor = null; CP.stagePresence = {}; CP.stagePaths = {}; CP.stageArts = {}; CP.stageArtsFor = null; CP.stageReadFor = {};
+        const t0 = Date.now();
+        let done = false, early = null;
+        const p = cpScanStages().then(() => { done = true; });
+        const p2 = cpScanStages();   /* вторая сверка, пока идёт первая, — ждёт её, а не идёт параллельно */
+        while (!done && Date.now() - t0 < 20000) {
+          if (!early && CP.stagePresence.retouch && CP.stagePresence.retouch[low] && CP.stageArtsFor === arch && (CP.stageArts.retouch || {})[low]) {
+            early = { ms: Date.now() - t0, siteRead: (CP.stageReadFor || {}).site === arch, arts: Object.keys(CP.stageArts.retouch[low]).sort().join(), left: cpArtsLeft(CP.shoots.find(s => s.name.toLowerCase() === low), 'retouch') };
+          }
+          await new Promise(r => setTimeout(r, 30));
+        }
+        await p;
+        const siteAfter = [(CP.stageReadFor || {}).site === arch, !!((CP.stagePresence.site || {})[low]), Object.keys((CP.stageArts.site || {})[low] || {}).sort().join(), Object.keys((CP.stageArts.retouch || {})[low] || {}).sort().join(),
+          cpArtsLeft(CP.shoots.find(s => s.name.toLowerCase() === low), 'retouch')];
+        const p2first = await Promise.race([p2.then(() => 'p2'), new Promise(r => setTimeout(() => r('wait'), 50))]);
+        await p2;
+        return { early, total: Date.now() - t0, siteAfter, p2first };
+      });
+      LIST_SLOW = null;
+      FILES.delete(S114 + '/Y_1/74001_модель/s114.jpg');
+      [...DIRS].filter(d => d.indexOf(SITE + '/17.11.26') === 0).forEach(d => DIRS.delete(d));
+      await page.evaluate(async () => { cpSiteOldReset(); await cpScanStages(); });
+      check('2.0.114: ретушь со счётом артикулов на витрине, пока «Сайт» ещё читается', !!wave.early && !wave.early.siteRead && wave.early.arts === '74001,74002' && wave.early.left === 2 && wave.early.ms < 2000, JSON.stringify(wave));
+      check('2.0.114: потом дочитан «Сайт» — его артикулы влились в счёт (74001 ушёл из ретуши), счёт ретуши остался', JSON.stringify(wave.siteAfter) === '[true,true,"74001","74001,74002",1]', JSON.stringify(wave.siteAfter));
+      check('2.0.114: сверка, запрошенная во время другой, ждёт её конца (не наслаивается)', wave.p2first === 'wait', JSON.stringify(wave));
     }
     RID_GEN.delete(KRT + '/U_74002_модель/k2.jpg');
     FILES.delete(KSTATE); PROPS.delete(K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ');

@@ -244,16 +244,20 @@ function cpSiteDirHas(x) {
     return has;
   });
 }
-var _cpArtsRun = 0;
+var _cpArtsRun = 0, _cpArtsRunOf = {};
 
-function cpCountStageArts() {
+/* keys — какие этапы считать (Маша, 17.11.2026: ретушь не ждёт «Сайт»): сначала 02/03/04, потом «Сайт»;
+   посчитанное вливается в CP.stageArts, остальные этапы остаются как были. Без keys — все этапы. */
+function cpCountStageArts(keys) {
   var run = ++_cpArtsRun, archive = CP.archive;
   if (!cpCatalog() || !CP.stagePaths) return Promise.resolve();
+  var want = keys || Object.keys(typeof CP_STAGE_SETTING === 'object' ? CP_STAGE_SETTING : CP.stagePaths);
+  want.forEach(function (k) { _cpArtsRunOf[k] = run; });
   var known = {};
   (CP.shoots || []).forEach(function (d) { known[d.name.toLowerCase()] = d.name; });
   var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
   var jobs = [];
-  Object.keys(CP.stagePaths).forEach(function (key) {
+  want.forEach(function (key) {
     var w = CP.stagePaths[key] || {};
     Object.keys(w).forEach(function (low) { if (known[low]) jobs.push({ key: key, low: low, name: known[low], paths: w[low] }); });
   });
@@ -320,10 +324,16 @@ function cpCountStageArts() {
       if (old !== undefined) (fresh[j.key] = fresh[j.key] || {})[j.low] = old;
     });
   }).then(function () {
-    if (run !== _cpArtsRun || CP.archive !== archive) return;
+    if (CP.archive !== archive) return;
+    /* этап пересчитали ещё раз, пока считался этот, — берём более свежий счёт */
+    var mine = want.filter(function (k) { return _cpArtsRunOf[k] === run; });
+    if (!mine.length) return;
     if (oldDirty && typeof cpSiteOldSave === 'function') cpSiteOldSave(archive, oldCache);
-    CP.stageArts = fresh;
-    CP.rtArtDirs = dirsNow;   /* съёмка -> код -> папки артикула в 03 */
+    var same = CP.stageArtsFor === archive, arts = same ? Object.assign({}, CP.stageArts) : {};
+    mine.forEach(function (k) { if (fresh[k]) arts[k] = fresh[k]; else delete arts[k]; });
+    CP.stageArts = arts;
+    if (mine.indexOf('retouch') !== -1) CP.rtArtDirs = dirsNow;   /* съёмка -> код -> папки артикула в 03 */
+    else if (!same) CP.rtArtDirs = {};
     CP.stageArtsFor = archive;
     if (typeof cpStageRecentApply === 'function') cpStageRecentApply();   /* только что отправленное — в счёте, пока Диск не покажет сам */
     cpRenderShoots();
@@ -506,8 +516,25 @@ cpStagesFor = (function (orig) {
 /* Витрина сама сверяется с Диском: раз в 45 секунд и когда вернулись на вкладку —
    что добавили или удалили другие, видно без «Обновить» (Маша, 06.11). */
 CP.stageScanAt = 0;
+/* Одна сверка за раз (17.11.2026): пока идёт прошлая, следующая не начинается параллельно, а ждёт её конца
+   (одна в очереди) — иначе на большом «Сайте» сверки наслаивались и Диск отвечал «слишком много запросов».
+   Сверка дольше трёх минут считается зависшей — новая начинается, не дожидаясь. */
 cpScanStages = (function (orig) {
-  return function () { CP.stageScanAt = Date.now(); return orig.apply(this, arguments); };
+  var cur = null, next = null;
+  function run(self, args) {
+    CP.stageScanAt = Date.now();
+    var p = Promise.resolve().then(function () { return orig.apply(self, args); });
+    var mine = p.then(function () { if (cur === mine) cur = null; }, function (e) { if (cur === mine) cur = null; if (window.console) console.warn('[CP] сверка этапов', e); });
+    mine.at = Date.now();
+    cur = mine;
+    return mine;
+  }
+  return function () {
+    var self = this, args = arguments;
+    if (!cur || Date.now() - cur.at > (CP.stageScanStuckMs || 180000)) { next = null; return run(self, args); }
+    if (!next) next = cur.then(function () { next = null; return run(self, args); });
+    return next;
+  };
 })(cpScanStages);
 function cpShelfLive() {
   var shelf = document.getElementById('cpShelf');

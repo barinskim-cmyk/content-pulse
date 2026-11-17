@@ -283,7 +283,7 @@ function cpScanStages() {
   var known = {};
   (CP.shoots || []).forEach(function (d) { known[d.name.toLowerCase()] = true; });
   var shootLike = /^\d{4}-\d{2}-\d{2}_./;
-  return Promise.all(Object.keys(CP_STAGE_SETTING).map(function (key) {
+  var readKey = function (key) {
     var root = s[CP_STAGE_SETTING[key]];
     if (!root) return Promise.resolve([key, null]);
     var names = {}, where = {}, info = {};
@@ -362,41 +362,61 @@ function cpScanStages() {
     /* «Сайт» может быть не один: вторая папка с готовым («ГОТОВО» рядом с «05_САЙТ») читается так же */
     var roots = [root].concat(key === 'site' ? (s.siteMore || []) : []);
     return level(roots, 1, cur, false).then(readOld).then(function () { return [key, names, where, info]; }, function (e) { return [key, 'fail', e]; });
-  })).then(function (pairs) {
-    if (CP.archive !== archive) return;
-    /* Папка этапа не прочиталась (сеть, Диск ответил ошибкой или «слишком много запросов») — это не
-       «в папке пусто». Раньше такая сверка стирала всё, что было известно про этап: под съёмками
-       пропадала «03_РЕТУШЬ N», съёмки вылетали из фильтра — до следующей удачной сверки (Маша,
-       10.11.2026: «сначала показала, что есть в ретуши, потом перестала»). Теперь оставляем прежнее. */
-    var prev = CP.stageFor === archive ? { p: CP.stagePresence || {}, w: CP.stagePaths || {}, i: CP.stageInfo || {} } : { p: {}, w: {}, i: {} };
-    var failed = [];
-    CP.stagePresence = {};
-    CP.stagePaths = {};
-    CP.stageInfo = {};
+  };
+  /* По этапам, а не всё разом (Маша, 17.11.2026: «исходники появляются моментально, а ретушь по несколько
+     минут»): сначала 02, 03, 04 — их папки неглубокие, ретушь показывается, как только они прочитаны;
+     затем одновременно счёт артикулов на них и чтение «Сайта» (до шести уровней вглубь), потом счёт на «Сайте»;
+     архив — после всего.
+     Папка этапа не прочиталась (сеть, Диск ответил ошибкой или «слишком много запросов») — это не
+     «в папке пусто»: остаётся прежнее (Маша, 10.11.2026: «сначала показала, что есть в ретуши, потом перестала»). */
+  var failed = [];
+  var applyWave = function (pairs) {
+    if (CP.archive !== archive) return false;
+    var same = CP.stageFor === archive;
+    var P = same ? Object.assign({}, CP.stagePresence || {}) : {}, W = same ? Object.assign({}, CP.stagePaths || {}) : {}, I = same ? Object.assign({}, CP.stageInfo || {}) : {};
+    CP.stageReadFor = CP.stageReadFor || {};
     pairs.forEach(function (kv) {
       var k = kv[0];
+      CP.stageReadFor[k] = archive;   /* этот этап этой витрины уже читали (для «Читаю папку…») */
       if (kv[1] === 'fail') {
         failed.push(k);
         if (window.console) console.warn('[CP] папка этапа не прочиталась: ' + k, kv[2] && (kv[2].status || kv[2].message || kv[2]));
-        if (prev.p[k]) { CP.stagePresence[k] = prev.p[k]; CP.stagePaths[k] = prev.w[k] || {}; CP.stageInfo[k] = prev.i[k] || {}; }
         return;
       }
-      if (kv[1]) { CP.stagePresence[k] = kv[1]; CP.stagePaths[k] = kv[2]; CP.stageInfo[k] = kv[3] || {}; }
+      if (kv[1]) { P[k] = kv[1]; W[k] = kv[2]; I[k] = kv[3] || {}; }
+      else { delete P[k]; delete W[k]; delete I[k]; }
     });
     if (CP.stageFor && CP.stageFor !== archive) CP.stageRecent = {};   /* открыли другую папку — свежие отметки прежней к ней не относятся */
+    CP.stagePresence = P;
+    CP.stagePaths = W;
+    CP.stageInfo = I;
     CP.stageFor = archive;
-    /* сказать один раз, а не каждые 45 секунд */
-    var sig = failed.join(',');
-    if (sig && sig !== CP.stageFailedSig) {
-      cbToast('Не прочиталась папка этапа: ' + failed.map(function (k) { return cpStageLabel(k); }).join(', ') + ' — показываю, что было, и попробую ещё раз');
-    }
-    CP.stageFailedSig = sig;
-    CP.stageFailed = failed;
     cpStageRecentApply();
     cpRenderShoots();
-    var cnt = typeof cpCountStageArts === 'function' ? cpCountStageArts() : null;
-    Promise.resolve(cnt).then(cpAfterStagesFlush, cpAfterStagesFlush);
-  });
+    return true;
+  };
+  var count = function (keys) {
+    return typeof cpCountStageArts === 'function' ? Promise.resolve(cpCountStageArts(keys)).catch(function (e) { if (window.console) console.warn('[CP] счёт артикулов', e); }) : Promise.resolve();
+  };
+  var all = Object.keys(CP_STAGE_SETTING), first = all.filter(function (k) { return k !== 'site'; }), last = all.filter(function (k) { return k === 'site'; });
+  return Promise.all(first.map(readKey)).then(function (pairs) {
+    if (!applyWave(pairs)) return;
+    /* счёт на 02/03/04 и чтение «Сайта» идут одновременно; «Сайт» начинает читаться, когда 02/03/04 уже на витрине */
+    var siteDone = Promise.all(last.map(readKey)).then(function (pairs2) {
+      if (!applyWave(pairs2)) return;
+      return count(last);
+    });
+    return Promise.all([count(first), siteDone]).then(function () {
+      if (CP.archive !== archive) return;
+      /* сказать один раз, а не каждые 45 секунд */
+      var sig = failed.join(',');
+      if (sig && sig !== CP.stageFailedSig) {
+        cbToast('Не прочиталась папка этапа: ' + failed.map(function (k) { return cpStageLabel(k); }).join(', ') + ' — показываю, что было, и попробую ещё раз');
+      }
+      CP.stageFailedSig = sig;
+      CP.stageFailed = failed;
+    });
+  }).then(cpAfterStagesFlush, function (e) { if (window.console) console.warn('[CP] этапы', e); cpAfterStagesFlush(); });
 }
 
 /* Что читать после этапов (Маша, 17.11.2026: «и архив читай последним»): 00_АРХИВ — только когда
@@ -508,7 +528,7 @@ cpRenderShoots = (function (orig) {
       var pend = all.some(function (d) { return !cpSumOf(d) && !d.cpSumDone; });
       /* папки этапов этой витрины ещё не дочитаны — не «пусто», а «читаю» (Маша, 17.11.2026: «после
          обновления страницы ретушь не показывает» — показывала через минуту) */
-      var reading = typeof CP_STAGE_SETTING !== 'undefined' && CP_STAGE_SETTING[f] && CP.stageFor !== CP.archive;
+      var reading = typeof CP_STAGE_SETTING !== 'undefined' && CP_STAGE_SETTING[f] && (CP.stageReadFor || {})[f] !== CP.archive;
       document.getElementById('cpShelfList').innerHTML = '<div class="cp-empty">' + (reading ? 'Читаю папку ' + cbEsc(cpStageLabel(f)) + ' с Диска… Первый раз после обновления страницы это до минуты.'
         : pend ? 'Считаю, что нужно сделать со съёмками…' : 'Таких съёмок нет') + '</div>';
     }
