@@ -304,12 +304,15 @@ cpLoadShoots = (function (orig) {
     var r = orig.apply(this, arguments);
     Promise.resolve(r).then(function () {
       var ready = typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : Promise.resolve();
-      ready.then(cpArchNamesLoad, function () { });
+      /* архив — последним, после папок этапов (cp-stages.js, cpAfterStages) */
+      ready.then(function () { if (typeof cpAfterStages === 'function' && cpCatalog()) cpAfterStages(cpArchNamesLoad); else cpArchNamesLoad(); }, function () { });
     });
     return r;
   };
 })(cpLoadShoots);
-document.getElementById('cpShelfRefresh').addEventListener('click', function () { setTimeout(cpArchNamesLoad, 50); });
+document.getElementById('cpShelfRefresh').addEventListener('click', function () {
+  if (typeof cpAfterStages === 'function' && cpCatalog()) cpAfterStages(cpArchNamesLoad); else setTimeout(cpArchNamesLoad, 50);
+});
 
 cpRenderShoots = (function (orig) {
   return function () {

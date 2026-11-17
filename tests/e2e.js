@@ -1968,18 +1968,27 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       const gt = await page.evaluate(async (k) => {
         const roles = [cpCatRoleOf('ГОТОВО', {}), cpCatRoleOf('04_ГОТОВО', {}), cpCatRoleOf('ПРОЧЕЕ', {})].join();
         const was = CP.settings.siteMore;
-        CP.settings.siteMore = [k + '/ГОТОВО'];
+        cpCatMerge(CP.settings);   /* 2.0.113: отдельная «ГОТОВО» в siteMore не попадает */
+        const more = (CP.settings.siteMore || []).join();
         cpSiteOldReset(); await cpScanStages(); await cpCountStageArts();
         const d = CP.shoots.find(s => s.name === '2026-11-06_SV_КАТ'), low = d.name.toLowerCase();
-        const out = [roles, Object.keys((CP.stageArts.site || {})[low] || {}).sort().join(), ((CP.stagePaths.site || {})[low] || []).length];
+        const out = [roles, Object.keys((CP.stageArts.site || {})[low] || {}).sort().join(), ((CP.stagePaths.site || {})[low] || []).length, more];
         if (was) CP.settings.siteMore = was; else delete CP.settings.siteMore;
         return out;
       }, K);
       [G1 + '/Y_1/74001_модель/g1.jpg', G2 + '/74002_модель/g2.jpg'].forEach(f => FILES.delete(f));
       [...DIRS].filter(d => d.indexOf(SITE + '/готово') === 0 || d.indexOf(K + '/ГОТОВО') === 0).forEach(d => DIRS.delete(d));
       await page.evaluate(async () => { cpSiteOldReset(); await cpScanStages(); await cpCountStageArts(); });
-      check('папки с датами в «готово» читаются: и внутри папки сайта, и отдельной папкой «ГОТОВО» рядом (без номера этапа она считается сданным)',
-        JSON.stringify(gt) === '["site,review,skip","74001,74002",2]', JSON.stringify(gt));
+      const aft = await page.evaluate(async () => {
+        let n = 0; cpAfterStages(() => n++);
+        const before = n;
+        await cpScanStages();
+        for (let i = 0; i < 50 && !n; i++) await new Promise(r => setTimeout(r, 50));
+        return [before, n, CP.afterStages.length];
+      });
+      check('2.0.113: архив читается последним — после того, как прочитаны папки этапов и артикулы на них', JSON.stringify(aft) === '[0,1,0]', JSON.stringify(aft));
+      check('2.0.113: «готово» с датами внутри папки сайта читается (74001); отдельная папка «ГОТОВО» в каталоге — нет (витрина её обходит)',
+        JSON.stringify(gt) === '["skip,review,skip","74001",1,""]', JSON.stringify(gt));
     }
     RID_GEN.delete(KRT + '/U_74002_модель/k2.jpg');
     FILES.delete(KSTATE); PROPS.delete(K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ');

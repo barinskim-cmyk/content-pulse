@@ -394,8 +394,22 @@ function cpScanStages() {
     CP.stageFailed = failed;
     cpStageRecentApply();
     cpRenderShoots();
-    if (typeof cpCountStageArts === 'function') cpCountStageArts();
+    var cnt = typeof cpCountStageArts === 'function' ? cpCountStageArts() : null;
+    Promise.resolve(cnt).then(cpAfterStagesFlush, cpAfterStagesFlush);
   });
+}
+
+/* Что читать после этапов (Маша, 17.11.2026: «и архив читай последним»): 00_АРХИВ — только когда
+   этапы и артикулы на них прочитаны, чтобы витрина быстрее доходила до ретуши. Не дождались за
+   полторы минуты (папок этапов нет, Диск не отвечает) — читаем всё равно. */
+CP.afterStages = [];
+function cpAfterStages(fn) {
+  CP.afterStages.push(fn);
+  setTimeout(function () { var i = CP.afterStages.indexOf(fn); if (i !== -1) { CP.afterStages.splice(i, 1); fn(); } }, CP.afterStagesMaxMs || 90000);
+}
+function cpAfterStagesFlush() {
+  var list = CP.afterStages.splice(0);
+  list.forEach(function (fn) { try { fn(); } catch (e) { if (window.console) console.error('[CP] после этапов', e); } });
 }
 
 /** В каких фильтрах съёмка; null — ещё не знаем (сводка считается). */
@@ -492,7 +506,11 @@ cpRenderShoots = (function (orig) {
     cpRenderStageBar();
     if (f && all && !all.some(function (d) { var st = cpStagesFor(d); return st && st[f]; })) {
       var pend = all.some(function (d) { return !cpSumOf(d) && !d.cpSumDone; });
-      document.getElementById('cpShelfList').innerHTML = '<div class="cp-empty">' + (pend ? 'Считаю, что нужно сделать со съёмками…' : 'Таких съёмок нет') + '</div>';
+      /* папки этапов этой витрины ещё не дочитаны — не «пусто», а «читаю» (Маша, 17.11.2026: «после
+         обновления страницы ретушь не показывает» — показывала через минуту) */
+      var reading = typeof CP_STAGE_SETTING !== 'undefined' && CP_STAGE_SETTING[f] && CP.stageFor !== CP.archive;
+      document.getElementById('cpShelfList').innerHTML = '<div class="cp-empty">' + (reading ? 'Читаю папку ' + cbEsc(cpStageLabel(f)) + ' с Диска… Первый раз после обновления страницы это до минуты.'
+        : pend ? 'Считаю, что нужно сделать со съёмками…' : 'Таких съёмок нет') + '</div>';
     }
     /* под названием съёмки — что в ней ждёт */
     var byPath = {};
