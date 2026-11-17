@@ -115,7 +115,7 @@ function cpBrakSend(groups, info) {
       mm.brak[x.pid] = x.path;
       okPid[x.pid] = true;
       /* был на ретуши — копия в 03 больше не нужна */
-      if (rtBase && was[x.pid] === 'retouch') trash.push(rtBase + '/' + relOf[x.pid]);
+      if (rtBase && was[x.pid] === 'retouch') trash.push(typeof cpRtLetteredPath === 'function' ? cpRtLetteredPath(rtBase + '/' + relOf[x.pid], shoot.path) : rtBase + '/' + relOf[x.pid]);
     });
     groups.forEach(function (g) {
       var card = g.cardId ? cbCardById(g.cardId) : null;

@@ -880,9 +880,12 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       && /сдано/.test(document.querySelector('[data-cp-ck="' + id + '"]').parentNode.textContent), ck[0]));
   }
   /* сдан 74595 — его папка в ретуши ушла в Корзину Диска, несданный 74596 остался */
-  for (let i = 0; i < 80 && !TRASHED.includes(RT + '1/74595_модель'); i++) await page.waitForTimeout(100);
-  check('артикул сдан — его папка в ретуши в Корзине Диска, несданный — на месте', TRASHED.includes(RT + '1/74595_модель') && !FILES.has(RT + '1/74595_модель/manekin.jpg')
-    && FILES.has(RT + '1/74596_модель/manekin2.jpg') && !TRASHED.some(p => /74596/.test(p)), JSON.stringify(TRASHED));
+  /* 2.0.111: обеим карточкам выше поставили букву Y — их папки в ретуши к этому времени «Y_74595_модель», «Y_74596_модель» */
+  for (let i = 0; i < 80 && !TRASHED.some(p => /\/1\/(Y_)?74595_модель$/.test(p)); i++) await page.waitForTimeout(100);
+  await page.waitForTimeout(300);
+  check('артикул сдан — его папка в ретуши в Корзине Диска (с буквой ретушёра или без — смотря, успела ли переименоваться), несданный — на месте под буквой Y_74596_модель',
+    TRASHED.some(p => /\/1\/(Y_)?74595_модель$/.test(p)) && !FILES.has(RT + '1/Y_74595_модель/manekin.jpg') && !FILES.has(RT + '1/74595_модель/manekin.jpg')
+    && FILES.has(RT + '1/Y_74596_модель/manekin2.jpg') && !TRASHED.some(p => /74596/.test(p)), JSON.stringify([TRASHED, [...DIRS].filter(d => d.indexOf(RT) === 0)]));
   check('сданное в ретушь не докопируется', await page.evaluate(() => { var done = cpDonePids(); var c = App.cards.find(x => x.title === '74595'); return cpCardPids(c).every(pid => done[pid]); }));
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-site.png') });
   await page.click('[data-cp-sr="close"]');
@@ -1211,6 +1214,49 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     await page.click('[data-cp-mr="clear"]');
     check('«Снять статусы без файлов»', await page.evaluate(id => !cpMeta().status[id], img));
     await page.click('[data-cp-mr="close"]');
+    /* 2.0.111: буква ретушёра ⇄ имя папки артикула в 03 (Маша, 17.11.2026) */
+    {
+      const mvDir = (from, to) => {
+        for (const d of [...DIRS]) if (d === from || d.indexOf(from + '/') === 0) { DIRS.delete(d); DIRS.add(to + d.slice(from.length)); }
+        for (const k of [...FILES.keys()]) if (k.indexOf(from + '/') === 0) { FILES.set(to + k.slice(from.length), FILES.get(k)); FILES.delete(k); }
+      };
+      const dirsNow = () => [...DIRS].filter(d => d.indexOf(RTS + '1/') === 0 && !/\/.+\//.test(d.slice((RTS + '1/').length))).map(d => d.slice((RTS + '1/').length)).sort().join();
+      const tags95 = () => page.evaluate(() => (App.cards.find(c => c.title === '74595').tags || []).filter(t => t === 'Y' || t === 'U').join());
+      const keep95 = await page.evaluate(() => { CP.rtPushMs = 30; return (App.cards.find(c => c.title === '74595').tags || []).slice(); });
+      await page.waitForTimeout(300);   /* сверка выше могла уже переименовать по старой букве карточки */
+      const at95 = () => [...DIRS].find(d => /\/(?:[YU]_)?74595_модель$/.test(d) && d.indexOf(RTS + '1/') === 0);
+      /* в программе: карточке 74595 — буква U */
+      await page.evaluate(() => { const c = App.cards.find(c => c.title === '74595'); c.tags = cpTagsWith((c.tags || []).filter(t => t !== 'Y' && t !== 'U'), 'U'); cbMarkDirty(); });
+      for (let i = 0; i < 60 && !DIRS.has(RTS + '1/U_74595_модель'); i++) await page.waitForTimeout(50);
+      check('2.0.111: букву U поставили на карточку в программе — папка в 03 переименована: U_74595_модель (файлы внутри на месте)',
+        DIRS.has(RTS + '1/U_74595_модель') && FILES.has(RTS + '1/U_74595_модель/manekin.jpg') && !DIRS.has(RTS + '1/74595_модель') && !DIRS.has(RTS + '1/Y_74595_модель'), dirsNow());
+      check('2.0.111: переименование — в журнале съёмки', await page.evaluate(() => cpMeta().events.some(e => e.action === 'retouch_letter' && /U_74595_модель/.test(e.note || ''))));
+      /* в программе букву сняли — у папки буква убирается */
+      await page.evaluate(() => { const c = App.cards.find(c => c.title === '74595'); c.tags = (c.tags || []).filter(t => t !== 'Y' && t !== 'U'); cbMarkDirty(); });
+      for (let i = 0; i < 60 && !DIRS.has(RTS + '1/74595_модель'); i++) await page.waitForTimeout(50);
+      check('2.0.111: букву сняли в программе — папка снова «74595_модель»', DIRS.has(RTS + '1/74595_модель') && !DIRS.has(RTS + '1/U_74595_модель'), dirsNow() + ' ' + await page.evaluate(() => JSON.stringify([cpMeta().events.filter(e => e.action === 'retouch_letter').map(e => e.note), cpMeta().rtLetter, (App.cards.find(c => c.title === '74595').tags || [])])));
+      /* на Диске руками: дописали букву Y — карточка получает тег Y */
+      mvDir(RTS + '1/74595_модель', RTS + '1/Y_74595_модель');
+      await page.evaluate(() => cpMirrorSync(true));
+      const byDisk = await tags95();
+      /* на Диске руками: букву стёрли — у карточки буквы нет */
+      mvDir(RTS + '1/Y_74595_модель', RTS + '1/74595_модель');
+      await page.evaluate(() => cpMirrorSync(true));
+      const cleared = await tags95();
+      await page.waitForTimeout(200);
+      check('2.0.111: на Диске дописали букву (Y_74595_модель) — карточка получила тег Y; стёрли — тег снят, папку программа не трогает',
+        byDisk === 'Y' && cleared === '' && DIRS.has(RTS + '1/74595_модель'), JSON.stringify([byDisk, cleared, dirsNow()]));
+      /* и там и там сразу (U в программе, Y на Диске) — побеждает Диск */
+      await page.evaluate(() => { CP.rtPushMs = 100000; const c = App.cards.find(c => c.title === '74595'); c.tags = cpTagsWith(c.tags || [], 'U'); });
+      mvDir(RTS + '1/74595_модель', RTS + '1/Y_74595_модель');
+      await page.evaluate(() => cpMirrorSync(true));
+      await page.waitForTimeout(200);
+      check('2.0.111: поменяли и в программе (U), и на Диске (Y) — побеждает Диск: карточка Y, папка Y_74595_модель', await tags95() === 'Y' && DIRS.has(RTS + '1/Y_74595_модель'), JSON.stringify([await tags95(), dirsNow()]));
+      /* вернуть как было */
+      await page.evaluate(k => { clearTimeout(cpRtPushTimer); CP.rtDirs = null; delete cpMeta().rtLetter; CP.rtPushMs = 0; App.cards.find(c => c.title === '74595').tags = k; }, keep95);
+      mvDir(RTS + '1/Y_74595_модель', RTS + '1/74595_модель');
+      if (DIRS.has(RTS + '1/U_74596_модель') === false && DIRS.has(RTS + '1/74596_модель')) mvDir(RTS + '1/74596_модель', RTS + '1/U_74596_модель');
+    }
     /* файл появился на этапе — статус ставится сам */
     DIRS.add(APS + '/1');
     FILES.set(APS + '/1/IMG_0101.jpg', Buffer.from('I'.repeat(40)));
@@ -1715,6 +1761,9 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     check('скачали — в отборе съёмки запись: кто (буква U), когда, какой архив; в журнале — событие', rec.l === 'U' && rec.n === 1 && !!rec.ts && /03_РЕТУШЬ_U\+Y_/.test(rec.export || '') && !!rec.rid
       && evDl.letter === 'U' && evDl.count === 1 && /74001/.test(evDl.card || ''), JSON.stringify([rec, evDl]));
     check('забрал другой ретушёр — буква карточки сменилась: была Y, стала U (в журнале — «сменили ретушёра»)', JSON.stringify(ks.cards[0].tags) === '["U"]' && /сменили ретушёра: 74001 \(Y → U\)/.test(evDl.note || ''), JSON.stringify([ks.cards[0].tags, evDl.note]));
+    for (let i = 0; i < 40 && !DIRS.has(KRT + '/U_74001_модель'); i++) await page.waitForTimeout(50);
+    check('2.0.111: забрал U из папки «Y_74001_модель» — папка артикула в 03 переименована под букву: U_74001_модель', DIRS.has(KRT + '/U_74001_модель') && !DIRS.has(KRT + '/Y_74001_модель')
+      && FILES.has(KRT + '/U_74001_модель/k1.jpg'), JSON.stringify([...DIRS].filter(d => d.indexOf(KRT) === 0)));
     await page.waitForFunction(() => /скачано: U/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => {});
     pan = await page.textContent('#cpPanel');
     sb = await stBtn();
@@ -1733,13 +1782,15 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     check('скачала как U остальное — в архиве только 74002_модель/k2.jpg; в списке пусто: «Забирать нечего», скрыто 2', z2.length === 1 && /74002_модель\/k2\.jpg$/.test(z2[0])
       && /Забирать нечего/.test(pan) && /Можно забрать: 0/.test(pan) && /уже скачано или сдано \(скрыто\): 2/.test(pan) && (await stBtn())[1], JSON.stringify(z2) + ' ' + pan.slice(0, 400));
     /* копию убрали из папки ретуши и положили заново (тот же путь, другой файл) — она снова не скачана */
-    RID_GEN.set(KRT + '/74002_модель/k2.jpg', 1);
+    check('2.0.111: скачала как U «74002_модель» — в 03 стала «U_74002_модель»', DIRS.has(KRT + '/U_74002_модель') && !DIRS.has(KRT + '/74002_модель'), JSON.stringify([...DIRS].filter(d => d.indexOf(KRT) === 0)));
+    RID_GEN.set(KRT + '/U_74002_модель/k2.jpg', 1);
     await page.click('[data-cp-p="close"]');
     await page.click('#cpShelfList .cp-shoot[data-name="2026-11-06_SV_КАТ"]');
-    await page.waitForFunction(() => /Можно забрать: 1/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
+    await page.waitForFunction(() => /Можно забрать: 0/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
     pan = await page.textContent('#cpPanel');
-    check('файл в папке ретуши заменили новой копией — он снова в списке «можно забрать», буква не запомнена (отметить заново)', /Можно забрать: 1/.test(pan) && /74002_модель/.test(pan)
-      && await page.evaluate(() => !document.querySelector('#cpPanel [data-cp-swho].cp-on') && document.querySelector('[data-cp-stdl]').disabled), pan.slice(0, 400));
+    /* 2.0.111: папка подписана буквой (U_74002_модель) — новая копия в ней тоже за U; запись «скачано» о прежней копии не действует */
+    check('файл в папке ретуши заменили новой копией: папка подписана буквой U — копия за U («можно забрать» 0), буква в панели не запомнена',
+      /Можно забрать: 0/.test(pan) && await page.evaluate(() => !document.querySelector('#cpPanel [data-cp-swho].cp-on') && document.querySelector('[data-cp-stdl]').disabled), pan.slice(0, 400));
     /* 2.0.96: сданное из ретуши отфильтровывается — в строке съёмки, в фильтре и в списке «можно забрать» */
     const ph = await page.evaluate(() => {
       const d = CP.shoots.find(s => s.name === '2026-11-06_SV_КАТ'), low = d.name.toLowerCase();
@@ -1854,12 +1905,12 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         let cdlg = '';
         page.once('dialog', d => { cdlg = d.message(); d.accept(); });
         await page.evaluate(() => document.querySelector('[data-cp-rt-clean]').click());
-        for (let i = 0; i < 40 && DIRS.has(K + '/03_РЕТУШЬ/' + SH + '/74002_модель'); i++) await page.waitForTimeout(100);
+        for (let i = 0; i < 40 && DIRS.has(K + '/03_РЕТУШЬ/' + SH + '/U_74002_модель'); i++) await page.waitForTimeout(100);
         const rtAfter = [...DIRS].filter(d => d.indexOf(K + '/03_РЕТУШЬ/' + SH + '/') === 0).map(d => d.split('/').pop()).sort();
         await page.evaluate(() => { CP.stageFilter = ''; CP.siteFreshDates = 2; cpRenderShoots(); });
         check('«убрать из ретуши» по кнопке: папки артикулов, которые есть на сайте, уходят в Корзину; папка съёмки и прочее — на месте',
-          /уже есть на сайте: 2/.test(note) && /74001, 74002/.test(cdlg) && rtBefore.includes('Y_74001_модель') && rtBefore.includes('74002_модель')
-          && !rtAfter.includes('Y_74001_модель') && !rtAfter.includes('74002_модель') && DIRS.has(K + '/03_РЕТУШЬ/' + SH), JSON.stringify([note, rtBefore, rtAfter]));
+          /уже есть на сайте: 2/.test(note) && /74001, 74002/.test(cdlg) && rtBefore.includes('U_74001_модель') && rtBefore.includes('U_74002_модель')   /* 2.0.111: забрал U — папки под его букву */
+          && !rtAfter.includes('U_74001_модель') && !rtAfter.includes('U_74002_модель') && DIRS.has(K + '/03_РЕТУШЬ/' + SH), JSON.stringify([note, rtBefore, rtAfter]));
         [K + '/03_РЕТУШЬ/' + SH + '/Y_74001_модель', K + '/03_РЕТУШЬ/' + SH + '/74002_модель'].forEach(d => DIRS.add(d));
         FILES.set(K + '/03_РЕТУШЬ/' + SH + '/Y_74001_модель/k1.jpg', Buffer.from('K'.repeat(60))); FILES.set(K + '/03_РЕТУШЬ/' + SH + '/74002_модель/k2.jpg', Buffer.from('K'.repeat(60)));
       }
@@ -1912,7 +1963,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       check('папки с датами в «готово» читаются: и внутри папки сайта, и отдельной папкой «ГОТОВО» рядом (без номера этапа она считается сданным)',
         JSON.stringify(gt) === '["site,review,skip","74001,74002",2]', JSON.stringify(gt));
     }
-    RID_GEN.delete(KRT + '/74002_модель/k2.jpg');
+    RID_GEN.delete(KRT + '/U_74002_модель/k2.jpg');
     FILES.delete(KSTATE); PROPS.delete(K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ');
     await page.click('[data-cp-p="close"]');
     /* 02_ОТБОР (Маша, 09.11): «только отбор» или «все файлы съёмки», с видео / без видео */
@@ -2774,18 +2825,18 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         CP.dict = cpParseDict('[Ретушёры: один]\nY\nU');
         const card = App.cards.find(c => c.title === '81003'), p = cbPhotoById(cpCardPids(card)[0]);
         const rs = [{ stage: { key: 'retouch', label: 'Ретушь' }, found: [{ path: 'disk:/R/съёмка', files: [{ path: 'disk:/R/съёмка/brand/Y_81003_c/' + p.name, name: p.name, size: 5, resource_id: 'u:aaaaaaaaaaaaaaaa1111111111111111' }] }] }];
-        card.tags = [];
+        card.tags = []; delete cpMeta().rtLetter;
         cpMirrorApply(rs, ['Y', 'U']);
         const byFolder = card.tags.join();
-        card.tags = [];
+        card.tags = []; delete cpMeta().rtLetter;
         cpMeta().rtdl = { ['brand/81003_c/' + p.name.toLowerCase()]: { l: 'U', by: 'тест', ts: new Date().toISOString(), export: 'x', n: 1, rid: '1111111111111111' } };
         cpMirrorApply(rs, ['Y', 'U']);
         const byRecord = card.tags.join();
-        card.tags = [];
+        card.tags = []; delete cpMeta().rtLetter;
         cpMeta().rtdl['brand/81003_c/' + p.name.toLowerCase()].rid = '2222222222222222';   /* запись о прежней копии файла */
         cpMirrorApply(rs, ['Y', 'U']);
         const stale = card.tags.join();
-        delete cpMeta().rtdl; card.tags = [];
+        delete cpMeta().rtdl; delete cpMeta().rtLetter; card.tags = []; CP.rtDirs = null;
         CP.dict = dictWas; CP.dictGroups = groupsWas;
         return [byFolder, byRecord, stale, cpStageKey('1/Y_74595_модель/A.JPG', ['Y']).key, cpStageKey('1/74595_модель_доработка/A.JPG', ['Y']).key];
       });
@@ -3073,7 +3124,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         const c1 = App.cards.find(x => x.title === '81001'), c3 = App.cards.find(x => x.title === '81003'), m = cpMeta();
         const keep = { cs1: m.cardStatus[c1.id], cs3: m.cardStatus[c3.id], d1: (m.delivered || {})[c1.id], d3: (m.delivered || {})[c3.id], t1: c1.tags, t3: c3.tags };
         delete m.cardStatus[c1.id]; delete m.cardStatus[c3.id]; if (m.delivered) { delete m.delivered[c1.id]; delete m.delivered[c3.id]; }
-        c1.tags = []; c3.tags = [];
+        c1.tags = []; c3.tags = []; delete m.rtLetter;
         const rs = [
           { stage: { key: 'retouch', label: 'Ретушь' }, found: [{ path: 'disk:/R/s', files: [{ path: 'disk:/R/s/brand/Y_81003_c/ретушь_001.jpg', name: 'ретушь_001.jpg', size: 5 }] }] },
           { stage: { key: 'site', label: 'Сайт' }, found: [{ path: 'disk:/S/02.11.26/Y/1/s', files: [{ path: 'disk:/S/02.11.26/Y/1/s/Y_1/81001_1.jpg', name: '81001_1.jpg', size: 5 }] }] }];
@@ -3081,6 +3132,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         const out = [(m.cardStatus[c3.id] || {}).s, c3.tags.join(), (m.cardStatus[c1.id] || {}).s, !!(m.delivered || {})[c1.id], ((m.delivered || {})[c1.id] || {}).files];
         m.cardStatus[c1.id] = keep.cs1; m.cardStatus[c3.id] = keep.cs3; if (!keep.cs1) delete m.cardStatus[c1.id]; if (!keep.cs3) delete m.cardStatus[c3.id];
         if (m.delivered) { if (keep.d1) m.delivered[c1.id] = keep.d1; else delete m.delivered[c1.id]; if (keep.d3) m.delivered[c3.id] = keep.d3; else delete m.delivered[c3.id]; }
+        CP.rtDirs = null; delete m.rtLetter;
         c1.tags = keep.t1; c3.tags = keep.t3; cbRenderCards();
         return out;
       });

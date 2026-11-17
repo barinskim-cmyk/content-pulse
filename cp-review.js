@@ -1232,15 +1232,48 @@ function cpStageMarkTaken(sel, files, who, name, r) {
     cpShelfEvent(d, 'download_retouch', { export: name, count: (r && r.files) || files.length, parts: r && r.parts ? r.parts.length : undefined,
       card: titles.length ? titles.join(', ') : undefined, letter: who || undefined, note: note.join(' · ') || undefined });
   }).then(function () {
-    if (CP.sel !== sel) return;
-    sel.againTaken = false;
-    cpStageTagIndex(sel);
-    cpRenderPanel();
-    cbToast('Скачано из папки ретуши: файлов ' + files.length + (who ? ' — отмечено за ' + who : '') + '. В списке осталось то, что ещё не забрали.');
+    /* буква ретушёра — и в имени папки артикула в 03 (K_23466…), чтобы на Диске было видно, кто забрал */
+    return (who ? cpRtRenameTaken(sel, files, who) : Promise.resolve(null)).then(function (rn) {
+      if (CP.sel !== sel) return;
+      sel.againTaken = false;
+      /* пути в 03 поменялись — поправить их в панели на месте (выбранная буква и галки остаются) */
+      if (rn && rn.ok.length) rn.ok.forEach(function (x) {
+        (sel.stageFiles || []).forEach(function (g) {
+          g.files.forEach(function (f) { if (f.path.indexOf(x.from + '/') === 0) f.path = x.to + f.path.slice(x.from.length); });
+          (g.dirs || []).forEach(function (d, i) {
+            if (typeof d === 'string') { if (d === x.from || d.indexOf(x.from + '/') === 0) g.dirs[i] = x.to + d.slice(x.from.length); }
+            else if (d && d.path && (d.path === x.from || d.path.indexOf(x.from + '/') === 0)) { d.path = x.to + d.path.slice(x.from.length); if (d.path === x.to) d.name = x.to.split('/').pop(); }
+          });
+        });
+      });
+      cpStageTagIndex(sel);
+      cpRenderPanel();
+      cbToast('Скачано из папки ретуши: файлов ' + files.length + (who ? ' — отмечено за ' + who : '') + '. В списке осталось то, что ещё не забрали.'
+        + (rn && rn.bad.length ? ' Папки в ретуши не переименованы под букву: ' + rn.bad.length + '.' : ''));
+    });
   }, function (e) {
     if (window.console) console.error('[CP] отметка «скачано» не записалась', e && (e.body || e.message || e));
     cbToast('Архив собран, но отметка «скачано' + (who ? ' (' + who + ')' : '') + '» не записалась в отбор съёмки — другим эти файлы всё ещё видны как не забранные.');
   });
+}
+
+/** Скачали из панели ретуши: папки артикулов этих файлов в 03 — под букву ретушёра (K_23466…). */
+function cpRtRenameTaken(sel, files, who) {
+  var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  if (!who || letters.indexOf(who) === -1 || typeof cpRtArtDir !== 'function') return Promise.resolve(null);
+  var stype = typeof cpShootType === 'function' ? cpShootType(sel.name) : null, seen = {}, list = [];
+  files.forEach(function (f) {
+    var x = (sel.stageFiles || []).filter(function (g) { return f.path.indexOf(g.root + '/') === 0; })[0];
+    var d = x ? cpRtArtDir(x.root, f.path, letters, stype) : null;
+    if (!d || d.letter === who || seen[d.path]) return;
+    seen[d.path] = true;
+    list.push({ code: d.code, from: d.path, to: cpRtDirTarget(d, who), letter: who });
+  });
+  if (!list.length) return Promise.resolve(null);
+  return cpRtMove(list).then(function (r) {
+    if (r.bad.length && window.console) console.warn('[CP] буква ретушёра: папки в 03 не переименованы', r.bad);
+    return r;
+  }, function (e) { if (window.console) console.warn('[CP] буква ретушёра', e); return null; });
 }
 
 /* ---------- витрина, фильтр «отретушировано»: перетащить папку как на Диск ---------- */
