@@ -777,7 +777,15 @@ function cpStageKey(rel, letters) {
 function cpRidShort(f) { var r = String((f && f.resource_id) || ''); return r ? r.slice(-16) : ''; }
 
 /** Файл папки ретуши уже скачан (запись в отборе) или забран (буква в имени папки). */
-function cpStageTaken(sel, f) { return sel.stage === 'retouch' && !!f.cpTook; }
+/* Буква в имени папки (Y_74595_модель) — с 2.0.111 это «назначено ретушёру», программа сама подписывает
+   папку, когда карточке ставят букву. Скачанным это не считается: такая папка видна всем, пока буква
+   не выбрана, и своему ретушёру; прячется только у другого ретушёра. Скачанное — по записи «скачано». */
+function cpStageTook(sel, f) {
+  var tk = f.cpTook;
+  if (tk && tk.folder && (!sel.who || tk.l === sel.who)) return f.cpDone ? { l: '', done: true } : null;   /* сданное (дошло до 04 / сайта) прячем всегда */
+  return tk || null;
+}
+function cpStageTaken(sel, f) { return sel.stage === 'retouch' && !!cpStageTook(sel, f); }
 /** Виден в панели: скачанное из папки ретуши прячем, пока не отмечено «показать скачанное». */
 function cpStageShown(sel, f) { return !cpStageTaken(sel, f) || !!sel.showTaken; }
 
@@ -933,7 +941,7 @@ function cpStageWhoChips(sel, taken) {
     h += '<div class="cp-note cp-warn">Букв ретушёров нет в словаре тегов (группа «[Ретушёры: один]») — скачивание не подписывается буквой.</div>';
   }
   if (taken) {
-    h += '<div class="cp-fchips"><label class="cp-stg-ck" title="Что уже скачали, забрали (буква в имени папки) или сдали (ретушь уже в отретушированном или на сайте). По умолчанию скрыто, чтобы было видно только то, что ещё можно забрать">'
+    h += '<div class="cp-fchips"><label class="cp-stg-ck" title="Что уже скачали, что назначено другому ретушёру (его буква в имени папки) или сдали (ретушь уже в отретушированном или на сайте). По умолчанию скрыто, чтобы было видно только то, что ещё можно забрать">'
       + '<input type="checkbox" data-cp-staken="1"' + (sel.showTaken ? ' checked' : '') + '> показать скачанное и сданное <small>' + taken + '</small></label></div>';
   }
   return h;
@@ -1073,7 +1081,7 @@ function cpStageTree(sel) {
     x.files.forEach(function (f) {
       if (f.name === CPDisk.STATE_FILE) return;
       var rel = f.path.indexOf(x.root + '/') === 0 ? f.path.slice(x.root.length + 1) : f.name;
-      var tk = rt ? f.cpTook : null, hide = !!tk && !sel.showTaken;
+      var tk = rt ? cpStageTook(sel, f) : null, hide = !!tk && !sel.showTaken;
       if (tk) taken++;
       var dir = hide ? (pre ? pre + (cpParentDir(rel) ? '/' + cpParentDir(rel) : '') : cpParentDir(rel)) : (add(cpParentDir(rel)) || '');
       if (!hide) { nFiles++; bytes += f.size || 0; }
@@ -1197,7 +1205,7 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
 function cpStageMarkTaken(sel, files, who, name, r) {
   var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
   var actor = cpActor(), now = new Date().toISOString();
-  var again = files.filter(function (f) { return f.cpTook; }).length;
+  var again = files.filter(function (f) { return cpStageTook(sel, f); }).length;
   /* записи о файлах, которых в папке ретуши давно нет (старше 30 дней), убираем — чтобы отбор не рос */
   var live = {}, whole = !(sel.stageFiles || []).some(function (x) { return x.error; });
   (sel.stageFiles || []).forEach(function (x) { x.files.forEach(function (f) { if (f.cpKey) live[f.cpKey] = true; }); });
