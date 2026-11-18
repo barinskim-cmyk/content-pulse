@@ -1104,10 +1104,13 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     [RT3, RT3 + '/1', RT3 + '/1/74596_модель'].forEach(d => DIRS.add(d));
     FILES.set(RT3 + '/1/74596_модель/manekin2.jpg', Buffer.from('Q'.repeat(140)));
     await page.click('[data-cp-rv="' + ids.b + '"] [data-cp-rva="approve"]');
-    const siteB = ST + '/' + today + '/' + SN + '/74596/manekin2.tif';
+    /* 2.0.116: сайт / ДД.ММ.ГГ / буква того, кто сдал / съёмка / лук / артикул — структура исходников */
+    const sday = (() => { const d = new Date(), z = n => (n < 10 ? '0' : '') + n; return z(d.getDate()) + '.' + z(d.getMonth() + 1) + '.' + String(d.getFullYear()).slice(2); })();
+    const lB = await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].letter, ids.b);
+    const siteB = ST + '/' + sday + '/' + lB + '/' + SN + '/1/74596_модель/manekin2.tif';
     for (let i = 0; i < 60 && !FILES.has(siteB); i++) await page.waitForTimeout(100);
     await page.waitForFunction(i => cpMeta().rv[i].slice(-1)[0].status === 'approved', ids.b, { timeout: 5000 }).catch(() => {});
-    check('«На сайт»: папка артикула переехала в 05/<дата>/<съёмка>/<артикул>, в 04 её больше нет', FILES.has(siteB) && !inRv('manekin2.tif').length
+    check('«На сайт»: папка артикула переехала в 05/<ДД.ММ.ГГ>/<буква>/<съёмка>/<лук>/<артикул>, в 04 её больше нет', !!lB && FILES.has(siteB) && !inRv('manekin2.tif').length
       && await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].status === 'approved' && !!cpMeta().delivered[i], ids.b), JSON.stringify([...FILES.keys()].filter(k => /Этапы/.test(k))));
     for (let i = 0; i < 60 && FILES.has(RT3 + '/1/74596_модель/manekin2.jpg'); i++) await page.waitForTimeout(100);
     check('«На сайт» — копия артикула в 03_РЕТУШЬ сразу в Корзине (и при второй карточке того же артикула)', !FILES.has(RT3 + '/1/74596_модель/manekin2.jpg') && TRASHED.some(p => p.indexOf(RT3) === 0), JSON.stringify(TRASHED.slice(-3)));
@@ -1172,7 +1175,8 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     FAIL_MOVE = null;
     for (let i = 0; i < 80 && !TRASHED.includes(RV + '/' + SN); i++) await page.waitForTimeout(100);
     check('очередь перенесла — теперь «на сайте» и сдано', await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].status === 'approved' && !!cpMeta().delivered[i] && !cpqCount(), ids.a));
-    check('всё на сайте — папка съёмки в 04 опустела и ушла в Корзину', FILES.has(ST + '/' + today + '/' + SN + '/74595/manekin.tif') && TRASHED.includes(RV + '/' + SN), JSON.stringify(TRASHED.slice(-4)));
+    const lA = await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].letter, ids.a);
+    check('всё на сайте — папка съёмки в 04 опустела и ушла в Корзину', FILES.has(ST + '/' + sday + '/' + lA + '/' + SN + '/1/74595_модель/manekin.tif') && TRASHED.includes(RV + '/' + SN), JSON.stringify(TRASHED.slice(-4)));
     for (let i = 0; i < 40 && !/принято[\s\S]*принято/.test((FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString()); i++) await page.waitForTimeout(100);
     const out = (FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString();
     check('выработка: таблица в служебной папке — сдано ×4, доработка, в карточку, принято ×2, с буквой и датой', /^\uFEFFдата;время;ретушёр/.test(out) && (out.match(/;сдано;/g) || []).length === 4
@@ -2107,6 +2111,16 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       keepSvc.forEach(([k, v]) => { if (v) FILES.set(k, v); else FILES.delete(k); });
       check('2.0.115: вкладку открыли заново в каталоге — настройки, словарь тегов и структура прочитаны из служебной папки каталога (первой читается она)',
         boot.sd === SV && boot.st && boot.letters === 'Y,U,K' && boot.rules > 0 && svc.length > 0 && svc[0].endsWith(SV), JSON.stringify([boot, svc.slice(0, 3)]));
+      /* 2.0.116: структура папок (бренд/артикул) — в 04 и на сайте (Маша, 18.11.2026) */
+      const struct = await page.evaluate(() => {
+        const sh = { path: 'disk:/КАТАЛОГ/01_ИСХОДНИКИ/2026-11-10_N_ПРЕДМЕТКА', name: '2026-11-10_N_ПРЕДМЕТКА' };
+        const data = { photos: [{ id: 'q1', disk: sh.path + '/zarina/77110_сумка/a.jpg' }, { id: 'q2', disk: sh.path + '/zarina/77110_сумка/b.jpg' }, { id: 'q3', disk: sh.path + '/befree/77111_сумка/c.jpg' }] };
+        const one = { id: 'k1', title: '77110', mode: 'auto', pids: ['q1', 'q2'] }, two = { id: 'k2', title: 'микс', mode: 'auto', pids: ['q1', 'q3'] };
+        return [cpRvDirFor(one, 0, data, sh), cpRvDirFor(two, 1, data, sh), cpRvDirFor({ id: 'k3', title: '77112', cpArticleDir: 'befree/77112_сумка' }, 2, data, sh),
+          cpSiteShootDir('disk:/КАТАЛОГ/05_САЙТ/18.11.2026/' + sh.name + '/zarina/77110_сумка', sh.name)];
+      });
+      check('2.0.116: карточка, собранная руками, — в 04 и на сайт папкой своего артикула со структурой: zarina/77110_сумка; кадры из двух артикулов — по названию; папка съёмки на сайте находится по папке карточки',
+        JSON.stringify(struct) === JSON.stringify(['zarina/77110_сумка', '02 микс', 'befree/77112_сумка', 'disk:/КАТАЛОГ/05_САЙТ/18.11.2026/2026-11-10_N_ПРЕДМЕТКА']), JSON.stringify(struct));
       /* убрать за собой */
       for (const d of [...DIRS]) if (d === BS || d.indexOf(BS + '/') === 0 || d === BR || d.indexOf(BR + '/') === 0) DIRS.delete(d);
       for (const k of [...FILES.keys()]) if (k.indexOf(BS + '/') === 0 || k.indexOf(BR + '/') === 0) FILES.delete(k);

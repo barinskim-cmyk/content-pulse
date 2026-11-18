@@ -323,7 +323,9 @@ function cpSiteMarkDownloaded(datePath, dirs) {
 /** В «Сайт» приехало новое («На сайт»): старая метка у папки съёмки (2.0.72) снимается, дата перечитывается. */
 function cpSiteMarkNew(paths) {
   paths.forEach(function (p) {
+    /* папка даты — ближайшая сверху с датой в имени (между ней и съёмкой бывает буква ретушёра) */
     var date = cpParentDir(p);
+    for (var up = date; up && up.indexOf('/') !== -1; up = cpParentDir(up)) if (cpSiteDateName(up.split('/').pop())) { date = up; break; }
     delete CP.siteScan[date];
     CP.siteDatesAt = 0;
   });

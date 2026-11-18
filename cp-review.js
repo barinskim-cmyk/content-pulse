@@ -31,9 +31,36 @@ var CP_OUTPUT_HEAD = CP_OUTPUT_HEAD_OLD + ';способ';   /* способ —
 function cpReviewRoot() { return (CP.settings && CP.settings.retouched) || ''; }
 
 /** Папка карточки в 04: как папка артикула в исходниках, иначе как в выгрузке. */
-function cpRvDirFor(card, idx) {
-  if (card && card.cpArticleDir) return card.cpArticleDir.split('/').map(CPDisk.safeName).join('/');
+/* Папка карточки в 04 и на сайте — та же, что у её артикула в исходниках, со всей структурой: бренд/артикул
+   (предметка, оптика), лук/артикул (модельная). Маша, 18.11.2026: «при загрузке просто поартикульно он теряет
+   структуру папок типа бренда; важно, чтобы при сдаче на сайт сохранялась структура: бренд, внутри бренда
+   артикул». Карточка, собранная руками, свою папку не помнит (cpArticleDir) — папка находится по её кадрам:
+   все кадры из одной папки артикула — значит, эта. Иначе — как раньше, по названию карточки.
+   data/shoot — отбор и съёмка, когда карточка не из открытой съёмки (окно «Сдать» с витрины). */
+function cpRvDirFor(card, idx, data, shoot) {
+  var dir = card && (card.cpArticleDir || cpCardArtDirByPhotos(card, data, shoot));
+  if (dir) return dir.split('/').map(CPDisk.safeName).join('/');
   return CPDisk.safeName(cpCardExportFolder(card || { title: 'Карточка' }, idx < 0 ? 0 : idx));
+}
+
+/** Папка артикула карточки (путь внутри съёмки) по её кадрам; '' — кадры из разных папок или артикула нет. */
+function cpCardArtDirByPhotos(card, data, shoot) {
+  shoot = shoot || CP.shoot;
+  if (!card || !shoot || typeof cpShootType !== 'function' || typeof cpFacets !== 'function') return '';
+  var type = cpShootType(shoot.name);
+  if (!type || type.roles.indexOf('артикул') === -1) return '';
+  var byId = {};
+  ((data && data.photos) || (CP.shoot && CP.shoot.path === shoot.path ? App.photos : []) || []).forEach(function (p) { byId[p.id] = p; });
+  var root = String(shoot.path).replace(/\/+$/, '') + '/', dirs = {};
+  var pids = card.mode === 'auto' ? (card.pids || []) : (card.slots || []).map(function (x) { return x.pid; }).filter(Boolean);
+  pids.forEach(function (pid) {
+    var p = byId[pid];
+    if (!p || !p.disk || p.disk.indexOf(root) !== 0 || (p.kind || 'photo') === 'ref') return;
+    var f = cpFacets(type, p.disk.slice(root.length));
+    dirs[f.code && f.articlePath ? f.articlePath : '?'] = true;
+  });
+  var list = Object.keys(dirs);
+  return list.length === 1 && list[0] !== '?' ? list[0] : '';
 }
 
 function cpParentDir(p) { return String(p || '').slice(0, String(p || '').lastIndexOf('/')); }
@@ -84,7 +111,7 @@ cpAcceptUpload = function () {
   Object.keys(plan.groups).forEach(function (id) {
     var idx = -1;
     cards.forEach(function (c, i) { if (c.id === id) idx = i; });
-    var dir = base + '/' + cpRvDirFor(cards[idx], idx);
+    var dir = base + '/' + cpRvDirFor(cards[idx], idx, st.data, { path: st.path, name: st.name });
     dirOf[id] = dir;
     dirs[dir] = true;
     var used = {};
@@ -275,6 +302,7 @@ cpRvApprove = function (ids, via) {
   if (!root) { if (cpCatStageMissing('retouched')) return; return cpRvApproveLegacy(ids, via); }
   if (!site) { cbToast('Нет папки сайта в каталоге: шестерёнка на витрине'); return; }
   var rv = cpRv(), shoot = CP.shoot, todo = [], skip = [];
+  var base = root.replace(/\/+$/, '') + '/' + CPDisk.safeName(shoot.name);
   ids.forEach(function (id) {
     var last = cpLastRv(rv[id]);
     if (!last || last.status !== 'review' || !cpRvDirOf(last) || cpRvHasReworkMarks(last)) {
@@ -285,13 +313,19 @@ cpRvApprove = function (ids, via) {
         : cpRvHasReworkMarks(last) ? 'в просмотре есть кадры «на доработку» — завершите просмотр или снимите отметки' : 'нет папки версии в 04'));
       return;
     }
-    var card = cbCardById(id), idx = App.cards.indexOf(card);
-    var to = site.replace(/\/+$/, '') + '/' + cpToday() + '/' + CPDisk.safeName(shoot.name) + '/' + CPDisk.safeName(cpCardExportFolder(card || { title: id }, idx < 0 ? 0 : idx));
-    todo.push({ id: id, last: last, from: cpRvDirOf(last), to: to, card: card });
+    var card = cbCardById(id), idx = App.cards.indexOf(card), from = cpRvDirOf(last);
+    /* На сайт (Маша, 18.11.2026): «папка с датой вида ДД.ММ.ГГ, дальше буква ретушёра, который сдал, дальше
+       папка съёмки, внутри неё папка бренда (или лука в каталоге), если она есть, и только потом папка
+       артикула — всё, что над артикулом в исходниках, сохраняется». Структура берётся из 04 (она там та же,
+       что в исходниках); буква — того, кто сдал эту версию ретуши. */
+    var rel = from.indexOf(base + '/') === 0 ? from.slice(base.length + 1) : cpRvDirFor(card || { title: id }, idx);
+    rel = rel.split('/').map(function (sg) { return sg.replace(/_доработка$/i, ''); }).join('/');
+    var who = last.letter || (card && typeof cpCardLetter === 'function' ? cpCardLetter(card) : '');
+    var to = site.replace(/\/+$/, '') + '/' + cpSiteDay() + (who ? '/' + CPDisk.safeName(who) : '') + '/' + CPDisk.safeName(shoot.name) + '/' + rel;
+    todo.push({ id: id, last: last, from: from, to: to, card: card });
   });
   if (skip.length) cbToast('Не отправлено на сайт: ' + skip.join('; '));
   if (!todo.length) return;
-  var base = root.replace(/\/+$/, '') + '/' + CPDisk.safeName(shoot.name);
   var who = cpActor(), now = new Date().toISOString(), rows = [], moved = [], queued = [];
   cbBusyShow('Отправляю на сайт...', 0.3);
   /* каждая карточка — отдельно: одна не перенеслась — остальные всё равно получают статус,
@@ -317,8 +351,8 @@ cpRvApprove = function (ids, via) {
     if (moved.length) {
       var mids = moved.map(function (t) { return t.id; });
       cpEvent('rt_approve', [], { card: moved.map(function (t) { return t.card ? t.card.title : t.id; }).join(', '), via: cpRvViaKeys(via, mids),
-        note: 'на сайт: ' + CPDisk.showPath(cpParentDir(moved[0].to)) + cpRvViaNote(via, mids) });
-      cbToast('На сайт: карточек ' + moved.length + ' → ' + CPDisk.showPath(cpParentDir(moved[0].to))
+        note: 'на сайт: ' + CPDisk.showPath(cpSiteShootDir(moved[0].to, shoot.name)) + cpRvViaNote(via, mids) });
+      cbToast('На сайт: карточек ' + moved.length + ' → ' + CPDisk.showPath(cpSiteShootDir(moved[0].to, shoot.name))
         + (queued.length ? '. Не перенеслись сразу: ' + queued.length + ' — переношу повторно (плашка сверху)' : ''));
     } else if (queued.length) cbToast('Не перенеслось сразу: ' + queued.length + ' — переношу повторно, не закрывайте страницу (плашка сверху)');
     cbRenderCards();
@@ -326,7 +360,7 @@ cpRvApprove = function (ids, via) {
     if (!moved.length) return;
     /* в «Сайте» новое: съёмка сразу в его фильтре, у папки даты — снова «не скачано» */
     var siteDirs = [];
-    moved.forEach(function (t) { var d = cpParentDir(t.to); if (siteDirs.indexOf(d) === -1) siteDirs.push(d); });
+    moved.forEach(function (t) { var d = cpSiteShootDir(t.to, shoot.name); if (siteDirs.indexOf(d) === -1) siteDirs.push(d); });
     siteDirs.forEach(function (d) { cpReviewPresentStage('site', shoot.name, d); });
     if (typeof cpSiteMarkNew === 'function') cpSiteMarkNew(siteDirs);
     if (typeof cpRetouchCleanupSoon === 'function') cpRetouchCleanupSoon();
@@ -337,6 +371,18 @@ cpRvApprove = function (ids, via) {
     cpHandleError(e, 'Отправка на сайт');
   });
 };
+
+/** Папка дня на сайте: ДД.ММ.ГГ (18.11.26) — как их заводят на Диске руками. */
+function cpSiteDay() {
+  var d = new Date(), z = function (n) { return (n < 10 ? '0' : '') + n; };
+  return z(d.getDate()) + '.' + z(d.getMonth() + 1) + '.' + String(d.getFullYear()).slice(2);
+}
+
+/** Папка съёмки на сайте по папке карточки там (сайт/дата/съёмка/бренд/артикул -> сайт/дата/съёмка). */
+function cpSiteShootDir(to, shootName) {
+  var seg = '/' + CPDisk.safeName(shootName), i = String(to).lastIndexOf(seg + '/');
+  return i >= 0 ? to.slice(0, i + seg.length) : cpParentDir(to);
+}
 
 /** Записать в отбор: версия ретуши карточки на сайте (to — папка в 05). Общая для сразу и для очереди. */
 function cpRvApplyApproved(m, id, from, to, who, ts, date, via) {
@@ -362,7 +408,7 @@ CPQ.after['rv-approve'] = function (op, m, shoot) {
   if (last) cpOutputAppend([cpOutputRow(last, shoot.name, card || { title: a.id }, 'принято', a.via)]);
   if (a.base) cpTrashEmptyUp(cpParentDir(a.from), cpParentDir(a.base));
   if (CP.shoot && CP.shoot.path === shoot.path) {
-    if (typeof cpSiteMarkNew === 'function') cpSiteMarkNew([cpParentDir(a.to)]);
+    if (typeof cpSiteMarkNew === 'function') cpSiteMarkNew([cpSiteShootDir(a.to, shoot.name)]);
     if (typeof cpRetouchCleanupSoon === 'function') cpRetouchCleanupSoon();
   }
 };
