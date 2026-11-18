@@ -87,9 +87,15 @@ function cpMirrorSync(quiet) {
   var shoot = CP.shoot;
   var roots = cpStageRoots();
   if (!roots.length) return Promise.resolve(null);
-  var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  /* буквы ретушёров — из словаря тегов: он должен быть прочитан до сверки (18.11.2026: сверка шла без
+     словаря, и буквы в именах папок молча не читались — ни в теги, ни обратно) */
+  var letters = [];
   if (!quiet) cbBusyShow('Сверяю с Диском: папки этапов...', 0.2);
-  return cpPool(roots, 2, function (r) {
+  CP.mirrorBusy = (CP.mirrorBusy || 0) + 1;
+  var idled = false, idle = function () { if (!idled) { idled = true; CP.mirrorBusy = Math.max(0, (CP.mirrorBusy || 0) - 1); } };
+  return (typeof cpDictReady === 'function' ? cpDictReady() : Promise.resolve()).then(function () {
+    letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+    return cpPool(roots, 2, function (r) {
     /* «Сайт»: дата / буква / номер / съёмка — искать по всей папке сайта при каждом открытии съёмки долго;
        витрина уже нашла, где лежит эта съёмка (и в старых датах тоже), — берём её список */
     var seen = r.stage.key === 'site' && CP.stageFor === CP.archive ? ((CP.stagePaths || {}).site || {})[shoot.name.toLowerCase()] : null;
@@ -104,8 +110,10 @@ function cpMirrorSync(quiet) {
         });
       }).then(function (list) { r.found = list; return r; });
     });
+    });
   }).then(function (rs) {
     if (!quiet) cbBusyHide();
+    idle();
     if (!CP.shoot || CP.shoot.path !== shoot.path) return null;
     var idx = cpMirrorIndex();
     var res = cpMirrorApply(rs, letters, idx);
@@ -122,6 +130,7 @@ function cpMirrorSync(quiet) {
     return step.then(function () { return ren.length ? cpRtRename(ren, quiet) : 0; }).then(function () { return res; });
   }).catch(function (e) {
     if (!quiet) cbBusyHide();
+    idle();
     if (window.console) console.warn('[CP] сверка с Диском', e && (e.body || e.message || e));
     if (!quiet) cpHandleError(e, 'Сверка с Диском');
     return null;
@@ -147,8 +156,8 @@ function cpMirrorIndex() {
 function cpMirrorMatch(idx, raw, name, letters) {
   var letter = '';
   var segs = raw.map(function (sg) {
-    var mm = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(sg);
-    if (mm && letters.indexOf(mm[1]) !== -1) { letter = mm[1]; return mm[2]; }
+    var sp = cpLetterSplit(sg, letters);
+    if (sp) { letter = sp.letter; return sp.rest; }
     return sg.replace(/_доработка$/i, '');
   });
   var rel = segs.concat([name]).join('/').toLowerCase();
@@ -261,8 +270,8 @@ function cpMirrorApply(rs, letters, idx) {
         /* артикул файла — по ближайшей папке артикула, иначе по началу имени файла («74595_1.jpg») */
         var code = '', stype = typeof cpShootType === 'function' && CP.shoot ? cpShootType(CP.shoot.name) : null;
         for (var si = segs.length - 1; si >= 0 && !code; si--) {
-          var sg = segs[si], lm = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(sg);
-          if (lm && letters.indexOf(lm[1]) !== -1) sg = lm[2];
+          var sg = segs[si], lsp = cpLetterSplit(sg, letters);
+          if (lsp) sg = lsp.rest;
           code = typeof cpArtCode === 'function' ? cpArtCode(stype, sg) : '';
         }
         if (!code && typeof cpArtCode === 'function') code = cpArtCode(stype, name);
@@ -464,8 +473,15 @@ CP.openedHooks = CP.openedHooks || [];
 CP.openedHooks.push(function (path) {
   CP.mirror = null;
   var ready = typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : Promise.resolve();
+  /* Сверка идёт, когда файлы съёмки прочитаны (18.11.2026). Раньше условием было «файлы уже прочитаны»
+     в сам момент открытия, а у съёмки с сохранённым отбором они в этот момент ещё читаются (кадры
+     показываются сразу из отбора): сверка при открытии такой съёмки не шла вовсе — ни статусы по папкам
+     этапов, ни буквы ретушёров из имён папок, ни переименование папки под букву карточки. Работало только
+     у съёмки, открытой впервые, и по «Файл → Сверить с Диском». */
   ready.then(function () {
-    if (CP.shoot && CP.shoot.path === path && CP.files && CP.files.length) return cpMirrorSync(true);
+    return typeof cpWalk === 'function' ? cpWalk(path).then(null, function () { return null; }) : null;
+  }).then(function () {
+    if (CP.shoot && CP.shoot.path === path && ((typeof cpPhotoCount === 'function' && cpPhotoCount()) || (CP.files && CP.files.length))) return cpMirrorSync(true);
   });
 });
 
@@ -551,11 +567,17 @@ function cpRetouchCleanupSoon() {
    снимается (2.0.112) — папка подписывается снова; изменилось в программе (буква на
    карточке, буква отмеченным в списке справа, скачали из панели ретуши) — папка артикула в 03
    переименовывается: «K_<прежнее имя>» или без буквы. Изменилось и там, и там — побеждает Диск, кроме
-   свежего скачивания из панели ретуши (запись rtdl новее точки отсчёта): это действие позже. */
+   свежего скачивания из панели ретуши (запись rtdl новее точки отсчёта): это действие позже.
+   18.11.2026 (Маша: «буква на этапе ретуши появляется в имени папки»): раньше буквы сверялись только при
+   открытии съёмки. Теперь у карточки с буквой папка в 03 сразу создаётся с буквой; букву, поставленную
+   после отправки на ретушь, папка получает сразу же (быстрая сверка букв — cpRtRefresh); буква в имени
+   папки читается в любом регистре и раскладке (cpLetterSplit, cp-deliver.js). */
 
-CP.rtDirs = null;      /* код артикула -> [{path, parent, bare, letter}]: папки артикулов в 03 открытой съёмки */
+CP.rtDirs = null;      /* код артикула -> [{code, path, parent, bare, letter}]: папки артикулов в 03 открытой съёмки */
 CP.rtDirsFor = '';     /* путь съёмки, к которой относится CP.rtDirs */
-var CP_RT_DIR_RE = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/;
+CP.rtRoots = null;     /* папки этой съёмки в 03 (обычно одна) — для быстрой сверки букв */
+CP.rtSyncAt = 0;       /* когда папки съёмки в 03 читали в последний раз */
+CP.mirrorBusy = 0;     /* идёт полная сверка открытой съёмки — буквы решит она */
 
 /** Папка артикула для файла в 03: ближайшая к файлу папка, чьё имя без буквы ретушёра — код артикула. */
 function cpRtArtDir(root, filePath, letters, stype) {
@@ -563,8 +585,8 @@ function cpRtArtDir(root, filePath, letters, stype) {
   var segs = filePath.slice(root.length + 1).split('/');
   segs.pop();
   for (var i = segs.length - 1; i >= 0; i--) {
-    var sg = segs[i], letter = '', bare = sg, mm = CP_RT_DIR_RE.exec(sg);
-    if (mm && letters.indexOf(mm[1]) !== -1) { letter = mm[1]; bare = mm[2]; }
+    var sg = segs[i], letter = '', bare = sg, sp = cpLetterSplit(sg, letters);
+    if (sp) { letter = sp.letter; bare = sp.rest; }
     var code = typeof cpArtCode === 'function' ? cpArtCode(stype, bare) : '';
     if (code) return { code: code, path: root + '/' + segs.slice(0, i + 1).join('/'), parent: root + (i ? '/' + segs.slice(0, i).join('/') : ''), bare: bare, letter: letter };
   }
@@ -574,20 +596,53 @@ function cpRtArtDir(root, filePath, letters, stype) {
 /** Новое имя папки артикула: буква + «_» + имя без буквы; без буквы — просто имя. */
 function cpRtDirTarget(d, letter) { return d.parent + '/' + (letter ? letter + '_' : '') + d.bare; }
 
-/** Путь в 03 с учётом буквы: папка артикула уже переименована (Y_74595_модель) — копии кладём в неё, а не рядом. */
-function cpRtLetteredPath(target, shootPath) {
-  if (!CP.rtDirs || !shootPath || CP.rtDirsFor !== shootPath) return target;
-  var codes = Object.keys(CP.rtDirs);
-  for (var i = 0; i < codes.length; i++) {
-    var list = CP.rtDirs[codes[i]];
-    for (var j = 0; j < list.length; j++) {
-      var d = list[j];
-      if (!d.letter) continue;
-      var plain = cpRtDirTarget(d, '');
-      if (target.indexOf(plain + '/') === 0) return d.path + target.slice(plain.length);
-    }
-  }
-  return target;
+/** Карточки артикула открытой съёмки. */
+function cpRtCards(code) { return App.cards.filter(function (c) { return c.cpArticle === code; }); }
+
+/** Путь в 03 с учётом буквы: папка артикула уже переименована (Y_74595_модель) — путь ведёт в неё, а не рядом. */
+function cpRtLetteredPath(target, shootPath) { return cpRtCopyPath(target, shootPath, true); }
+
+/**
+ * Куда класть копию в 03. Папка артикула там уже есть (с буквой ретушёра или без) — в неё. Папки ещё нет,
+ * а у карточки артикула стоит буква — сразу в «K_<имя папки>» (Маша, 18.11.2026: «буква на этапе ретуши
+ * появляется в имени папки»). Список папок съёмки в 03 неизвестен — путь не трогаем: гадать, есть ли там
+ * папка, нельзя — получатся две папки одного артикула.
+ */
+function cpRtCopyPath(target, shootPath, onlyExisting) {
+  if (!CP.rtDirs || !shootPath || CP.rtDirsFor !== shootPath || !CP.shoot || CP.shoot.path !== shootPath) return target;
+  var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  if (!letters.length) return target;
+  var folder;
+  try { folder = cpRetouchBase(shootPath, CP.shoot.name); } catch (e) { return target; }
+  var d = cpRtArtDir(folder, target, letters, typeof cpShootType === 'function' ? cpShootType(CP.shoot.name) : null);
+  if (!d) return target;
+  var list = CP.rtDirs[d.code] || [];
+  var have = list.filter(function (x) { return x.parent === d.parent && x.bare === d.bare; })[0];
+  if (have) return have.path + target.slice(d.path.length);
+  if (onlyExisting || list.length) return target;
+  var cards = cpRtCards(d.code), letter = cards.length ? cpRtProgLetter(cards, undefined) : '';
+  return letter ? cpRtDirTarget(d, letter) + target.slice(d.path.length) : target;
+}
+
+/** Копии легли в 03: их папки артикулов — в список папок съёмки, буква из имени новой папки — в точку отсчёта. */
+function cpRtCopied(paths, shootPath) {
+  if (!CP.shoot || CP.shoot.path !== shootPath || !CP.rtDirs || CP.rtDirsFor !== shootPath) return;
+  var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  if (!letters.length) return;
+  var folder;
+  try { folder = cpRetouchBase(shootPath, CP.shoot.name); } catch (e) { return; }
+  var stype = typeof cpShootType === 'function' ? cpShootType(CP.shoot.name) : null;
+  var m = cpMeta(), base = m.rtLetter = m.rtLetter || {}, now = new Date().toISOString(), fresh = false;
+  (paths || []).forEach(function (p) {
+    var d = cpRtArtDir(folder, p, letters, stype);
+    if (!d) return;
+    var list = CP.rtDirs[d.code] = CP.rtDirs[d.code] || [];
+    if (list.some(function (x) { return x.path === d.path; })) return;
+    list.push(d);
+    fresh = true;
+    if (list.length === 1) base[d.code] = { l: d.letter, ts: now };   /* папку только что создали с этим именем */
+  });
+  if (fresh) cpRtLetterSoon();   /* букву карточке могли поставить, пока копировалось */
 }
 
 /**
@@ -618,14 +673,49 @@ function cpRtSetCards(cards, letter, letters) {
 }
 
 /**
- * Сверка букв: папки артикулов в 03 (по свежему списку файлов сверки) против букв карточек.
- * Карточкам ставит букву Диска сразу; что переименовать на Диске — возвращает (renames).
+ * Решение по буквам. dirs — папки артикулов в 03 ({код: [папки]}), recs — свежие скачивания из панели ретуши
+ * ({код: запись rtdl}), skip — артикулы, которые сейчас не трогаем. Карточкам ставит букву Диска сразу;
+ * что переименовать на Диске — возвращает (renames).
+ */
+function cpRtDecide(dirs, recs, letters, skip) {
+  var out = { nCards: 0, renames: [], baseChanged: false };
+  var m = cpMeta(), base = m.rtLetter = m.rtLetter || {}, now = new Date().toISOString();
+  Object.keys(dirs).forEach(function (code) {
+    if (skip && skip[code]) return;
+    var cards = cpRtCards(code);
+    if (!cards.length) return;
+    var list = dirs[code];
+    var diskL = (list.filter(function (d) { return d.letter; })[0] || {}).letter || '';
+    var b = base[code], bl = b ? b.l : undefined, rec = recs && recs[code];
+    var progL = cpRtProgLetter(cards, bl);
+    var fromRec = !!rec && (!b || (rec.ts || '') >= (b.ts || ''));
+    if (fromRec) { progL = rec.l; out.nCards += cpRtSetCards(cards, progL, letters); }
+    var mixed = list.some(function (d) { return d.letter !== diskL; });
+    /* с Диска буква только приходит (появилась или стала другой); пропавшую из имени папки букву не снимаем
+       с карточки — папку подписываем снова (копия легла рядом без буквы, папку пересоздали и т. п.) */
+    var diskChanged = !!diskL && diskL !== bl;
+    var want = progL;
+    if (diskChanged && !fromRec) {           /* на Диске поменяли руками — карточка берёт букву Диска */
+      want = diskL;
+      out.nCards += cpRtSetCards(cards, diskL, letters);
+    } else out.nCards += cpRtSetCards(cards, progL, letters);   /* лишние буквы у карточки (две сразу) — одна */
+    if (want === diskL && !mixed) {
+      if (bl !== diskL) { base[code] = { l: diskL, ts: now }; out.baseChanged = true; }
+      return;
+    }
+    list.forEach(function (d) { if (d.letter !== want) out.renames.push({ code: code, from: d.path, to: cpRtDirTarget(d, want), letter: want }); });
+  });
+  return out;
+}
+
+/**
+ * Сверка букв при полной сверке съёмки: папки артикулов в 03 (по свежему списку файлов) против букв карточек.
  */
 function cpRtLetterReconcile(rs, letters, idx) {
   var out = { nCards: 0, renames: [], baseChanged: false };
   var rt = (rs || []).filter(function (r) { return r.stage && r.stage.key === 'retouch'; })[0];
   if (!rt || !letters || !letters.length || !CP.shoot) return out;
-  var m = cpMeta(), base = m.rtLetter = m.rtLetter || {}, now = new Date().toISOString();
+  var m = cpMeta();
   var stype = typeof cpShootType === 'function' ? cpShootType(CP.shoot.name) : null;
   var dirs = {}, recs = {};
   (rt.found || []).forEach(function (f) {
@@ -646,31 +736,99 @@ function cpRtLetterReconcile(rs, letters, idx) {
   });
   CP.rtDirs = dirs;
   CP.rtDirsFor = CP.shoot.path;
-  Object.keys(dirs).forEach(function (code) {
-    var cards = App.cards.filter(function (c) { return c.cpArticle === code; });
-    if (!cards.length) return;
-    var list = dirs[code];
-    var diskL = (list.filter(function (d) { return d.letter; })[0] || {}).letter || '';
-    var b = base[code], bl = b ? b.l : undefined, rec = recs[code];
-    var progL = cpRtProgLetter(cards, bl);
-    var fromRec = !!rec && (!b || (rec.ts || '') >= (b.ts || ''));
-    if (fromRec) { progL = rec.l; out.nCards += cpRtSetCards(cards, progL, letters); }
-    var mixed = list.some(function (d) { return d.letter !== diskL; });
-    /* с Диска буква только приходит (появилась или стала другой); пропавшую из имени папки букву не снимаем
-       с карточки — папку подписываем снова (копия легла рядом без буквы, папку пересоздали и т. п.) */
-    var diskChanged = !!diskL && diskL !== bl;
-    var want = progL;
-    if (diskChanged && !fromRec) {           /* на Диске поменяли руками — карточка берёт букву Диска */
-      want = diskL;
-      out.nCards += cpRtSetCards(cards, diskL, letters);
-    } else out.nCards += cpRtSetCards(cards, progL, letters);   /* лишние буквы у карточки (две сразу) — одна */
-    if (want === diskL && !mixed) {
-      if (bl !== diskL) { base[code] = { l: diskL, ts: now }; out.baseChanged = true; }
-      return;
-    }
-    list.forEach(function (d) { if (d.letter !== want) out.renames.push({ code: code, from: d.path, to: cpRtDirTarget(d, want), letter: want }); });
+  CP.rtRoots = (rt.found || []).map(function (f) { return f.path; });
+  CP.rtSyncAt = Date.now();
+  return cpRtDecide(dirs, recs, letters, null);
+}
+
+/** Папки артикулов в 03 — только списки папок, без файлов: {код: [папки]}. В папку артикула не заходим. */
+function cpRtListDirs(roots, letters, stype) {
+  var dirs = {};
+  function level(paths, depth) {
+    if (!paths.length || depth > 4) return Promise.resolve();
+    return cpPool(paths, 4, function (p) { return cpListDirs(p).then(function (ds) { return { p: p, ds: ds }; }); }).then(function (lists) {
+      var next = [];
+      lists.forEach(function (o) {
+        (o.ds || []).forEach(function (x) {
+          if (x.name.charAt(0) === '_') return;
+          var letter = '', bare = x.name, sp = cpLetterSplit(x.name, letters);
+          if (sp) { letter = sp.letter; bare = sp.rest; }
+          var code = typeof cpArtCode === 'function' ? cpArtCode(stype, bare) : '';
+          if (!code) { next.push(x.path); return; }
+          (dirs[code] = dirs[code] || []).push({ code: code, path: x.path, parent: o.p, bare: bare, letter: letter });
+        });
+      });
+      return level(next, depth + 1);
+    });
+  }
+  return level(roots, 1).then(function () { return dirs; });
+}
+
+/**
+ * Быстрая сверка букв открытой съёмки (18.11.2026): читаются только списки папок съёмки в 03 — несколько
+ * запросов, без файлов. Нужна, чтобы буква становилась именем папки сразу, а не при следующем открытии
+ * съёмки: перед копированием на ретушь (копия ложится в папку с буквой), после него, когда букву поставили
+ * артикулу, чья папка программе ещё не известна, и раз в полторы минуты — так буквы, которые ретушёры
+ * дописали в имена папок на Диске, становятся тегами без «Сверить с Диском». Артикулы со свежим
+ * скачиванием из панели ретуши (запись rtdl новее точки отсчёта) не трогает — их решает полная сверка:
+ * ей видны сами файлы.
+ */
+var _cpRtRefreshP = null;
+function cpRtRefresh() {
+  if (!CP.shoot || CP.readOnly) return Promise.resolve(null);
+  if (_cpRtRefreshP) return _cpRtRefreshP;
+  var shoot = CP.shoot, letters = [], stype = null;
+  var here = function () { return CP.shoot && CP.shoot.path === shoot.path; };
+  var p = cpDictReady().then(function () {
+    return typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : null;
+  }).then(function () {
+    if (!here()) return null;
+    letters = cpRetoucherTags();
+    var st = cpStageRoots().filter(function (r) { return r.stage.key === 'retouch'; })[0];
+    if (!st || !letters.length) { CP.rtDirs = {}; CP.rtDirsFor = shoot.path; CP.rtRoots = []; CP.rtSyncAt = Date.now(); return null; }
+    stype = typeof cpShootType === 'function' ? cpShootType(shoot.name) : null;
+    var find = function () {
+      if (st.fixed) return Promise.resolve([st.fixed]);
+      return cpFindShootIn(st.root, shoot.name, 3).then(function (found) { return found.map(function (f) { return f.path; }); });
+    };
+    var read = function (roots) { return cpRtListDirs(roots, letters, stype).then(function (dirs) { return { roots: roots, dirs: dirs }; }); };
+    var cached = CP.rtRoots && CP.rtDirsFor === shoot.path && CP.rtRoots.length ? CP.rtRoots.slice() : null;
+    return (cached ? read(cached) : find().then(read)).then(function (o) {
+      /* папку съёмки в 03 могли переименовать («!_…» — очерёдность) — ищем её заново */
+      return cached && !Object.keys(o.dirs).length ? find().then(read) : o;
+    }).then(function (o) {
+      if (!here()) return null;
+      var m = cpMeta(), base = m.rtLetter || {}, skip = {};
+      Object.keys(m.rtdl || {}).forEach(function (rel) {
+        var rec = m.rtdl[rel];
+        if (!rec || !rec.l || letters.indexOf(rec.l) === -1) return;
+        var segs = rel.split('/');
+        segs.pop();
+        for (var i = segs.length - 1; i >= 0; i--) {
+          var sp = cpLetterSplit(segs[i], letters), code = cpArtCode(stype, sp ? sp.rest : segs[i]);
+          if (!code) continue;
+          if (!base[code] || (rec.ts || '') >= (base[code].ts || '')) skip[code] = true;
+          break;
+        }
+      });
+      CP.rtDirs = o.dirs;
+      CP.rtDirsFor = shoot.path;
+      CP.rtRoots = o.roots;
+      CP.rtSyncAt = Date.now();
+      var res = cpRtDecide(o.dirs, null, letters, skip);
+      if (res.nCards) {
+        cpEvent('mirror', [], { note: 'сверка с Диском: букв ретушёров ' + res.nCards + ' — из имён папок в 03' }, true);
+        cbMarkDirty();
+        cbRenderCards();
+        cbRenderOutline();
+      } else if (res.baseChanged) cbMarkDirty();   /* запомнили, какие буквы на Диске сейчас */
+      return (res.renames.length ? cpRtRename(res.renames, true) : Promise.resolve(0)).then(function () { return res; });
+    });
   });
-  return out;
+  var done = function () { if (_cpRtRefreshP === p) _cpRtRefreshP = null; };
+  _cpRtRefreshP = p;
+  p.then(done, function (e) { done(); if (window.console) console.warn('[CP] буквы ретушёров: папки в 03 не прочитались', e && (e.body || e.message || e)); });
+  return p;
 }
 
 /** Переименовать папки на Диске [{from, to}]: {ok: [...], bad: [{x, why}]}. */
@@ -720,25 +878,37 @@ function cpRtRename(list, quiet) {
 /* Буква поменялась в программе — папка в 03 переименовывается следом (по списку папок последней сверки). */
 var cpRtPushTimer = null;
 function cpRtLetterSoon() {
-  if (!CP.rtDirs || CP.readOnly || !CP.shoot || CP.rtDirsFor !== CP.shoot.path) return;
+  if (CP.readOnly || !CP.shoot || CP.mirrorBusy) return;
   clearTimeout(cpRtPushTimer);
   cpRtPushTimer = setTimeout(cpRtLetterPush, CP.rtPushMs || 1500);
 }
 function cpRtLetterPush() {
-  if (!CP.rtDirs || !CP.shoot || CP.rtDirsFor !== CP.shoot.path || CP.readOnly) return Promise.resolve(0);
-  if (CP.rtPushing) { cpRtLetterSoon(); return Promise.resolve(0); }
+  if (!CP.shoot || CP.readOnly || CP.mirrorBusy) return Promise.resolve(0);
+  if (CP.rtPushing || _cpRtRefreshP) { cpRtLetterSoon(); return Promise.resolve(0); }
   var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
   if (!letters.length) return Promise.resolve(0);
-  var base = cpMeta().rtLetter || {}, list = [], aligned = false;
-  Object.keys(CP.rtDirs).forEach(function (code) {
+  var m = cpMeta(), base = m.rtLetter || {}, list = [], aligned = false;
+  var known = CP.rtDirs && CP.rtDirsFor === CP.shoot.path ? CP.rtDirs : null;
+  /* букву поставили артикулу на ретуши, а его папка в 03 программе не известна (папки съёмки в 03 ещё не
+     читали или артикул отправили только что) — быстрая сверка: она прочитает папки и переименует */
+  var cst = m.cardStatus || {};
+  var blind = App.cards.some(function (c) {
+    return c.cpArticle && cst[c.id] && cst[c.id].s === 'retouch' && cpCardLetter(c) && !(known && known[c.cpArticle]);
+  });
+  if (blind && Date.now() - (CP.rtTriedAt || 0) > (CP.rtRetryMs || 20000)) {
+    CP.rtTriedAt = Date.now();
+    return cpRtRefresh().then(function () { return 0; }, function () { return 0; });
+  }
+  if (!known) return Promise.resolve(0);
+  Object.keys(known).forEach(function (code) {
     var b = base[code];
     if (!b) return;   /* артикул ещё не сверялся — решит сверка */
-    var cards = App.cards.filter(function (c) { return c.cpArticle === code; });
+    var cards = cpRtCards(code);
     if (!cards.length) return;
     var progL = cpRtProgLetter(cards, b.l);
     if (cpRtSetCards(cards, progL, letters)) aligned = true;   /* остальные карточки артикула — та же буква */
-    if (progL === b.l && CP.rtDirs[code].every(function (d) { return d.letter === progL; })) return;
-    CP.rtDirs[code].forEach(function (d) { if (d.letter !== progL) list.push({ code: code, from: d.path, to: cpRtDirTarget(d, progL), letter: progL }); });
+    if (progL === b.l && known[code].every(function (d) { return d.letter === progL; })) return;
+    known[code].forEach(function (d) { if (d.letter !== progL) list.push({ code: code, from: d.path, to: cpRtDirTarget(d, progL), letter: progL }); });
   });
   if (aligned) { cbRenderCards(); cbRenderOutline(); if (!list.length) cbMarkDirty(); }
   return list.length ? cpRtRename(list, false) : Promise.resolve(0);
@@ -750,5 +920,17 @@ cbMarkDirty = (function (orig) {
     return r;
   };
 })(cbMarkDirty);
+
+/* Открытая съёмка: буквы, которые ретушёры дописали в имена папок на Диске, становятся тегами карточек сами —
+   раз в полторы минуты и когда вернулись на вкладку. Только у съёмок, чьи артикулы лежат в 03. */
+CP.rtPollMs = 90000;
+function cpRtPollDue(ms) {
+  var shelf = document.getElementById('cpShelf');
+  return !!(ms && CP.shoot && !CP.readOnly && document.visibilityState !== 'hidden' && !CP.mirrorBusy && !CP.rtPushing
+    && !(shelf && shelf.classList.contains('cp-open'))
+    && CP.rtDirs && CP.rtDirsFor === CP.shoot.path && Object.keys(CP.rtDirs).length && Date.now() - (CP.rtSyncAt || 0) > ms);
+}
+setInterval(function () { if (cpRtPollDue(CP.rtPollMs)) cpRtRefresh(); }, 30000);
+document.addEventListener('visibilitychange', function () { if (cpRtPollDue(Math.min(CP.rtPollMs, 30000))) cpRtRefresh(); });
 
 CP_ACTION_LABEL.retouch_letter = 'буква ретушёра — в имени папки артикула в 03';

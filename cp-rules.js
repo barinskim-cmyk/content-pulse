@@ -620,13 +620,14 @@ function cpFilesSave() {
   });
 }
 
-if (CPDisk.hasToken()) cpLoadRules();
+/* читается при запуске витрины (cpBootSoon, cp-app.js) — когда служебная папка уже известна */
 
 /** Служебная папка сменилась (другой архив) — перечитать настройки оттуда. */
 function cpServiceReset() {
   _cpSvcList = null;
   _cpRulesP = null;
   _cpSettingsP = null;
+  if (typeof _cpDictP !== 'undefined') _cpDictP = null;
   CP.dict = undefined;
   CP.rules = null;
   CP.settings = null;

@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.114';
+var CP_VERSION = '2.0.115';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -611,13 +611,14 @@ function cpApplyRemote(data) {
 var CP_WALK_TTL = 5 * 60 * 1000;
 CP.walkCache = {};
 
-function cpWalk(path, fresh) {
+function cpWalk(path, fresh, prio) {
   var c = CP.walkCache[path];
-  /* идущий обход тоже переиспользуем: выбрали и сразу открыли — один обход */
-  if (!fresh && c && (c.pending || Date.now() - c.ts < CP_WALK_TTL)) return c.promise;
-  var entry = { pending: true, ts: 0 };
+  /* идущий обход тоже переиспользуем: выбрали и сразу открыли — один обход. Фоновый обход (prio — сводки
+     витрины) стоит в очереди запросов: съёмку открыл человек — его не ждём, читаем сразу, мимо очереди */
+  if (!fresh && c && (c.pending || Date.now() - c.ts < CP_WALK_TTL) && !(c.pending && c.bg && prio === undefined)) return c.promise;
+  var entry = { pending: true, ts: 0, bg: prio !== undefined };
   /* с прослойкой ссылки на превью не нужны — обход быстрее */
-  entry.promise = CPDisk.walkPhotos(path, CPDisk.hasProxy() ? false : CP_CONFIG.previewSize).then(function (files) {
+  entry.promise = CPDisk.walkPhotos(path, CPDisk.hasProxy() ? false : CP_CONFIG.previewSize, undefined, undefined, prio).then(function (files) {
     entry.pending = false;
     entry.ts = Date.now();
     return files;
@@ -1518,10 +1519,15 @@ function cpRetouchCopy(pids, card, label, after) {
   cbBusyShow(label + ': ' + files.length + ' кадр(ов)...', 0.2);
   return ready.then(function () {
     folder = cpRetouchBase(shootPath, shootName);
+    /* какие папки артикулов уже лежат в 03 и с какими буквами (несколько запросов, без файлов): копия ляжет
+       в папку с буквой ретушёра, а не рядом с ней */
+    return typeof cpRtRefresh === 'function' ? cpRtRefresh().then(null, function () { return null; }) : null;
+  }).then(function () {
     var used = {};
     items = files.map(function (p) {
       var target = folder + '/' + cpRetouchRel(p, card, shootPath);
-      if (typeof cpRtLetteredPath === 'function') target = cpRtLetteredPath(target, shootPath);   /* папка артикула с буквой ретушёра */
+      /* папка артикула с буквой ретушёра: есть — в неё; нет, а у карточки буква стоит — создаётся сразу с буквой */
+      if (typeof cpRtCopyPath === 'function') target = cpRtCopyPath(target, shootPath);
       /* два разных файла с одним именем в одну папку — второму суффикс, чтобы не потерялся */
       if (used[target] && used[target] !== p.disk) {
         var dot = target.lastIndexOf('.'), n = 2;
@@ -1542,6 +1548,12 @@ function cpRetouchCopy(pids, card, label, after) {
       files.forEach(function (p) { delete miss[p.id]; });
       (r.failedFrom || []).forEach(function (f) { if (byFrom[f]) miss[byFrom[f]] = true; });
       cpUpdateStatusLine();
+      /* папки, куда легли копии, — в список папок артикулов в 03: букву, поставленную следом, папка получит сразу */
+      if (typeof cpRtCopied === 'function') {
+        var bad = {};
+        (r.failedFrom || []).forEach(function (f) { bad[f] = true; });
+        cpRtCopied(items.filter(function (it) { return !bad[it.from]; }).map(function (it) { return it.path; }), shootPath);
+      }
     }
     if (r.failed.length && window.console) console.error('[CP] retouch copy failed', r.failed);
     /* не скопированное — в очередь: переносим, пока не перенесём (cp-queue.js) */
@@ -2629,11 +2641,33 @@ document.getElementById('cpMenuRefresh').onclick = function () {
 
 /* ---------- запуск: вместо лаунчера Cardboard — витрина ---------- */
 
+/* Витрина при загрузке страницы открывается один раз и только когда выполнены все файлы программы
+   (18.11.2026). Раньше её открывал cp-guard.js — шестой файл из девятнадцати: служебная папка каталога
+   (её задаёт cp-catalog.js) к этому времени ещё не была известна, и настройки, словарь тегов и структура
+   съёмок искались в папке рядом с каталогом. Там их нет — «файла нет» запоминалось: настройки и структура
+   до конца сессии, словарь — пока его не спросят снова. Без словаря программа не знает букв ретушёров:
+   папка «K_23466…» в 03 не считалась папкой артикула, буква не становилась тегом, тег не переименовывал
+   папку. А на медленной сети (первый заход после обновления версии) витрина успевала прочитать папку
+   съёмок раньше, чем выполнялись файлы этапов. */
+function cpBootSoon() {
+  if (CP.booted) return;
+  CP.booted = true;
+  var go = function () {
+    if (CPDisk.hasToken()) {
+      if (typeof cpLoadRules === 'function') cpLoadRules();
+      if (typeof cpLoadDict === 'function') cpLoadDict().then(function () { if (CP.shoot) cbRenderCards(); }, function () { });
+    }
+    if (!CP.shoot) cpShowShelf();
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', go);
+  else go();
+}
+
 var _cbProjModalOpenOrig = cbProjModalOpen;
 cbProjModalOpen = function (mode, startup) {
   if (mode === 'launcher' || mode === 'new') {
-    /* таймер запуска Cardboard: витрину уже открыли при загрузке (cp-guard.js) — не перечитываем */
-    if (startup && CP.booted) return;
+    /* таймер запуска Cardboard: витрина открывается при загрузке сама (cpBootSoon) — один раз */
+    if (startup) { cpBootSoon(); return; }
     cpShowShelf();
     return;
   }

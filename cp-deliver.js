@@ -36,6 +36,50 @@ function cpCardLetter(card) {
   return (card.tags || []).filter(function (t) { return rt.indexOf(t) !== -1; })[0] || '';
 }
 
+/* Буква ретушёра в начале имени папки: «K_23466_модель» (Маша, 17–18.11.2026: «буква перед артикулом в
+   самое начало через нижнее подчёркивание»). Папки подписывают и руками на Диске, поэтому регистр и
+   раскладка не важны: «k_23466» и «К_23466» с русской К — та же буква K из словаря. Русская буква
+   подходит к латинской из словаря (и наоборот), если выглядит так же (К — K, Р — P) или звучит так же
+   (Р — R, У — U). Подходят две буквы словаря сразу (в словаре и Y, и U, а в папке русская «У») — не
+   угадываем: буква не опознана. Тегом карточки всегда становится буква так, как она записана в словаре. */
+var CP_LETTER_RE = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/;
+var CP_LETTER_TWINS = {
+  'А': 'A', 'Б': 'B', 'В': 'BV', 'Г': 'G', 'Д': 'D', 'Е': 'E', 'Ё': 'E', 'Ж': 'JZ', 'З': 'Z', 'И': 'I', 'Й': 'YJ', 'К': 'K', 'Л': 'L', 'М': 'M',
+  'Н': 'HN', 'О': 'O', 'П': 'P', 'Р': 'PR', 'С': 'CS', 'Т': 'T', 'У': 'YU', 'Ф': 'F', 'Х': 'XH', 'Ц': 'C', 'Ч': 'C', 'Ш': 'S', 'Щ': 'S', 'Э': 'E', 'Ю': 'YU', 'Я': 'Y'
+};
+
+/** Буква ретушёра из словаря по тому, что написано в имени папки; '' — такой буквы в словаре нет (или подходят две). */
+function cpLetterOf(raw, letters) {
+  raw = String(raw || '');
+  if (!raw || !letters || !letters.length) return '';
+  if (letters.indexOf(raw) !== -1) return raw;
+  var up = raw.toUpperCase();
+  var same = letters.filter(function (l) { return String(l).toUpperCase() === up; });
+  if (same.length) return same.length === 1 ? same[0] : '';
+  var twin = function (a, b) { return a === b || (CP_LETTER_TWINS[a] || '').indexOf(b) !== -1 || (CP_LETTER_TWINS[b] || '').indexOf(a) !== -1; };
+  var fit = letters.filter(function (l) {
+    var lu = String(l).toUpperCase();
+    if (lu.length !== up.length) return false;
+    for (var i = 0; i < up.length; i++) if (!twin(up.charAt(i), lu.charAt(i))) return false;
+    return true;
+  });
+  return fit.length === 1 ? fit[0] : '';
+}
+
+/** «k_23466_модель» -> {letter: 'K' (как в словаре), rest: '23466_модель', raw: 'k'}; буквы ретушёра в начале нет — null. */
+function cpLetterSplit(name, letters) {
+  var m = CP_LETTER_RE.exec(String(name || ''));
+  if (!m) return null;
+  var l = cpLetterOf(m[1], letters);
+  return l ? { letter: l, rest: m[2], raw: m[1] } : null;
+}
+
+/** Словарь тегов (буквы ретушёров) и структура съёмок прочитаны; не прочитались — работаем без них, как раньше. */
+function cpDictReady() {
+  var list = [typeof cpLoadDict === 'function' ? cpLoadDict() : null, typeof cpLoadRules === 'function' ? cpLoadRules() : null];
+  return Promise.all(list.map(function (p) { return Promise.resolve(p).catch(function () { return null; }); }));
+}
+
 function cpDelivered() {
   var m = cpMeta();
   return m.delivered || (m.delivered = {});
@@ -300,8 +344,8 @@ function cpDownloadChecked() {
 
 function cpSiteRoot() { return (CP.settings && CP.settings.site) || ''; }
 
-function cpListDirs(path) {
-  return CPDisk.listDir(path).then(function (items) {
+function cpListDirs(path, prio) {
+  return CPDisk.listDir(path, null, prio).then(function (items) {
     return items.filter(function (it) { return it.type === 'dir'; });
   }, function (e) { if (e && e.status === 404) return []; throw e; });
 }

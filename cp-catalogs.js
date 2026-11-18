@@ -51,13 +51,15 @@ function cpCatsDiscover() {
   var cur = String(CP.archive || '').replace(/\/+$/, ''), parent = cpCatsParent(cur);
   if (!parent || (CP.catsFound && CP.catsFound.parent === parent)) { cpCatsRender(); return; }
   CP.catsFound = { parent: parent, list: [] };
-  CPDisk.listDir(parent).then(function (items) {
+  CPDisk.listDir(parent, null, 3).then(function (items) {
     /* все каталоги родительской папки, включая текущий: перешли в соседний — из него видно и этот */
     var dirs = items.filter(function (x) { return x.type === 'dir' && x.name.charAt(0) !== '_'; }).slice(0, 20);
     return Promise.all(dirs.map(function (d) {
       /* текущую не перечитываем: каталог ли она, уже известно (витрина читает её один раз) */
       if (d.path.replace(/\/+$/, '') === cur) return cpCatalog() ? { name: d.name, path: d.path } : null;
-      return CPDisk.listDir(d.path).then(function (inner) { return cpCatLike(inner) ? { name: d.name, path: d.path } : null; }, function () { return null; });
+      /* каталог ли соседняя папка — видно по началу списка (папки этапов «01_…» идут первыми): одна страница,
+         а не вся папка со всеми файлами; запрос — в фоновой очереди, последним */
+      return CPDisk.listHead(d.path, 60, 3).then(function (h) { return cpCatLike(h.items) ? { name: d.name, path: d.path } : null; }, function () { return null; });
     }));
   }).then(function (found) {
     if (!CP.catsFound || CP.catsFound.parent !== parent) return;

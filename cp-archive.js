@@ -288,7 +288,7 @@ CP.archNames = null;   /* имена съёмок архива (строчным
 function cpArchNamesLoad() {
   var root = cpArchRoot();
   if (!root) { CP.archNames = null; return Promise.resolve(); }
-  return CPDisk.listDir(root).then(function (items) {
+  return CPDisk.listDir(root, null, 3).then(function (items) {
     var m = {};
     items.forEach(function (r) { if (r.type === 'dir' && r.name.charAt(0) !== '_') m[r.name.toLowerCase()] = r.path; });
     CP.archNames = m;

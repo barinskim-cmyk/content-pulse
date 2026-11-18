@@ -2028,6 +2028,91 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     RID_GEN.delete(KRT + '/U_74002_модель/k2.jpg');
     FILES.delete(KSTATE); PROPS.delete(K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ');
     await page.click('[data-cp-p="close"]');
+    /* 2.0.115 (Маша, 18.11.2026): буквы ретушёров ⇄ имена папок в 03 — сразу, без «Сверить с Диском»; запуск в каталоге */
+    {
+      const BN = '2026-11-18_SV_МОДЕЛЬ_БУКВЫ', BS = K + '/01_ИСХОДНИКИ/' + BN, BR = K + '/03_РЕТУШЬ/' + BN, SV = K + '/_ContentPulse';
+      [BS, BS + '/1', BS + '/1/75001_модель', BS + '/1/75002_модель', BS + '/1/75003_модель'].forEach(d => DIRS.add(d));
+      FILES.set(BS + '/1/75001_модель/a.jpg', Buffer.from('A'.repeat(31)));
+      FILES.set(BS + '/1/75002_модель/b.jpg', Buffer.from('B'.repeat(32)));
+      FILES.set(BS + '/1/75003_модель/c.jpg', Buffer.from('C'.repeat(33)));
+      const mv = (from, to) => {
+        for (const d of [...DIRS]) if (d === from || d.indexOf(from + '/') === 0) { DIRS.delete(d); DIRS.add(to + d.slice(from.length)); }
+        for (const k of [...FILES.keys()]) if (k.indexOf(from + '/') === 0) { FILES.set(to + k.slice(from.length), FILES.get(k)); FILES.delete(k); }
+      };
+      const rtNow = () => [...DIRS].filter(d => d.indexOf(BR + '/1/') === 0).map(d => d.slice((BR + '/1/').length)).filter(d => d.indexOf('/') === -1).sort().join();
+      const tagsOf = code => page.evaluate(c => ((App.cards.find(x => x.cpArticle === c) || {}).tags || []).join('+'), code);
+      const until = async (fn, ms) => { for (let i = 0; i < (ms || 6000) / 50 && !fn(); i++) await page.waitForTimeout(50); };
+      const openB = async () => {
+        await page.evaluate(([pth, n]) => { CP.mirror = null; cpOpenShoot(pth, n); }, [BS, BN]);
+        await page.waitForFunction(n => CP.shoot && CP.shoot.name === n && App.cards.filter(c => c.cpArticle).length >= 3, BN, { timeout: 15000 }).catch(() => {});
+        await page.waitForTimeout(200);
+        await page.waitForFunction(() => CP.shoot && CP.mirror && !CP.mirrorBusy && !CP.rtPushing, null, { timeout: 15000 }).catch(() => {});
+      };
+      const was = await page.evaluate(() => { const w = { dict: CP.dict, groups: CP.dictGroups, push: CP.rtPushMs, retry: CP.rtRetryMs };
+        window.__rt115 = w; CP.dict = cpParseDict('[Ретушёры: один]\nY\nU\nK'); CP.rtPushMs = 30; CP.rtRetryMs = 1; return !!w; });
+      const unit = await page.evaluate(() => [cpLetterOf('y', ['Y', 'U']), cpLetterOf('К', ['K', 'Y', 'U']), cpLetterOf('к', ['K']), cpLetterOf('У', ['Y', 'U']), cpLetterOf('У', ['U']), cpLetterOf('K', ['К']),
+        cpLetterOf('X', ['Y', 'U']), JSON.stringify(cpLetterSplit('u_74595_модель', ['Y', 'U'])), JSON.stringify(cpLetterSplit('74595_модель', ['Y', 'U'])), JSON.stringify(cpLetterSplit('D_74595_модель', ['Y', 'U']))]);
+      check('2.0.115: буква в имени папки — в любом регистре и раскладке: y → Y, русская К → K, латинская K → русская К из словаря; подходят две буквы словаря (русская У при Y и U) — не угадываем',
+        was && JSON.stringify(unit) === JSON.stringify(['Y', 'K', 'K', '', 'U', 'К', '', '{"letter":"U","rest":"74595_модель","raw":"u"}', 'null', 'null']), JSON.stringify(unit));
+      await openB();
+      /* у карточки уже стоит буква — папка в 03 создаётся сразу с буквой */
+      await page.evaluate(() => { const c = App.cards.find(x => x.cpArticle === '75001'); cpCardTag(c, 'U', true); CP.checked = {}; CP.checked[c.id] = true; cpBatchStatus('retouch'); });
+      await until(() => FILES.has(BR + '/1/U_75001_модель/a.jpg'));
+      check('2.0.115: у карточки стоит буква U — на ретушь её папка уходит сразу с буквой: U_75001_модель (папки без буквы рядом нет)',
+        FILES.has(BR + '/1/U_75001_модель/a.jpg') && !DIRS.has(BR + '/1/75001_модель'), rtNow());
+      /* отправили без буквы, букву поставили следом — папка переименовывается сразу, сверка не нужна */
+      await page.evaluate(() => { const c = App.cards.find(x => x.cpArticle === '75002'); CP.checked = {}; CP.checked[c.id] = true; cpBatchStatus('retouch'); });
+      await until(() => FILES.has(BR + '/1/75002_модель/b.jpg'));
+      await page.waitForTimeout(400);
+      await page.evaluate(() => cpCardTag(App.cards.find(x => x.cpArticle === '75002'), 'Y', true));
+      await until(() => DIRS.has(BR + '/1/Y_75002_модель'));
+      check('2.0.115: отправили на ретушь без буквы, букву Y поставили следом — папка сразу переименована: Y_75002_модель',
+        FILES.has(BR + '/1/Y_75002_модель/b.jpg') && !DIRS.has(BR + '/1/75002_модель') && DIRS.has(BR + '/1/U_75001_модель'), rtNow());
+      /* на Диске руками: русская строчная «к» — у карточки тег K, как в словаре; папку программа не трогает */
+      mv(BR + '/1/Y_75002_модель', BR + '/1/к_75002_модель');
+      await page.evaluate(() => cpRtRefresh());   /* то же делает опрос открытой съёмки раз в полторы минуты */
+      check('2.0.115: на Диске папку подписали русской строчной «к_75002_модель» — у карточки тег K (как в словаре), папка осталась как подписали',
+        await tagsOf('75002') === 'K' && DIRS.has(BR + '/1/к_75002_модель'), JSON.stringify([await tagsOf('75002'), rtNow()]));
+      /* съёмку с сохранённым отбором открыли снова — сверка идёт сама (раньше — только у съёмки, открытой впервые) */
+      await page.evaluate(() => cpFlushSave());
+      await page.evaluate(() => { cpCloseShoot(); cpShowShelf(); });
+      mv(BR + '/1/U_75001_модель', BR + '/1/y_75001_модель');
+      await openB();
+      check('2.0.115: съёмку с отбором открыли снова — сверка прошла сама: буква из имени папки (y_75001_модель) стала тегом Y',
+        await tagsOf('75001') === 'Y' && await page.evaluate(() => !!CP.mirror && Object.keys(CP.rtDirs || {}).sort().join() === '75001,75002'), JSON.stringify([await tagsOf('75001'), rtNow()]));
+      /* витрина: счёт артикулов в ретуши — с буквами в любом виде и с приставкой не из словаря */
+      DIRS.add(BR + '/1/D_75003_модель'); FILES.set(BR + '/1/D_75003_модель/c.jpg', Buffer.from('C'.repeat(33)));
+      await page.evaluate(() => cpFlushSave());
+      await page.evaluate(() => { cpCloseShoot(); cpShowShelf(); });
+      const cnt = await page.evaluate(async n => { await cpLoadShoots(); await cpScanStages(); return JSON.stringify((CP.stageArts.retouch || {})[n.toLowerCase()]); }, BN);
+      check('2.0.115: витрина считает папки «y_75001…» и «к_75002…» с буквой как в словаре, а «D_75003…» (буквы D в словаре нет) — тоже папкой артикула, которую забрали',
+        cnt === '{"75001":"Y","75002":"K","75003":"D"}', cnt);
+      /* запуск: вкладку открыли заново в каталоге — настройки, словарь и структура читаются из служебной папки каталога,
+         а не из папки рядом с ним (там их нет) */
+      const keepSvc = ['теги.txt', 'настройки.txt'].map(n => [SV + '/' + n, FILES.get(SV + '/' + n)]);
+      DIRS.add(SV);
+      FILES.set(SV + '/теги.txt', Buffer.from('[Ретушёры: один]\nY\nU\nK\n'));
+      FILES.set(SV + '/настройки.txt', Buffer.from((keepSvc[1][1] ? keepSvc[1][1].toString() : '') + '\n# проверка запуска 2.0.115\n'));
+      const hidden = [...FILES.keys()].filter(k => k.indexOf('disk:/_ContentPulse/') === 0).map(k => [k, FILES.get(k)]);
+      hidden.forEach(([k]) => FILES.delete(k));
+      const lg0 = log.length;
+      const tb = await ctx.newPage();
+      await tb.goto(base);
+      await tb.waitForSelector('.cp-shoot', { timeout: 10000 }).catch(() => {});
+      await tb.waitForFunction(() => typeof CP.settingsText === 'string' && CP.dict !== undefined && CP.rules, null, { timeout: 8000 }).catch(() => {});
+      const boot = await tb.evaluate(() => ({ sd: CP_CONFIG.serviceDir, st: /проверка запуска 2\.0\.115/.test(CP.settingsText || ''), letters: cpRetoucherTags().join(), rules: (CP.rules || []).length }));
+      const svc = log.slice(lg0).filter(l => /^GET \/v1\/disk\/resources .*_ContentPulse$/.test(l));
+      await tb.close();
+      hidden.forEach(([k, v]) => FILES.set(k, v));
+      keepSvc.forEach(([k, v]) => { if (v) FILES.set(k, v); else FILES.delete(k); });
+      check('2.0.115: вкладку открыли заново в каталоге — настройки, словарь тегов и структура прочитаны из служебной папки каталога (первой читается она)',
+        boot.sd === SV && boot.st && boot.letters === 'Y,U,K' && boot.rules > 0 && svc.length > 0 && svc[0].endsWith(SV), JSON.stringify([boot, svc.slice(0, 3)]));
+      /* убрать за собой */
+      for (const d of [...DIRS]) if (d === BS || d.indexOf(BS + '/') === 0 || d === BR || d.indexOf(BR + '/') === 0) DIRS.delete(d);
+      for (const k of [...FILES.keys()]) if (k.indexOf(BS + '/') === 0 || k.indexOf(BR + '/') === 0) FILES.delete(k);
+      PROPS.delete(BS);
+      await page.evaluate(async () => { const w = window.__rt115; CP.dict = w.dict; CP.dictGroups = w.groups; CP.rtPushMs = w.push; CP.rtRetryMs = w.retry; CP.rtDirs = null; CP.stageRecent = {}; await cpLoadShoots(); await cpScanStages(); });
+    }
     /* 02_ОТБОР (Маша, 09.11): «только отбор» или «все файлы съёмки», с видео / без видео */
     {
       const CLIP = K + '/01_ИСХОДНИКИ/2026-11-06_SV_КАТ/clip.mov';

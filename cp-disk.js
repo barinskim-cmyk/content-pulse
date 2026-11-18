@@ -50,6 +50,42 @@ var CPDisk = (function () {
     return 600 * Math.pow(2, attempt) + Math.random() * 300;
   }
 
+  /* ---------- очередь фоновых запросов (18.11.2026) ----------
+     Витрина сверяется с Диском сама: папки этапов, счёт артикулов, сводки съёмок, архив. Раньше всё это
+     шло одновременно — на большом каталоге до шестидесяти запросов сразу, и Диск отвечал «слишком много
+     запросов» (429): каждый отказ — пауза перед повтором, и ретушь ждала вместе со всеми.
+     Теперь фоновые запросы идут через очередь: не больше шести сразу, с очерёдностью (prio):
+       0 — папки 02/03/04 и счёт артикулов в ретуши (то, что человек ждёт на экране);
+       1 — счёт в 04 и 02;  2 — «Сайт»;  3 — сводки съёмок, архив, соседние каталоги.
+     Чем ниже очерёдность, тем меньше мест ей можно занять (6, 5, 4, 3): фон не забивает очередь, и то, что
+     важнее, стартует сразу. Диск ответил 429 — полминуты очередь идёт вдвое уже. Запросы по действию
+     человека (открыл съёмку, скачивает, отправляет) идут мимо очереди, как раньше. */
+  var BG = { run: 0, q: [], max: 6, slowUntil: 0, n429: 0 };
+  function bgLimit(prio) {
+    var n = Math.max(1, BG.max - prio);
+    return Date.now() < BG.slowUntil ? Math.max(1, Math.floor(n / 2)) : n;
+  }
+  function bgPump() {
+    for (;;) {
+      var best = -1;
+      for (var i = 0; i < BG.q.length; i++) if (best === -1 || BG.q[i].prio < BG.q[best].prio) best = i;
+      if (best === -1 || BG.run >= bgLimit(BG.q[best].prio)) return;
+      bgStart(BG.q.splice(best, 1)[0]);
+    }
+  }
+  function bgStart(t) {
+    BG.run++;
+    var done = function () { BG.run--; bgPump(); };
+    var p;
+    try { p = Promise.resolve(t.fn()); } catch (e) { p = Promise.reject(e); }
+    p.then(function (v) { done(); t.res(v); }, function (e) { done(); t.rej(e); });
+  }
+  /** Фоновая работа с Диском: prio 0 — раньше всех, 3 — в последнюю очередь; без prio — сразу, мимо очереди. */
+  function bg(prio, fn) {
+    if (prio === undefined || prio === null) return fn();
+    return new Promise(function (res, rej) { BG.q.push({ prio: +prio || 0, fn: fn, res: res, rej: rej }); bgPump(); });
+  }
+
   function qs(params) {
     var out = [];
     Object.keys(params || {}).forEach(function (k) {
@@ -87,6 +123,7 @@ var CPDisk = (function () {
             });
           }
           return resp.text().then(function (body) {
+            if (resp.status === 429) { BG.n429++; BG.slowUntil = Date.now() + 30000; }   /* Диск просит реже — фон идёт вдвое уже */
             if (RETRY[resp.status] && attempt < maxRetries) {
               var wait = backoff(attempt++, resp.headers.get('Retry-After'));
               return sleep(wait).then(run);
@@ -140,8 +177,11 @@ var CPDisk = (function () {
 
   function info() { return api('', {}); }
 
-  /** Содержимое одной папки, все страницы. */
-  function listDir(path, previewSize) {
+  /** Содержимое одной папки, все страницы. prio — фоновый запрос с этой очерёдностью (см. очередь выше). */
+  function listDir(path, previewSize, prio) {
+    return bg(prio, function () { return listDirNow(path, previewSize); });
+  }
+  function listDirNow(path, previewSize) {
     var out = [], page = 500;
     function next(offset) {
       return api(ep(path), {
@@ -158,6 +198,28 @@ var CPDisk = (function () {
       });
     }
     return next(0);
+  }
+
+  /** Начало папки — одна страница (limit), без остальных: когда нужно только «есть ли тут что-нибудь». -> {items, total} */
+  function listHead(path, limit, prio) {
+    return bg(prio, function () {
+      return api(ep(path), { path: path, limit: limit || 50, offset: 0, sort: 'name' }).then(function (d) {
+        var emb = d._embedded || {}, items = emb.items || [];
+        if (isVd(path)) items.forEach(function (it) { it.path = vdFix(path, it.path); });
+        return { items: items, total: emb.total || items.length };
+      });
+    });
+  }
+
+  /** Папка и что в ней, одним запросом: {props: свойства самой папки, items: [...]} (до 200 записей). */
+  function dirWithProps(path, prio) {
+    return bg(prio, function () {
+      return api(ep(path), { path: path, limit: 200, offset: 0, sort: 'name' }).then(function (d) {
+        var emb = d._embedded || {}, items = emb.items || [];
+        if (isVd(path)) items.forEach(function (it) { it.path = vdFix(path, it.path); });
+        return { props: d.custom_properties || {}, items: items };
+      });
+    });
   }
 
   /** Витрина: папки съёмок в архиве, свежие сверху. */
@@ -177,7 +239,7 @@ var CPDisk = (function () {
   var JUNK_RE = /^(\.DS_Store|\._.*|Thumbs\.db|desktop\.ini|\.localized)$/i;
 
   /* allFiles — все файлы (видео и прочее), кроме системного мусора */
-  function walkPhotos(root, previewSize, parallel, allFiles) {
+  function walkPhotos(root, previewSize, parallel, allFiles, prio) {
     var out = [], queue = [root], active = 0, limit = parallel || 4, failed = null;
     out.dirs = [];   /* все папки съёмки (и пустые) — для карточек по папкам артикулов */
     out.dirProps = {};   /* метки папок (custom_properties) — «скачано» в «Сайте» и т. п. */
@@ -194,7 +256,7 @@ var CPDisk = (function () {
         while (active < limit && queue.length) {
           var path = queue.shift();
           active++;
-          listDir(path, ps).then(function (items) {
+          listDir(path, ps, prio).then(function (items) {
             items.forEach(function (r) {
               if (r.type === 'dir') {
                 if (r.name.charAt(0) === '_' || r.name === RETOUCH_DIR) return;
@@ -497,7 +559,8 @@ var CPDisk = (function () {
     mkdir: mkdir,
     DiskError: DiskError,
     STATE_FILE: STATE_FILE, RETOUCH_DIR: RETOUCH_DIR,
-    info: info, listDir: listDir, listShoots: listShoots, walkPhotos: walkPhotos,
+    info: info, listDir: listDir, listHead: listHead, dirWithProps: dirWithProps, listShoots: listShoots, walkPhotos: walkPhotos,
+    bg: bg, bgStat: function () { return { run: BG.run, queued: BG.q.length, n429: BG.n429, slow: Date.now() < BG.slowUntil }; },
     previewBlob: previewBlob, downloadHref: downloadHref, downloadBlob: downloadBlob,
     ensureDir: ensureDir, uploadBlob: uploadBlob, copy: copy, waitOperation: waitOperation,
     readState: readState, writeState: writeState, stateRev: stateRev, safeName: safeName,

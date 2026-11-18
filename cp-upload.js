@@ -545,7 +545,8 @@ function cpTransitWatch(st) {
         /* есть файлы, которые Диск так и не забрал, — запись «в пути» остаётся: витрина покажет их у съёмки */
         if (st.transitItems.some(function (x) { return x.st === 'lost'; })) cpTransitSave(st);
         else CPDisk.removeTemp(st.transitPath).catch(function () { });
-        if (CP.shoots && typeof cpLoadShoots === 'function') cpLoadShoots();
+        /* съёмку догрузили — её сводку считаем заново, даже если недавно в ней «считать было нечего» */
+        if (CP.shoots && typeof cpLoadShoots === 'function') { CP.sumForce = true; cpLoadShoots(); }
       }
     });
   };

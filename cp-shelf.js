@@ -155,7 +155,13 @@ function cpMigrateService() {
         items.push({ from: x.path, path: dir + '/' + x.name, name: x.name });
       });
     });
-    if (!items.length) return;
+    if (!items.length) {
+      /* переносить нечего — список служебной папки уже прочитан, второй раз не читаем */
+      var here = {};
+      r[0].forEach(function (x) { here[x.name] = true; });
+      if (CP_CONFIG.serviceDir.replace(/\/+$/, '') === dir) _cpSvcList = { ts: Date.now(), dir: CP_CONFIG.serviceDir, p: Promise.resolve(here) };
+      return;
+    }
     return CPDisk.ensureDir(dir).then(function () {
       return Promise.all(items.map(function (it) {
         return CPDisk.proxyFile(it.from).then(function (b) { return CPDisk.uploadBlob(it.path, b, false); })
@@ -171,7 +177,7 @@ function cpMigrateService() {
       var names = {};
       r[0].forEach(function (x) { names[x.name] = true; });
       moved.forEach(function (n) { names[n] = true; });
-      _cpSvcList = { ts: Date.now(), p: Promise.resolve(names) };
+      _cpSvcList = { ts: Date.now(), dir: CP_CONFIG.serviceDir, p: Promise.resolve(names) };
       if (moved.length) cbToast('Файлы настроек перенесены в ' + CPDisk.showPath(dir) + ': ' + moved.join(', '));
     });
   }).catch(function (e) { if (window.console) console.warn('[CP] перенос служебной папки', e && (e.body || e.message)); });
@@ -180,16 +186,30 @@ function cpMigrateService() {
   return p;
 }
 
+/* список помнит, какой папки он список: служебная папка сменилась (другой каталог) — читается заново */
+function cpServiceNamesFresh() {
+  return _cpSvcList && _cpSvcList.dir === CP_CONFIG.serviceDir && Date.now() - _cpSvcList.ts < 20000 ? _cpSvcList.p : null;
+}
+/* Служебные файлы читаются не раньше, чем выполнены все файлы программы (18.11.2026): какая служебная
+   папка у каталога, знает cp-catalog.js, а настройки, словарь и структуру спрашивают уже при загрузке
+   файлы, которые идут раньше него. Спрашивали — и получали список папки рядом с каталогом: файлов там
+   нет, и «нет файла» запоминалось (настройки и структура — до конца сессии). */
+var _cpScriptsReady = new Promise(function (res) {
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { res(); });
+  else res();
+});
 function cpServiceNames(force) {
-  if (!force && _cpSvcList && Date.now() - _cpSvcList.ts < 20000) return _cpSvcList.p;
-  return cpMigrateService().then(function () {
-    if (!force && _cpSvcList && Date.now() - _cpSvcList.ts < 20000) return _cpSvcList.p;
-    return cpServiceNamesNow();
+  return _cpScriptsReady.then(function () {
+    if (!force && cpServiceNamesFresh()) return cpServiceNamesFresh();
+    return cpMigrateService().then(function () {
+      if (!force && cpServiceNamesFresh()) return cpServiceNamesFresh();
+      return cpServiceNamesNow();
+    });
   });
 }
 
 function cpServiceNamesNow() {
-  var entry = { ts: Date.now() };
+  var entry = { ts: Date.now(), dir: CP_CONFIG.serviceDir };
   entry.p = CPDisk.listDir(CP_CONFIG.serviceDir).then(function (items) {
     var names = {};
     items.forEach(function (x) { names[x.name] = true; });
@@ -260,15 +280,21 @@ function cpTagsWith(list, tag) {
 }
 
 /** Словарь: [{tag, group}]. null — файла нет. Кэшируется до перезагрузки витрины. */
+var _cpDictP = null;   /* словарь читается: второй, кто спросил в это время, ждёт то же чтение */
 function cpLoadDict(force) {
   if (CP.dict !== undefined && CP.dict !== null && !force) return Promise.resolve(CP.dict);
-  return cpReadServiceFile(CP_TAGS_FILE, force).then(function (txt) {
+  if (_cpDictP && !force) return _cpDictP;
+  var p = cpReadServiceFile(CP_TAGS_FILE, force).then(function (txt) {
     CP.dict = cpParseDict(txt);
     return CP.dict;
   }, function (e) {
     if (e && e.status === 404) { CP.dict = null; return null; }
     throw e;
   });
+  var clear = function () { if (_cpDictP === p) _cpDictP = null; };
+  _cpDictP = p;
+  p.then(clear, clear);
+  return p;
 }
 
 function cpCreateDict() {

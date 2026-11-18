@@ -146,7 +146,11 @@ cpParseSettings = (function (orig) {
     }
     if (!cat) { CP.catalogList = null; cpCatRender(); return listOrig(archive); }
     var ready = typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : Promise.resolve();
-    return ready.then(function () { return CPDisk.listDir(cat); }).then(function (items) {
+    /* папки каталога читаются одновременно с настройками, а не после них (18.11.2026): настройки идут через
+       прослойку и после простоя отвечают не сразу — съёмки на экране ждали их */
+    var listed = CPDisk.listDir(cat);
+    listed.then(null, function () { });
+    return ready.then(function () { return listed; }).then(function (items) {
       CP.catalogList = items.filter(function (x) { return x.type === 'dir' && x.name.charAt(0) !== '_'; })
         .map(function (x) { return { name: x.name, path: x.path }; })
         .sort(function (a, b) { return a.name < b.name ? -1 : 1; });
@@ -231,14 +235,23 @@ CP.siteHas = {};     /* папка артикула в «Сайте» -> {mod, h
 /** В папке артикула на сайте есть хотя бы один файл (сама папка или вложенные на уровень ниже). */
 function cpSiteDirHas(x) {
   var was = CP.siteHas[x.path];
-  if (was && was.mod === (x.modified || '')) return Promise.resolve(was.has);
+  /* «файлы есть» помним, пока папка не изменилась; «пусто» перепроверяем каждый раз — в пустую папку файлы
+     докладывают позже, а дата изменения папки на Диске от этого меняется не всегда */
+  if (was && was.has && was.mod === (x.modified || '')) return Promise.resolve(true);
   var junk = /^(\.DS_Store|\._.*|Thumbs\.db|desktop\.ini|\.localized)$/i;
   var real = function (items) { return (items || []).filter(function (i) { return i.type !== 'dir' && !junk.test(i.name); }).length > 0; };
-  return CPDisk.listDir(x.path).then(function (items) {
+  /* хватает начала папки (одна страница на 40 записей): нужен ответ «есть ли хоть один файл», а не весь список */
+  var head = function (p) {
+    return CPDisk.listHead(p, 40, 2).then(function (h) {
+      if (real(h.items) || h.total <= h.items.length) return h.items;
+      return CPDisk.listDir(p, null, 2);   /* в начале одни папки, а записей больше страницы — читаем всю */
+    });
+  };
+  return head(x.path).then(function (items) {
     if (real(items)) return true;
     var dirs = (items || []).filter(function (i) { return i.type === 'dir'; });
     if (!dirs.length) return false;
-    return cpPool(dirs, 2, function (d) { return CPDisk.listDir(d.path).then(real, function () { return false; }); }).then(function (r) { return r.some(Boolean); });
+    return cpPool(dirs, 2, function (d) { return head(d.path).then(real, function () { return false; }); }).then(function (r) { return r.some(Boolean); });
   }, function (e) { if (e && e.status === 404) return false; throw e; }).then(function (has) {
     CP.siteHas[x.path] = { mod: x.modified || '', has: has };
     return has;
@@ -255,16 +268,28 @@ function cpCountStageArts(keys) {
   want.forEach(function (k) { _cpArtsRunOf[k] = run; });
   var known = {};
   (CP.shoots || []).forEach(function (d) { known[d.name.toLowerCase()] = d.name; });
-  var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  var letters = [];
   var jobs = [];
-  want.forEach(function (key) {
+  /* ретушь — первой: её счёт человек ждёт на экране; потом 04 и 02, «Сайт» — последним */
+  var order = ['retouch', 'review', 'approval', 'site'];
+  want.slice().sort(function (a, b) { return order.indexOf(a) - order.indexOf(b); }).forEach(function (key) {
     var w = CP.stagePaths[key] || {};
-    Object.keys(w).forEach(function (low) { if (known[low]) jobs.push({ key: key, low: low, name: known[low], paths: w[low] }); });
+    /* 02/03/04: считаем и папки съёмок, которых нет в списке исходников этой вкладки (съёмку завели после того,
+       как вкладку открыли) — счёт общий для всех, кто берёт его из снимка этапов. «Сайт» — только известные:
+       там лежит сданное за месяцы. */
+    Object.keys(w).forEach(function (low) { if (known[low] || key !== 'site') jobs.push({ key: key, low: low, name: known[low] || low, paths: w[low] }); });
   });
   var fresh = {}, dirsNow = {};
   var oldOf = (CP.siteOldFor === archive && CP.siteOldOf) || {}, oldCache = (CP.siteOldFor === archive && CP.siteOld) || {}, oldDirty = false;
-  return cpPool(jobs, 4, function (j) {
+  /* буквы ретушёров и правила кода артикула — из словаря тегов и структуры съёмок: считаем, когда они
+     прочитаны (18.11.2026: без словаря папка «K_23466…» не считалась папкой артикула — артикул пропадал
+     из ретуши, а программа ещё и заходила внутрь каждой такой папки лишним запросом) */
+  var ready = typeof cpDictReady === 'function' ? cpDictReady() : Promise.resolve();
+  return ready.then(function () {
+    letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+    return cpPool(jobs, 4, function (j) {
     var type = typeof cpShootType === 'function' ? cpShootType(j.name) : null;
+    var prio = j.key === 'retouch' ? 0 : j.key === 'site' ? 2 : 1;   /* очерёдность запросов к Диску (cp-disk.js) */
     var codes = {}, found = false;
     var take = function (c) { if (!c) return; found = true; Object.keys(c).forEach(function (k) { codes[k] = codes[k] || c[k]; }); };
     /* одна папка съёмки на этапе -> {код: буква} или null (артикулов не нашлось) */
@@ -273,7 +298,7 @@ function cpCountStageArts(keys) {
       function walk(paths, depth) {
         if (!paths.length || depth > 4) return Promise.resolve();
         return cpPool(paths, 4, function (p) {
-          return CPDisk.listDir(p).then(null, function (e) { if (e && e.status === 404) return []; throw e; });
+          return CPDisk.listDir(p, null, prio).then(null, function (e) { if (e && e.status === 404) return []; throw e; });
         }).then(function (lists) {
           var next = [], check = [];
           lists.forEach(function (items) {
@@ -282,9 +307,12 @@ function cpCountStageArts(keys) {
               if (x.type !== 'dir') { files.push(x.name); return; }
               if (x.name.charAt(0) === '_') return;
               var name = x.name.replace(/^(!|\d{1,2})_(?=\D)/, ''), letter = '';
-              var lm = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(name);
-              if (lm && letters.indexOf(lm[1]) !== -1) { letter = lm[1]; name = lm[2]; }
+              var sp = cpLetterSplit(name, letters);
+              if (sp) { letter = sp.letter; name = sp.rest; }
               var code = cpArtCode(type, name);   /* папка-дата и папка партии («Y_1») — не артикул: идём внутрь */
+              /* приставка не из словаря («D_23466…»: буквы D в словаре нет) — папка всё равно этого артикула, и её
+                 кто-то забрал; раньше такая папка не считалась вовсе, и артикул пропадал из ретуши */
+              if (!code) { var om = CP_LETTER_RE.exec(name), oc = om ? cpArtCode(type, om[2]) : ''; if (oc) { code = oc; letter = letter || om[1]; } }
               if (!code) { next.push(x.path); return; }
               here++;
               /* «Сайт»: пустая папка артикула — не «сдано» (в папку сайта могли положить всю структуру целиком) */
@@ -322,6 +350,7 @@ function cpCountStageArts(keys) {
       /* папка не прочиталась — оставляем прошлый счёт, а не «есть» без числа */
       var old = CP.stageArtsFor === archive ? (CP.stageArts[j.key] || {})[j.low] : undefined;
       if (old !== undefined) (fresh[j.key] = fresh[j.key] || {})[j.low] = old;
+    });
     });
   }).then(function () {
     if (CP.archive !== archive) return;

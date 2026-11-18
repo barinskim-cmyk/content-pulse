@@ -157,6 +157,7 @@ function cpWriteSummary(shootPath, data, force, shootName) {
   var name = shootName || shootPath.split('/').pop();
   return cpWalk(shootPath).then(function (files) { return files; }, function () { return null; }).then(function (files) {
     var str = cpSumEncode(cpShootSummary(data, cpArticleCodes(shootPath, name, files)));
+    if (CP.sumNone) delete CP.sumNone[shootPath];   /* отбор есть — отметка «считать нечего» к съёмке больше не относится */
     if (!force && CP.sumWritten[shootPath] === str) return;
     return CPDisk.proxyProps(shootPath, { cp_sum: str }).then(function () {
       CP.sumWritten[shootPath] = str;
@@ -294,7 +295,7 @@ function cpScanStages() {
     var oldDates = [];
     var level = function (paths, depth, into, inOld) {
       if (!paths.length || depth > maxDepth) return Promise.resolve();
-      return cpPool(paths, 4, function (p) { return cpListDirs(p); }).then(function (lists) {
+      return cpPool(paths, 4, function (p) { return cpListDirs(p, key === 'site' ? 2 : 0); }).then(function (lists) {
         var next = [];
         lists.forEach(function (ds) {
           /* «Сайт»: среди соседних папок-дат каждый раз читаем только две самых свежих; остальные — из
@@ -562,32 +563,85 @@ cpRenderShoots = (function (orig) {
 
 /* ---------- фон: сводка для съёмок, где её ещё нет ---------- */
 
+/* «Считать нечего» (18.11.2026): в съёмке ни отбора, ни папок артикулов — имидж, старые папки. Сводку
+   таким не пишем, и раньше витрина обходила их заново при каждой загрузке и при каждом возврате из съёмки:
+   все папки, со всеми файлами, по три съёмки сразу — одновременно с папками этапов (на каталоге с тридцатью
+   такими съёмками — полторы сотни запросов на каждую загрузку). Теперь:
+     - у съёмки, в структуре которой нет уровня «артикул» (тип не опознан или без артикулов), папки не
+       обходятся вовсе — артикулов в ней быть не может; читается только, есть ли отбор (один запрос);
+     - что считать нечего, запоминается отметкой в свойствах папки съёмки (cp_sum0 = когда проверяли) —
+       её видят все, вместе со списком съёмок, как сводку;
+     - отметка не вечная: Диск не сообщает надёжно, что в глубине папки что-то поменялось, поэтому съёмка
+       перепроверяется — свежая (до трёх дней) раз в 15 минут, до месяца — раз в 6 часов, старше — раз в
+       трое суток; сразу — по «Обновить» и когда в эту витрину догрузили съёмку.
+   Отбор сохранили — сводка пишется сразу (cp-stages.js, cpWriteSummary), отметка больше не читается. */
+var CP_SUM_NONE = 'cp_sum0';
+CP.sumNone = {};       /* путь съёмки -> когда проверяли: на случай, если отметка на Диск не записалась */
+CP.sumForce = false;   /* «Обновить»: перепроверить все съёмки без сводки, не глядя на отметки */
+
+function cpSumNoneTtl(d) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(d.name || '');
+  var named = m ? Date.parse(m[1] + '-' + m[2] + '-' + m[3] + 'T12:00:00') : NaN, mod = Date.parse(d.modified || '');
+  var age = Date.now() - Math.max(isNaN(named) ? 0 : named, isNaN(mod) ? 0 : mod);
+  return age < 3 * 86400000 ? 15 * 60000 : age < 30 * 86400000 ? 6 * 3600000 : 3 * 86400000;
+}
+function cpSumNoneFresh(d) {
+  /* отметка в этой вкладке — только на случай, если на Диск она не записалась; на Диске её нет, а сводка
+     была (стёрли или сводку пересчитывают) — верим Диску */
+  var mem = (d.custom_properties || {})[CP_SUM_NONE] === undefined && CP.sumWritten[d.path] ? 0 : (CP.sumNone[d.path] || 0);
+  var at = Math.max(+((d.custom_properties || {})[CP_SUM_NONE]) || 0, mem), now = Date.now();
+  return at > 0 && now - at < cpSumNoneTtl(d) && at - now < 600000;   /* отметка «из будущего» (часы другого компьютера) — не верим */
+}
+function cpSumNoneMark(d) {
+  var now = Date.now(), props = {};
+  CP.sumNone[d.path] = now;
+  props[CP_SUM_NONE] = String(now);
+  return CPDisk.proxyProps(d.path, props).then(function () {
+    d.custom_properties = d.custom_properties || {};
+    d.custom_properties[CP_SUM_NONE] = String(now);
+  }, function (e) { if (window.console) console.warn('[CP] отметка «считать нечего» не записалась', d.path, e && (e.body || e.message)); });
+}
+
 var _cpFillRun = 0;
 function cpFillSummaries() {
   var run = ++_cpFillRun;
   var archive = CP.archive;
+  var force = !!CP.sumForce, skipped = 0;
+  CP.sumForce = false;
+  (CP.shoots || []).forEach(function (d) { if (!force && !cpSumOf(d) && !d.cpSumDone && cpSumNoneFresh(d)) { d.cpSumDone = true; skipped++; } });
   var todo = (CP.shoots || []).filter(function (d) { return !cpSumOf(d) && !d.cpSumDone; });
+  if (skipped) cpRenderShoots();
   if (!todo.length || !CPDisk.hasProxy()) { cpRenderStageBar(); return; }
   var i = 0, timer = null;
   function redraw() { if (!timer) timer = setTimeout(function () { timer = null; if (run === _cpFillRun) cpRenderShoots(); }, 400); }
   function next() {
     if (run !== _cpFillRun || CP.archive !== archive || i >= todo.length) return Promise.resolve();
     var d = todo[i++];
-    /* отбор + папки съёмки (артикулы по папкам — и там, где отбора ещё нет) */
+    var type = typeof cpShootType === 'function' ? cpShootType(d.name) : null;
+    var byArt = !!(type && type.roles.indexOf('артикул') !== -1);   /* папки артикулов — только у съёмок с таким уровнем в структуре */
+    /* отбор + папки съёмки (артикулы по папкам — и там, где отбора ещё нет); запросы — в фоновой очереди, последними */
     return Promise.all([
-      CPDisk.readState(d.path).catch(function () { return null; }),
-      cpWalk(d.path).catch(function () { return null; })
+      CPDisk.bg(3, function () { return CPDisk.readState(d.path); }).then(function (st) { return { ok: true, st: st }; }, function () { return { ok: false }; }),
+      byArt ? cpWalk(d.path, false, 3).then(function (f) { return { ok: true, files: f }; }, function () { return { ok: false }; }) : { ok: true, files: null }
     ]).then(function (r) {
-      var data = r[0] && r[0].data;
-      var codes = cpArticleCodes(d.path, d.name, r[1]);
+      var data = r[0].ok && r[0].st ? r[0].st.data : null;
+      var codes = byArt && r[1].ok ? cpArticleCodes(d.path, d.name, r[1].files) : {};
       d.cpSumDone = true;
-      if (!data && !Object.keys(codes).length) return;   /* ни отбора, ни папок артикулов */
+      if (!data && !Object.keys(codes).length) {
+        /* ни отбора, ни папок артикулов. Прочиталось всё — запоминаем; что-то не прочиталось — проверим в другой раз */
+        return r[0].ok && r[1].ok ? cpSumNoneMark(d) : null;
+      }
       d.cpSum = cpShootSummary(data, codes);
-      return cpWriteSummary(d.path, data, true, d.name);
+      var str = cpSumEncode(d.cpSum);
+      return CPDisk.proxyProps(d.path, { cp_sum: str }).then(function () {
+        CP.sumWritten[d.path] = str;
+        d.custom_properties = d.custom_properties || {};
+        d.custom_properties.cp_sum = str;
+      }, function (e) { if (window.console) console.warn('[CP] сводка съёмки не записалась', d.path, e && (e.body || e.message)); });
     }).then(function () { redraw(); return next(); });
   }
-  /* «забрали» считается по буквам ретушёров из словаря — сначала словарь */
-  var dictReady = typeof cpLoadDict === 'function' ? Promise.resolve(cpLoadDict()).catch(function () { return null; }) : Promise.resolve();
+  /* «забрали» считается по буквам ретушёров из словаря, папки артикулов — по структуре съёмок: сначала они */
+  var dictReady = typeof cpDictReady === 'function' ? cpDictReady() : Promise.resolve();
   return dictReady.then(function () { return Promise.all([next(), next(), next()]); }).then(function () { if (run === _cpFillRun) cpRenderShoots(); });
 }
 
@@ -603,7 +657,7 @@ cpLoadShoots = (function (orig) {
   };
 })(cpLoadShoots);
 /* кнопка «Обновить» была привязана к старой функции */
-document.getElementById('cpShelfRefresh').onclick = function () { cpSiteOldReset(); cpLoadShoots(); };   /* «Обновить» — и старые даты «Сайта» заново */
+document.getElementById('cpShelfRefresh').onclick = function () { cpSiteOldReset(); CP.sumForce = true; cpLoadShoots(); };   /* «Обновить» — и старые даты «Сайта», и съёмки без сводки заново */
 
 (function cpStagesCss() {
   var css = ''

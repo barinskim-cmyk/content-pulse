@@ -764,8 +764,8 @@ var CP_NO_RT = '__без_ретушёра__';
 function cpStageKey(rel, letters) {
   var segs = String(rel || '').split('/'), name = segs.pop(), letter = '';
   segs = segs.map(function (sg) {
-    var mm = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(sg);
-    if (mm && letters.indexOf(mm[1]) !== -1) { letter = mm[1]; return mm[2]; }
+    var sp = cpLetterSplit(sg, letters);
+    if (sp) { letter = sp.letter; return sp.rest; }
     return sg.replace(/_доработка$/i, '');
   });
   return { key: segs.concat([name]).join('/').toLowerCase(), letter: letter, segs: segs, name: name };
@@ -1142,8 +1142,8 @@ cpRenderPanel = (function (orig) {
       var ch = t.kids[fp] || [], open = !!(sel.open && sel.open[fp]);
       var a = t.agg[fp] || { n: 0, bytes: 0 };
       var nm = fp.split('/').pop(), marks = '';
-      var lm = /^([A-Za-zА-Яа-яЁё]{1,3})_/.exec(nm);
-      if (lm && letters.indexOf(lm[1]) !== -1) marks += '<span class="cp-state cp-state-retouch">забрал ' + cbEsc(lm[1]) + '</span>';
+      var lm = cpLetterSplit(nm, letters);
+      if (lm) marks += '<span class="cp-state cp-state-retouch">забрал ' + cbEsc(lm.letter) + '</span>';
       if (/_доработка$/i.test(nm)) marks += '<span class="cp-state cp-state-reshoot">на доработке</span>';
       if (rt && a.dl) {
         marks += '<span class="cp-state cp-state-dl" title="Скачано из папки ретуши' + (a.dlTs ? ': ' + cbEsc(cpFmtDate(a.dlTs)) : '') + '">'
@@ -1311,8 +1311,8 @@ function cpDropCodes(files) {
   files.forEach(function (x) {
     var segs = String(x.rel || '').split('/'), name = segs.pop(), got = '';
     for (var i = segs.length - 1; i >= 0 && !got; i--) {
-      var sg = segs[i], lm = /^([A-Za-zА-Яа-яЁё]{1,3})_(.+)$/.exec(sg);
-      if (lm && letters.indexOf(lm[1]) !== -1) sg = lm[2];
+      var sg = segs[i], lm = cpLetterSplit(sg, letters);
+      if (lm) sg = lm.rest;
       got = cpArtCode(null, sg);
     }
     if (!got && !segs.length) got = cpArtCode(null, name);

@@ -373,16 +373,11 @@ function cpCardTag(card, tag, on) {
   cbRenderCards();
 }
 
-if (CPDisk.hasToken()) cpLoadDict().then(function () { if (CP.shoot) cbRenderCards(); }, function () { });
-
 /* ---------- запуск ----------
-   Окна проектов Cardboard больше нет. Витрину открываем здесь, в последнем
-   файле, — не дожидаясь таймера «лаунчера» в index.html (на медленной сети
-   наши файлы грузятся дольше него). */
-(function cpBoot() {
-  CP.booted = true;
-  if (!CP.shoot) cpShowShelf();
-})();
+   Окна проектов Cardboard больше нет. Витрину открываем, не дожидаясь таймера «лаунчера» в index.html,
+   но только когда выполнены все файлы программы (cpBootSoon в cp-app.js): словарь тегов, структура и
+   настройки читаются из служебной папки, а какая она у каталога, знает cp-catalog.js — он идёт позже. */
+cpBootSoon();
 
 /* подсказка пустой галереи — про съёмки с Диска, а не про импорт и Capture One */
 cbRenderTray = (function (orig) {
