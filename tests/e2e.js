@@ -187,6 +187,8 @@ async function route(r) {
           const pre = it.from + '/';
           for (const d of [...DIRS]) if (d === it.from || d.indexOf(pre) === 0) { DIRS.delete(d); DIRS.add(it.path + d.slice(it.from.length)); }
           for (const k of [...FILES.keys()]) if (k.indexOf(pre) === 0) { const np = it.path + k.slice(it.from.length); RID_KEEP.set(np, ridOf(k)); FILES.set(np, FILES.get(k)); FILES.delete(k); }
+          /* как у Яндекса: свойства папок едут вместе с ними */
+          for (const k of [...PROPS.keys()]) if (k === it.from || k.indexOf(pre) === 0) { PROPS.set(it.path + k.slice(it.from.length), PROPS.get(k)); PROPS.delete(k); }
           MOVED.push(it.from + ' -> ' + it.path);
           return { from: it.from, status: 'done' };
         }
@@ -388,6 +390,8 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
   await ctx.route(/yandex\.(ru|net)|yandexcloud\.net/, route);
+  /* фоновое зеркало всех съёмок (2.0.119) пишет в отборы и выработку само — в тестах включаем только там, где проверяем его */
+  await ctx.addInitScript(() => { window.cpNoMirrorAll = true; });
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
@@ -1185,7 +1189,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       && /;новая версия после доработки: заменено 1, добавлено 0;/.test(out) && /;догрузка в карточку: заменено 0, добавлено \d;/.test(out)
       && (out.match(/;принято;/g) || []).length === 2 && /;доработка: тени;/.test(out) && out.split('\n').some(l => l.indexOf(today + ';') === 0 && /;U;/.test(l)), out);
     check('выработка: столбец «способ» — как карточку отправили на сайт (здесь — кнопкой на карточке); в журнале то же',
-      /^\uFEFFдата;время;ретушёр;съёмка;карточка;кадров;событие;кто;версия;способ\n/.test(out) && out.split('\n').filter(l => /;принято;/.test(l)).every(l => /;кнопка на карточке$/.test(l))
+      /^\uFEFFдата;время;ретушёр;съёмка;карточка;кадров;событие;кто;версия;способ;ключ\n/.test(out) && out.split('\n').filter(l => /;принято;/.test(l)).every(l => /;кнопка на карточке;$/.test(l))
       && await page.evaluate(() => cpMeta().events.filter(e => e.action === 'rt_approve').some(e => e.via === 'card' && /способ: кнопка на карточке/.test(e.note))), out.split('\n').filter(l => /;принято;/.test(l)).join(' | '));
     /* 2.0.118: номер дропа, перенос в уже существующую папку, папки с номером очереди, сдачи руками (Маша, 18.11.2026) */
     {
@@ -1258,6 +1262,77 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       check('2.0.118: сдали в 04 руками (файлы переименованы, папка U_74598_модель) — у карточки версия «с Диска» на проверке, буква U, день — по файлу',
         hd.added === 1 && hd.batch === 'Диск' && hd.letter === 'U' && hd.status === 'review' && hd.file === 'ret_1.tif' && /^\d{4}-\d{2}-\d{2}$/.test(hd.drop || ''), JSON.stringify(hd));
     }
+    /* 2.0.119: зеркало всех съёмок — сданное руками в 04 и на сайт записывается в отбор съёмки и в выработку, один раз */
+    {
+      const ZN = '2026-11-15_SV_ОПТИКА_ЗЕРКАЛО', ZS = 'disk:/Архив/' + ZN, ZR = RV + '/' + ZN, ZT = ST + '/17.11.26/U/2/' + ZN;
+      const ZN2 = '2026-11-16_SV_ОПТИКА_БЕЗОТБОРА', ZS2 = 'disk:/Архив/' + ZN2, ZR2 = RV + '/' + ZN2;
+      const mk = p => { const parts = p.split('/'); for (let i = 2; i <= parts.length; i++) DIRS.add(parts.slice(0, i).join('/')); };
+      [ZS + '/maxmara_оптика/75327_оптика', ZS + '/MM6_оптика/75324_оптика', ZR + '/maxmara_оптика/U_75327_оптика', ZR + '/MM6_оптика/U_75324_оптика', ZT + '/MM6_оптика/U_75324_оптика',
+        ZS2 + '/zz_оптика/75400_оптика', ZR2 + '/zz_оптика/Y_75400_оптика'].forEach(mk);
+      FILES.set(ZS + '/maxmara_оптика/75327_оптика/a.jpg', Buffer.from('A'.repeat(41)));
+      FILES.set(ZS + '/MM6_оптика/75324_оптика/b.jpg', Buffer.from('B'.repeat(42)));
+      FILES.set(ZR + '/maxmara_оптика/U_75327_оптика/ret.tif', Buffer.from('R'.repeat(43)));
+      FILES.set(ZR + '/MM6_оптика/U_75324_оптика/up.tif', Buffer.from('P'.repeat(44)));
+      FILES.set(ZT + '/MM6_оптика/U_75324_оптика/s.tif', Buffer.from('S'.repeat(45)));
+      FILES.set(ZS2 + '/zz_оптика/75400_оптика/c.jpg', Buffer.from('C'.repeat(46)));
+      FILES.set(ZR2 + '/zz_оптика/Y_75400_оптика/r2.tif', Buffer.from('Q'.repeat(47)));
+      FILES.set(ZS + '/_contentpulse.json', Buffer.from(JSON.stringify({ app: 'cardboard', version: 3, name: ZN, nextId: 5, photos: [], containers: [], templates: [],
+        cards: [{ id: 'z1', title: '75327', cpArticle: '75327', cpAuto: true, mode: 'auto', pids: [], slots: [], tags: [] }, { id: 'z2', title: '75324', cpArticle: '75324', cpAuto: true, mode: 'auto', pids: [], slots: [], tags: [] }],
+        meta: { cp: { status: {}, cardStatus: {}, events: [] } } })));
+      PROPS.set(ZR + '/MM6_оптика/U_75324_оптика', { cp_up: String(Date.now()) });   /* в эту папку программа сейчас грузит сама */
+      const run = (sig) => page.evaluate(async ([zs, zn, zr, zt, zs2, zn2, zr2, sig]) => {
+        const keep = { p: CP.stagePresence, w: CP.stagePaths, a: CP.stageArts, dict: CP.dict, groups: CP.dictGroups };
+        CP.dict = cpParseDict('[Ретушёры: один]\nY\nU');
+        const low = zn.toLowerCase(), low2 = zn2.toLowerCase();
+        CP.stagePresence = { review: { [low]: true, [low2]: true }, site: { [low]: true } };
+        CP.stagePaths = { review: { [low]: [zr], [low2]: [zr2] }, site: { [low]: [zt] } };
+        CP.stageArts = { review: { [low]: { '75327': 'U', '75324': 'U' }, [low2]: { '75400': 'Y' } }, site: { [low]: { '75324': 'U' } } };
+        try {
+          await cpMirrorBgShoot({ path: zs, name: zn, custom_properties: {} }, sig, cpRetoucherTags());
+          await cpMirrorBgShoot({ path: zs2, name: zn2, custom_properties: {} }, sig, cpRetoucherTags());
+          await _cpOutChain;
+        } finally { CP.stagePresence = keep.p; CP.stagePaths = keep.w; CP.stageArts = keep.a; CP.dict = keep.dict; CP.dictGroups = keep.groups; }
+      }, [ZS, ZN, ZR, ZT, ZS2, ZN2, ZR2, sig]);
+      await run('sig1');
+      const st1 = JSON.parse(FILES.get(ZS + '/_contentpulse.json').toString()).meta.cp;
+      const rowsOf = () => ((FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString().split('\n')).filter(l => l.indexOf(ZN) !== -1 || l.indexOf(ZN2) !== -1);
+      const r1 = rowsOf();
+      const v1 = (st1.rv && st1.rv.z1 || []).slice(-1)[0] || {};
+      check('2.0.119: сдали в 04 руками у съёмки, которую сейчас не открывали, — в её отборе версия «с Диска» на проверке (буква U), статус карточки — ретушь',
+        v1.batch === 'Диск' && v1.letter === 'U' && v1.status === 'review' && v1.dir === ZR + '/maxmara_оптика/U_75327_оптика' && st1.cardStatus.z1 && st1.cardStatus.z1.s === 'retouch', JSON.stringify([v1, st1.cardStatus]));
+      check('2.0.119: сдали на сайт руками — «загружено»: буква, день и дроп из пути (17.11.26 / U / 2); папку, в которую программа сейчас грузит сама, сданной руками не считаем',
+        st1.delivered && st1.delivered.z2 && st1.delivered.z2.letter === 'U' && st1.delivered.z2.date === '2026-11-17' && st1.delivered.z2.drop === '2' && !(st1.rv && st1.rv.z2), JSON.stringify([st1.delivered, st1.rv && st1.rv.z2]));
+      check('2.0.119: в выработке — строки о сданном руками: в 04 (и у съёмки без отбора) и на сайт, с ключом; отметка сверки на папке съёмки',
+        r1.length === 3 && r1.some(l => /;сдано;/.test(l) && /;04\|/.test(l) && l.indexOf(ZN + ';75327') !== -1) && r1.some(l => /;сдано;/.test(l) && /;сайт\|/.test(l) && /;руками сразу в 05_САЙТ;/.test(l))
+        && r1.some(l => l.indexOf(ZN2 + ';75400') !== -1 && /;Y;/.test(l)) && (PROPS.get(ZS) || {}).cp_mir === 'sig1', JSON.stringify([r1, PROPS.get(ZS)]));
+      /* на доработку руками: к папке версии в 04 дописали «_доработка» */
+      const RW = ZR + '/maxmara_оптика/U_75327_оптика';
+      for (const d of [...DIRS]) if (d === RW || d.indexOf(RW + '/') === 0) { DIRS.delete(d); DIRS.add(RW + '_доработка' + d.slice(RW.length)); }
+      for (const k of [...FILES.keys()]) if (k.indexOf(RW + '/') === 0) { FILES.set(RW + '_доработка' + k.slice(RW.length), FILES.get(k)); FILES.delete(k); }
+      await page.evaluate(async ([zs, zn, zr]) => {
+        const keep = { p: CP.stagePresence, w: CP.stagePaths, a: CP.stageArts, dict: CP.dict, groups: CP.dictGroups };
+        CP.dict = cpParseDict('[Ретушёры: один]\nY\nU');
+        const low = zn.toLowerCase();
+        CP.stagePresence = { review: { [low]: true } }; CP.stagePaths = { review: { [low]: [zr] } }; CP.stageArts = { review: { [low]: { '75327': 'U' } } };
+        try { await cpMirrorBgShoot({ path: zs, name: zn, custom_properties: {} }, 'sig2', cpRetoucherTags()); await _cpOutChain; }
+        finally { CP.stagePresence = keep.p; CP.stagePaths = keep.w; CP.stageArts = keep.a; CP.dict = keep.dict; CP.dictGroups = keep.groups; }
+      }, [ZS, ZN, ZR]);
+      const stR = JSON.parse(FILES.get(ZS + '/_contentpulse.json').toString()).meta.cp, vR = (stR.rv.z1 || []).slice(-1)[0] || {};
+      check('2.0.119: на доработку руками («_доработка» дописали к папке в 04) — версия «на доработке», строка в выработке',
+        vR.status === 'rework' && /_доработка$/.test(vR.dir || '') && (vR.files || [])[0] && /_доработка\/ret\.tif$/.test(vR.files[0].path) && rowsOf().some(l => /;доработка;/.test(l) && l.indexOf(ZN + ';75327') !== -1),
+        JSON.stringify([vR, rowsOf()]));
+      /* второй компьютер сверяет то же — ни новых версий, ни повторных строк */
+      await run('sig1');
+      const st2 = JSON.parse(FILES.get(ZS + '/_contentpulse.json').toString()).meta.cp;
+      check('2.0.119: то же самое заметил второй компьютер — версия не задвоилась, строки в выработке не повторились',
+        rowsOf().length === 4 && (st2.rv.z1 || []).length === (st1.rv.z1 || []).length, JSON.stringify([rowsOf(), (st2.rv.z1 || []).length]));
+      /* убрать за собой */
+      for (const d of [...DIRS]) if ([ZS, ZR, ZS2, ZR2, ST + '/17.11.26'].some(z => d === z || d.indexOf(z + '/') === 0)) DIRS.delete(d);
+      for (const k of [...FILES.keys()]) if ([ZS, ZR, ZS2, ZR2, ST + '/17.11.26'].some(z => k.indexOf(z + '/') === 0)) FILES.delete(k);
+      for (const k of [...PROPS.keys()]) if ([ZS, ZR, ZS2, ZR2].some(z => k === z || k.indexOf(z + '/') === 0)) PROPS.delete(k);
+      const csv = (FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString();
+      FILES.set('disk:/_ContentPulse/выработка.csv', Buffer.from(csv.split('\n').filter(l => l.indexOf(ZN) === -1 && l.indexOf(ZN2) === -1).join('\n')));
+    }
     await page.click('[data-cp-view-all]');
     check('«Показать все карточки» — снова все, полоски нет', !(await page.$('#cpViewBar')) && (await vis()).length > 2);
     await page.evaluate(p => { CP.stageFilter = ''; CP.viewStage = ''; CP.settings.site = p.site; if (p.retouched) CP.settings.retouched = p.retouched; else delete CP.settings.retouched; cbRenderCards(); }, prev);
@@ -1312,6 +1387,8 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       for (let i = 0; i < 60 && !DIRS.has(RTS + '1/U_74595_модель'); i++) await page.waitForTimeout(50);
       check('2.0.111: букву U поставили на карточку в программе — папка в 03 переименована: U_74595_модель (файлы внутри на месте)',
         DIRS.has(RTS + '1/U_74595_модель') && FILES.has(RTS + '1/U_74595_модель/manekin.jpg') && !DIRS.has(RTS + '1/74595_модель') && !DIRS.has(RTS + '1/Y_74595_модель'), dirsNow());
+      /* журнал дописывается, когда программа получила ответ Диска, — чуть позже, чем папка переименована */
+      await page.waitForFunction(() => cpMeta().events.some(e => e.action === 'retouch_letter' && /U_74595_модель/.test(e.note || '')), null, { timeout: 3000 }).catch(() => {});
       check('2.0.111: переименование — в журнале съёмки', await page.evaluate(() => cpMeta().events.some(e => e.action === 'retouch_letter' && /U_74595_модель/.test(e.note || ''))));
       /* в программе букву сняли — у папки буква убирается */
       await page.evaluate(() => { App.cards.filter(c => c.cpArticle === '74595').forEach(c => { c.tags = (c.tags || []).filter(t => t !== 'Y' && t !== 'U'); }); cbMarkDirty(); });

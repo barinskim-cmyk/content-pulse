@@ -118,6 +118,8 @@ function cpMirrorSync(quiet) {
     var idx = cpMirrorIndex();
     var res = cpMirrorApply(rs, letters, idx);
     CP.mirror = res;
+    /* сданное руками (в 04 и на сайт) — в выработку, один раз */
+    if (res.rows && res.rows.length && typeof cpOutputAppend === 'function') cpOutputAppend(res.rows);
     cpUpdateStatusLine();
     if (!quiet || res.changed.length) cbToast(res.changed.length ? 'Сверено с Диском: ' + res.changed.join(', ') : 'Сверено с Диском' + (res.issues ? ', расхождений: ' + res.issues : ' — всё совпадает'));
     /* сданное на сайт — из ретуши в Корзину */
@@ -288,6 +290,296 @@ function cpSitePathInfo(path) {
   return out;
 }
 
+/* Программа сама загружает в 04 (cp_up) или переносит на сайт (cp_mv) — метка на папке артикула на это время.
+   Пока она свежая, папку не считаем сданной руками: другой компьютер видит её раньше, чем программа запишет
+   версию в отбор. Метка старше этого срока (вкладку закрыли посреди загрузки) — уже как сданное руками. */
+CP.mirrorBusyMs = { up: 6 * 3600000, mv: 3600000 };
+function cpMirrorDirEntry(files, dir, letter) {
+  var pr = ((files && files.dirProps) || {})[dir] || {};
+  return { files: [], mod: '', letter: letter, up: pr.cp_up || '', mv: pr.cp_mv || '' };
+}
+function cpMirrorBusy(bd, kind) {
+  var t = +(bd && bd[kind]) || 0;
+  return t > 0 && Date.now() - t < CP.mirrorBusyMs[kind];
+}
+
+/**
+ * Сдали на сайт руками (или старший перенёс руками из 04): «загружено» у карточки — кто сдал, день и дроп
+ * по пути на сайте; версия на проверке — принята. Строка в выработку — одна на папку артикула на сайте.
+ * art — {letter, byDir: {папка артикула: {files, mod}}}.
+ */
+function cpMirrorSiteDelivered(m, c, art, shootName, letterHint, now, rows, rowDone) {
+  var dir = Object.keys(art.byDir).filter(function (x) { return !cpMirrorBusy(art.byDir[x], 'mv'); })[0];
+  if (!dir) return false;   /* программа сейчас сама переносит эту папку на сайт */
+  var bd = art.byDir[dir], spi = cpSitePathInfo(dir + '/x');
+  var day = spi.date || cpIsoDayOf(bd.mod) || cpToday(), key = 'сайт|' + dir;
+  var letter = spi.letter || bd.letter || art.letter || letterHint || '';
+  var rv = m.rv = m.rv || {}, lst = rv[c.id] || [], last = lst[lst.length - 1];
+  var accepted = !!(last && last.status === 'review');
+  if (accepted) { last.status = 'approved'; last.rby = 'Диск'; last.rts = now; last.site = CPDisk.showPath(dir); }
+  m.delivered = m.delivered || {};
+  m.delivered[c.id] = { files: bd.files.length, letter: letter, date: day, drop: spi.n || undefined, at: CPDisk.showPath(dir), out: 'Диск', ts: now, byArt: true };
+  if (rowDone[key]) return true;
+  rowDone[key] = true;
+  rows.push(cpDiskRow({ stamp: bd.mod, day: day, letter: letter, shoot: shootName, card: c.title || c.cpArticle || '', files: bd.files.length,
+    event: accepted ? 'принято' : 'сдано', way: (accepted ? 'руками перенесено в ' : 'руками сразу в ') + cpStageLabel('site'), v: accepted ? last.v : '', key: key }));
+  return true;
+}
+
+/**
+ * На доработку руками: к папке версии в 04 дописали «_доработка» (как делает кнопка «На доработку») — версия
+ * «на доработке», строка в выработку. true — отметили.
+ */
+function cpMirrorReworkByHand(m, c, art, shootName, now, rows, rowDone) {
+  var lst = ((m.rv || {})[c.id]) || [], last = lst[lst.length - 1];
+  if (!last || last.status !== 'review' || !last.dir || /_доработка$/i.test(last.dir)) return false;
+  var want = (last.dir + '_доработка').toLowerCase(), dirs = (art && art.byDir) || {};
+  var hit = Object.keys(dirs).filter(function (d) { return d.toLowerCase() === want && !cpMirrorBusy(dirs[d], 'mv'); })[0];
+  if (!hit) return false;
+  var from = last.dir, bd = dirs[hit], day = cpIsoDayOf(bd.mod) || cpToday(), key = 'доработка|' + hit + '|' + day;
+  (last.files || []).forEach(function (f) { if (f.path.indexOf(from + '/') === 0) f.path = hit + f.path.slice(from.length); });
+  last.dir = hit; last.status = 'rework'; last.rby = 'Диск'; last.rts = now; last.note = last.note || '';
+  if (!rowDone[key]) {
+    rowDone[key] = true;
+    rows.push(cpDiskRow({ stamp: bd.mod, day: day, letter: last.letter || '', shoot: shootName, card: c.title || c.cpArticle || '', files: (last.files || []).length,
+      event: 'доработка', way: 'руками на Диске («_доработка» в имени папки)', v: last.v, key: key }));
+  }
+  return true;
+}
+
+/**
+ * Сдали в 04 руками (Маша, 18.11.2026: «если кто-то загрузил на Диск, вместо того чтобы закинуть через программу,
+ * мы точно так же считываем, что и куда загружено, — программа просто зеркало»): папка артикула в 04, файлов
+ * которой нет ни в одной версии, — версия ретуши «с Диска» на проверку. Буква — из имени папки (U_75327…),
+ * день — по самому свежему файлу в ней. Имена файлов у ретушёров свои — по папке артикула, а не по кадрам.
+ * true — версия добавлена.
+ */
+function cpMirrorRvFromDisk(m, c, art, shootName, letterHint, now, rows, rowDone, knownAny) {
+  var dirs = art.byDir || {};
+  var newDir = Object.keys(dirs).filter(function (d) {
+    return !/_доработка$/i.test(d) && !cpMirrorBusy(dirs[d], 'up') && dirs[d].files.some(function (f) { return !knownAny[f.path]; });
+  })[0];
+  if (!newDir || ((m.cardStatus || {})[c.id] && m.cardStatus[c.id].s === 'reshoot')) return false;
+  var rv = m.rv = m.rv || {}, lst = rv[c.id] = rv[c.id] || [], last = lst[lst.length - 1];
+  if (last && last.status === 'review') return false;
+  var bd = dirs[newDir], day = cpIsoDayOf(bd.mod) || cpToday(), key = '04|' + newDir + '|' + day;
+  if (last && last.status === 'rework') last.status = 'replaced';   /* новая версия после доработки — сдали руками */
+  var ver = { v: lst.length + 1, batch: 'Диск', letter: bd.letter || art.letter || letterHint || '', n: '', date: day, dropDate: day, by: 'Диск', ts: now,
+    files: bd.files.slice(), status: 'review', dir: newDir, byArt: true, key: key };
+  lst.push(ver);
+  bd.files.forEach(function (f) { knownAny[f.path] = true; });
+  if (!rowDone[key]) {
+    rowDone[key] = true;
+    rows.push(cpDiskRow({ stamp: bd.mod, day: day, letter: ver.letter, shoot: shootName, card: c.title || c.cpArticle || '', files: bd.files.length, event: 'сдано',
+      way: 'руками в ' + cpStageLabel('review'), v: ver.v, key: key }));
+  }
+  return true;
+}
+
+/* ---------- зеркало всех съёмок (Маша, 18.11.2026) ----------
+   «При открытии программы мы смотрим на статус всего и обновляем этот статус исходя из того, что сейчас
+   находится на сервере, в каких папках что находится.» Раньше отбор съёмки сверялся с папками этапов только
+   при открытии самой съёмки. Теперь после каждой сверки витрины с Диском (при загрузке и раз в 40 секунд)
+   у каждой съёмки, которая лежит на этапах, берётся отпечаток: какие артикулы в 02/03/04/на сайте, с какими
+   буквами и в каких папках. Совпал с прошлым (cp_mir в свойствах папки съёмки) — ничего не делается и к Диску
+   не идёт. Не совпал — читается отбор съёмки и папки 04 и сайта, и в отбор записывается то, что лежит на
+   Диске: статус карточек по папкам этапов, буква ретушёра из имени папки в 03, версия ретуши, сданная в 04
+   руками, «загружено» и «принято» по сайту. Сданное руками — строкой в выработку (с ключом: один раз).
+   Открытую в этой вкладке съёмку сверяет сама съёмка (cpMirrorSync). Съёмку, которую в программе ещё не
+   открывали (отбора нет), не трогаем — только строки в выработку. */
+CP.mirrorAll = !window.cpNoMirrorAll;   /* автотесты выключают, где фоновые записи им мешают */
+CP.mirrorAllBusy = false;
+
+function cpHash(str) {
+  var h = 5381;
+  for (var i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+/** Отпечаток того, что лежит на этапах у съёмки; '' — ни на одном этапе её нет. */
+function cpMirrorSig(low) {
+  var parts = [];
+  ['approval', 'retouch', 'review', 'site'].forEach(function (k) {
+    if (!((CP.stagePresence || {})[k] || {})[low]) return;
+    var a = ((CP.stageArts || {})[k] || {})[low];
+    var codes = a ? Object.keys(a).sort().map(function (c) { return c + ':' + (a[c] || ''); }) : ['?'];
+    var dm = (((CP.stageDirs || {})[k] || {})[low]) || {};
+    var dirs = Object.keys(dm).sort().map(function (c) { return dm[c].slice().sort().join(','); });
+    parts.push(k + '=' + codes.join(',') + '#' + dirs.join(';'));
+  });
+  return parts.length ? cpHash(parts.join('|')) : '';
+}
+
+/** Файлы этапа по артикулам: {код: {letter, byDir: {папка артикула: {files, mod, letter}}}}. */
+function cpMirrorArts(found, letters, stype) {
+  var out = {};
+  (found || []).forEach(function (f) {
+    (f.files || []).forEach(function (file) {
+      if (file.name === CPDisk.STATE_FILE) return;
+      var segs = file.path.slice(f.path.length + 1).split('/'), name = segs.pop(), code = '', artDir = '', letter = '';
+      segs.forEach(function (sg) { var l = cpLetterSplit(sg, letters); if (l) letter = l.letter; });
+      for (var si = segs.length - 1; si >= 0 && !code; si--) {
+        var sp = cpLetterSplit(segs[si], letters);
+        code = cpArtCode(stype, sp ? sp.rest : segs[si]);
+        if (code) artDir = f.path + '/' + segs.slice(0, si + 1).join('/');
+      }
+      if (!code) { code = cpArtCode(stype, name); if (code) artDir = file.path.slice(0, file.path.lastIndexOf('/')); }
+      if (!code) return;
+      var a = out[code] = out[code] || { letter: '', byDir: {} };
+      if (!a.letter && letter) a.letter = letter;
+      var bd = a.byDir[artDir] = a.byDir[artDir] || cpMirrorDirEntry(f.files, artDir, letter);
+      bd.files.push({ path: file.path, name: file.name, size: file.size });
+      if ((file.modified || '') > bd.mod) bd.mod = file.modified || '';
+    });
+  });
+  return out;
+}
+
+/**
+ * Отбор съёмки (data) — по тому, что лежит на этапах (ph: approval/retouch — {код: буква} по сверке витрины;
+ * review/site — cpMirrorArts по самим папкам). Только по артикулам. -> {changed, rows}
+ */
+function cpMirrorDataApply(data, d, ph, letters) {
+  data.meta = data.meta || {};
+  var m = data.meta.cp = data.meta.cp || {};
+  m.cardStatus = m.cardStatus || {};
+  var now = new Date().toISOString(), rows = [], rowDone = {}, n = { st: 0, l: 0, rv: 0, site: 0 };
+  var cards = data.cards || [];
+  var rv = m.rv || {}, knownAny = {};
+  Object.keys(rv).forEach(function (id) { (rv[id] || []).forEach(function (v) { (v.files || []).forEach(function (f) { knownAny[f.path] = true; }); }); });
+  var letterOf = function (c) { return (c.tags || []).filter(function (t) { return letters.indexOf(t) !== -1; })[0] || ''; };
+  /* буква ретушёра из имени папки в 03 -> тег карточек артикула (с Диска буква только приходит, как в cpRtDecide) */
+  var base = m.rtLetter = m.rtLetter || {};
+  Object.keys(ph.retouch || {}).forEach(function (code) {
+    var dl = ph.retouch[code];
+    if (!dl || letters.indexOf(dl) === -1) return;
+    var cs = cards.filter(function (c) { return c.cpArticle === code; });
+    if (!cs.length || (base[code] && base[code].l === dl)) return;
+    cs.forEach(function (c) {
+      if (letterOf(c) === dl && (c.tags || []).filter(function (t) { return letters.indexOf(t) !== -1; }).length === 1) return;
+      c.tags = (c.tags || []).filter(function (t) { return letters.indexOf(t) === -1; });
+      c.tags.push(dl);
+      n.l++;
+    });
+    base[code] = { l: dl, ts: now };
+    n.base = true;
+  });
+  cards.forEach(function (c) {
+    var code = c.cpArticle;
+    if (!code || code.indexOf(',') !== -1) return;
+    var inA = !!(ph.approval && ph.approval[code] !== undefined), inR = !!(ph.retouch && ph.retouch[code] !== undefined);
+    var rvA = ph.review && ph.review[code], stA = ph.site && ph.site[code];
+    var cs = m.cardStatus[c.id];
+    var want = inR || rvA || stA ? 'retouch' : inA ? 'approval' : '';
+    if (want && !(cs && (cs.s === 'reshoot' || cpStatusRank(cs.s) >= cpStatusRank(want)))) { m.cardStatus[c.id] = { s: want, by: 'Диск', ts: now }; n.st++; }
+    if (stA && !(m.delivered || {})[c.id] && cpMirrorSiteDelivered(m, c, stA, d.name, letterOf(c), now, rows, rowDone)) n.site++;
+    if (rvA && cpMirrorReworkByHand(m, c, rvA, d.name, now, rows, rowDone)) n.rv++;
+    if (rvA && cpMirrorRvFromDisk(m, c, rvA, d.name, letterOf(c), now, rows, rowDone, knownAny)) n.rv++;
+  });
+  var changed = n.st + n.l + n.rv + n.site > 0;
+  if (changed) {
+    var note = [];
+    if (n.st) note.push('статусов ' + n.st);
+    if (n.l) note.push('букв ретушёров ' + n.l);
+    if (n.rv) note.push('версий ретуши ' + n.rv);
+    if (n.site) note.push('загружено ' + n.site);
+    (m.events = m.events || []).push({ ts: now, actor: 'Диск', action: 'mirror', items: [], note: 'сверка с Диском (витрина): ' + note.join(', ') });
+  }
+  return { changed: changed || !!n.base, rows: rows };
+}
+
+/** Строки выработки у съёмки, которую в программе не открывали: что сдано руками в 04 и на сайт. */
+function cpMirrorRowsNoState(d, ph) {
+  var rows = [], done = {};
+  Object.keys(ph.review || {}).forEach(function (code) {
+    var dirs = ph.review[code].byDir;
+    Object.keys(dirs).forEach(function (dir) {
+      if (/_доработка$/i.test(dir)) return;
+      var bd = dirs[dir], day = cpIsoDayOf(bd.mod) || cpToday(), key = '04|' + dir + '|' + day;
+      if (done[key]) return;
+      done[key] = true;
+      rows.push(cpDiskRow({ stamp: bd.mod, day: day, letter: bd.letter || ph.review[code].letter, shoot: d.name, card: code, files: bd.files.length, event: 'сдано',
+        way: 'руками в ' + cpStageLabel('review'), key: key }));
+    });
+  });
+  Object.keys(ph.site || {}).forEach(function (code) {
+    var dir = Object.keys(ph.site[code].byDir)[0], bd = ph.site[code].byDir[dir], spi = cpSitePathInfo(dir + '/x'), key = 'сайт|' + dir;
+    if (done[key]) return;
+    done[key] = true;
+    rows.push(cpDiskRow({ stamp: bd.mod, day: spi.date || cpIsoDayOf(bd.mod), letter: spi.letter || bd.letter || ph.site[code].letter, shoot: d.name, card: code,
+      files: bd.files.length, event: 'сдано', way: 'руками сразу в ' + cpStageLabel('site'), key: key }));
+  });
+  return rows;
+}
+
+/** Одна съёмка: прочитать отбор и папки 04 и сайта, записать в отбор то, что на Диске. */
+function cpMirrorBgShoot(d, sig, letters) {
+  var low = d.name.toLowerCase(), stype = typeof cpShootType === 'function' ? cpShootType(d.name) : null;
+  var ph = { approval: ((CP.stageArts || {}).approval || {})[low] || null, retouch: ((CP.stageArts || {}).retouch || {})[low] || null };
+  var walk = function (key) {
+    var paths = ((CP.stagePaths || {})[key] || {})[low] || [];
+    if (!((CP.stagePresence || {})[key] || {})[low] || !paths.length) return Promise.resolve({});
+    return cpPool(paths, 1, function (p) {
+      return CPDisk.walkPhotos(p, false, 2, true, 3).then(function (files) { return { path: p, files: files }; }, function () { return { path: p, files: [] }; });
+    }).then(function (found) { return cpMirrorArts(found, letters, stype); });
+  };
+  var mark = function () {
+    return CPDisk.proxyProps(d.path, { cp_mir: sig }).then(function () {
+      d.custom_properties = d.custom_properties || {};
+      d.custom_properties.cp_mir = sig;
+    }, function () { });
+  };
+  var data0 = null;
+  return CPDisk.bg(3, function () { return CPDisk.readState(d.path); }).then(function (st) {
+    data0 = st && st.data;
+    return Promise.all([walk('review'), walk('site')]);
+  }).then(function (w) {
+    ph.review = w[0]; ph.site = w[1];
+    if (!data0) return cpOutputAppend(cpMirrorRowsNoState(d, ph)).then(mark);
+    var res = cpMirrorDataApply(cpClone(data0), d, ph, letters);
+    if (!res.changed) return mark();
+    /* сводку для витрины после записи отбор считает по папкам съёмки — обход заранее, в последнюю очередь */
+    return (typeof cpWalk === 'function' ? cpWalk(d.path, false, 3).then(null, function () { return null; }) : Promise.resolve()).then(function () {
+      return cpMutateState({ path: d.path, name: d.name }, function (data) { res = cpMirrorDataApply(data, d, ph, letters); });
+    }).then(function () { return cpOutputAppend(res.rows); }).then(mark);
+  });
+}
+
+function cpMirrorAll() {
+  if (!CP.mirrorAll || CP.mirrorAllBusy || typeof cpCatalog !== 'function' || !cpCatalog() || CP.stageArtsFor !== CP.archive || !CP.shoots || !CPDisk.hasProxy()) return Promise.resolve();
+  var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  var archive = CP.archive, todo = [];
+  CP.shoots.forEach(function (d) {
+    if (CP.shoot && CP.shoot.path === d.path) return;   /* открытую сверяет сама съёмка */
+    var sig = cpMirrorSig(d.name.toLowerCase());
+    if (!sig || ((d.custom_properties || {}).cp_mir || '') === sig) return;
+    todo.push({ d: d, sig: sig });
+  });
+  if (!todo.length) return Promise.resolve();
+  CP.mirrorAllBusy = true;
+  var any = false;
+  return todo.reduce(function (p, t) {
+    return p.then(function () {
+      if (CP.archive !== archive || !CP.mirrorAll) return;
+      any = true;
+      return cpMirrorBgShoot(t.d, t.sig, letters).catch(function (e) { if (window.console) console.warn('[CP] зеркало: съёмка не сверилась', t.d.name, e && (e.body || e.message || e)); });
+    });
+  }, Promise.resolve()).then(function () {
+    CP.mirrorAllBusy = false;
+    if (any && CP.archive === archive) cpRenderShoots();
+  }, function () { CP.mirrorAllBusy = false; });
+}
+
+/* после каждой сверки витрины с Диском (папки этапов и артикулы на них прочитаны) */
+cpScanStages = (function (orig) {
+  return function () {
+    return Promise.resolve(orig.apply(this, arguments)).then(function (r) {
+      setTimeout(function () { cpMirrorAll(); }, 0);
+      return r;
+    });
+  };
+})(cpScanStages);
+
 /** Разложить найденные файлы по кадрам отбора и выставить статусы. */
 function cpMirrorApply(rs, letters, idx) {
   var m = cpMeta(), who = 'Диск', now = new Date().toISOString();
@@ -317,18 +609,18 @@ function cpMirrorApply(rs, letters, idx) {
           apk.n++;
           if (!apk.letter && letter) apk.letter = letter;
           /* файлы артикула на этапе по папкам — для версии ретуши, сданной руками (имена файлов у ретушёров свои) */
-          var bd = apk.byDir[artDir] = apk.byDir[artDir] || { files: [], mod: '', letter: letter };
+          var bd = apk.byDir[artDir] = apk.byDir[artDir] || cpMirrorDirEntry(f.files, artDir, letter);
           bd.files.push({ path: file.path, name: file.name, size: file.size });
           if ((file.modified || '') > bd.mod) bd.mod = file.modified || '';
         }
         if (!p) { unmatched.push({ stage: r.stage.label, path: file.path }); return; }
         var pr = pres[p.id] = pres[p.id] || {};
-        pr[r.stage.key] = { path: file.path, name: file.name, size: file.size, letter: letter, prio: f.prio, key: mt.rel,
+        pr[r.stage.key] = { path: file.path, name: file.name, size: file.size, modified: file.modified || '', mv: (((f.files.dirProps || {})[file.path.slice(0, file.path.lastIndexOf('/'))]) || {}).cp_mv || '', letter: letter, prio: f.prio, key: mt.rel,
           rid: typeof cpRidShort === 'function' ? cpRidShort(file) : '' };
       });
     });
   });
-  var changed = [], nStat = 0, nLetter = 0, nRv = 0, nSite = 0;
+  var changed = [], nStat = 0, nLetter = 0, nRv = 0, nSite = 0, rows = [], rowDone = {};
   /* буква ретушёра ⇄ имя папки артикула в 03: сначала сверка букв, потом статусы и версии */
   var rtSync = cpRtLetterReconcile(rs, letters, idx);
   nLetter = rtSync.nCards;
@@ -358,32 +650,11 @@ function cpMirrorApply(rs, letters, idx) {
     var want = ap.retouch || ap.review || ap.site ? 'retouch' : ap.approval ? 'approval' : '';
     if (want && !(cs && (cs.s === 'reshoot' || cpStatusRank(cs.s) >= cpStatusRank(want)))) { m.cardStatus[c.id] = { s: want, by: who, ts: now }; nStat++; }
     var lt = cpCardLetter(c) || (ap.site && ap.site.letter) || '';   /* буква ретушёра — по сверке папок 03 (cpRtLetterReconcile) */
-    if (ap.site && !(m.delivered || {})[c.id]) {
-      m.delivered = m.delivered || {};
-      var sp0 = ap.site.path, si0 = cpSitePathInfo(sp0);
-      /* сдали на сайт руками: кто, когда и какой дроп — по пути (дата / буква / номер дропа / …) */
-      m.delivered[c.id] = { files: ap.site.n, letter: si0.letter || ap.site.letter || lt || '', date: si0.date || cpToday(), drop: si0.n || undefined,
-        at: CPDisk.showPath(sp0.slice(0, sp0.lastIndexOf('/'))), out: 'Диск', ts: now, byArt: true };
-      nSite++;
-    }
-    /* Сдали в 04 руками (Маша, 18.11.2026: «если кто-то загрузил на Диск, вместо того чтобы закинуть через
-       программу, мы точно так же считываем, что и куда загружено, — программа просто зеркало»): папка
-       артикула в 04, файлов которой нет ни в одной версии, — версия ретуши «с Диска» на проверку. Буква — из
-       имени папки (U_75327…), день — по самому свежему файлу в ней. Имена файлов у ретушёров свои — по папке
-       артикула, а не по кадрам. */
-    var rvDirs = ap.review ? ap.review.byDir : {};
-    var newDir = Object.keys(rvDirs).filter(function (d) { return !/_доработка$/i.test(d) && rvDirs[d].files.some(function (f) { return !knownAny[f.path]; }); })[0];
-    if (newDir && !(m.cardStatus[c.id] && m.cardStatus[c.id].s === 'reshoot')) {
-      var rvA = rvDirs[newDir], rvl = cpRv(), lst = rvl[c.id] = rvl[c.id] || [], lastV = lst[lst.length - 1];
-      if (!(lastV && lastV.status === 'review')) {
-        var dayA = cpIsoDayOf(rvA.mod) || cpToday();
-        if (lastV && lastV.status === 'rework') lastV.status = 'replaced';   /* сдали новую версию после доработки руками */
-        lst.push({ v: lst.length + 1, batch: 'Диск', letter: rvA.letter || cpCardLetter(c) || '', n: '', date: dayA, dropDate: dayA, by: who, ts: now,
-          files: rvA.files.slice(), status: 'review', dir: newDir, byArt: true });
-        rvA.files.forEach(function (f) { knownAny[f.path] = true; });
-        nRv++;
-      }
-    }
+    /* сдали на сайт руками: кто, когда и какой дроп — по пути (дата / буква / номер дропа / …); строка в выработку */
+    if (ap.site && !(m.delivered || {})[c.id] && cpMirrorSiteDelivered(m, c, ap.site, CP.shoot.name, lt, now, rows, rowDone)) nSite++;
+    /* на доработку руками («_доработка» в имени папки в 04) и сдали в 04 руками — версия ретуши «с Диска»; строки в выработку */
+    if (ap.review && cpMirrorReworkByHand(m, c, ap.review, CP.shoot.name, now, rows, rowDone)) nRv++;
+    if (ap.review && cpMirrorRvFromDisk(m, c, ap.review, CP.shoot.name, cpCardLetter(c), now, rows, rowDone, knownAny)) nRv++;
   });
   App.cards.forEach(function (c) {
     var pids = cpCardPids(c).filter(function (pid) { return pres[pid]; });
@@ -401,17 +672,23 @@ function cpMirrorApply(rs, letters, idx) {
       var known = {};
       list.forEach(function (v) { (v.files || []).forEach(function (f) { known[f.path] = true; }); });
       if (rvFiles.some(function (f) { return !known[f.path]; }) && !(last && last.status === 'review')) {
-        list.push({ v: list.length + 1, batch: 'Диск', letter: letter || (cpCardLetter(c) || ''), n: '', date: cpToday(), by: who, ts: now, files: rvFiles, status: 'review' });
+        var rvMod = pids.reduce(function (a2, pid) { var x = pres[pid].review; return x && x.modified > a2 ? x.modified : a2; }, '');
+        var rvDay = cpIsoDayOf(rvMod) || cpToday(), rvDir = rvFiles[0].path.slice(0, rvFiles[0].path.lastIndexOf('/')), rvKey = '04|' + rvDir + '|' + rvDay;
+        list.push({ v: list.length + 1, batch: 'Диск', letter: letter || (cpCardLetter(c) || ''), n: '', date: rvDay, dropDate: rvDay, by: who, ts: now, files: rvFiles, status: 'review', key: rvKey });
+        if (!rowDone[rvKey]) { rowDone[rvKey] = true; rows.push(cpDiskRow({ stamp: rvMod, day: rvDay, letter: letter || cpCardLetter(c) || '', shoot: CP.shoot.name, card: c.title || '', files: rvFiles.length, event: 'сдано', way: 'руками в ' + cpStageLabel('review'), v: list.length, key: rvKey })); }
         nRv++;
       }
     }
     var site = pids.filter(function (pid) { return pres[pid].site; });
     if (site.length && !(m.delivered || {})[c.id]) {
-      m.delivered = m.delivered || {};
-      var sp = pres[site[0]].site.path, spi = cpSitePathInfo(sp);
-      m.delivered[c.id] = { files: site.length, letter: spi.letter || pres[site[0]].site.letter || letter || cpCardLetter(c) || '', date: spi.date || cpToday(), drop: spi.n || undefined,
-        at: CPDisk.showPath(sp.slice(0, sp.lastIndexOf('/'))), out: 'Диск', ts: now };
-      nSite++;
+      var sArt = { letter: pres[site[0]].site.letter || '', byDir: {} };
+      site.forEach(function (pid) {
+        var x = pres[pid].site, sd = x.path.slice(0, x.path.lastIndexOf('/'));
+        var bd = sArt.byDir[sd] = sArt.byDir[sd] || { files: [], mod: '', letter: x.letter || '', mv: x.mv || '' };
+        bd.files.push({ path: x.path, name: x.name, size: x.size });
+        if ((x.modified || '') > bd.mod) bd.mod = x.modified || '';
+      });
+      if (cpMirrorSiteDelivered(m, c, sArt, CP.shoot.name, letter || cpCardLetter(c) || '', now, rows, rowDone)) nSite++;
     }
   });
   if (nStat) changed.push('статусов ' + nStat);
@@ -438,7 +715,7 @@ function cpMirrorApply(rs, letters, idx) {
     cbRenderOutline();
     cbRenderTray();
   }
-  return { ts: now, changed: changed, missing: missing, unmatched: unmatched, rtRenames: rtSync.renames, roots: rs.map(function (r) { return { label: r.stage.label, found: (r.found || []).map(function (f) { return CPDisk.showPath(f.path); }) }; }), issues: missing.length + unmatched.length };
+  return { ts: now, changed: changed, missing: missing, unmatched: unmatched, rtRenames: rtSync.renames, rows: rows, roots: rs.map(function (r) { return { label: r.stage.label, found: (r.found || []).map(function (f) { return CPDisk.showPath(f.path); }) }; }), issues: missing.length + unmatched.length };
 }
 
 /* ---------- расхождения: панель ---------- */

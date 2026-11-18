@@ -279,7 +279,7 @@ function cpCountStageArts(keys) {
        там лежит сданное за месяцы. */
     Object.keys(w).forEach(function (low) { if (known[low] || key !== 'site') jobs.push({ key: key, low: low, name: known[low] || low, paths: w[low] }); });
   });
-  var fresh = {}, dirsNow = {};
+  var fresh = {}, dirsNow = {}, dirsAll = {};   /* dirsAll: этап -> съёмка -> код -> папки артикула (для зеркала, cp-mirror.js) */
   var oldOf = (CP.siteOldFor === archive && CP.siteOldOf) || {}, oldCache = (CP.siteOldFor === archive && CP.siteOld) || {}, oldDirty = false;
   /* буквы ретушёров и правила кода артикула — из словаря тегов и структуры съёмок: считаем, когда они
      прочитаны (18.11.2026: без словаря папка «K_23466…» не считалась папкой артикула — артикул пропадал
@@ -318,6 +318,8 @@ function cpCountStageArts(keys) {
               /* «Сайт»: пустая папка артикула — не «сдано» (в папку сайта могли положить всю структуру целиком) */
               if (j.key === 'site') { check.push({ x: x, code: code, letter: letter }); return; }
               any = true; c[code] = c[code] || letter;
+              var da = ((dirsAll[j.key] = dirsAll[j.key] || {})[j.low] = dirsAll[j.key][j.low] || {});
+              (da[code] = da[code] || []).push(x.path);
               /* где лежит папка артикула — для «Убрать из ретуши сданное» */
               if (j.key === 'retouch') { var dm = (dirsNow[j.low] = dirsNow[j.low] || {}); (dm[code] = dm[code] || []).push(x.path); }
             });
@@ -325,7 +327,12 @@ function cpCountStageArts(keys) {
             if (j.key === 'site' && !here) files.forEach(function (n) { var fc = cpArtCode(type, n); if (fc) { any = true; if (c[fc] === undefined) c[fc] = ''; } });
           });
           return cpPool(check, 4, function (k) {
-            return cpSiteDirHas(k.x).then(function (has) { if (has) { any = true; c[k.code] = c[k.code] || k.letter; } });
+            return cpSiteDirHas(k.x).then(function (has) {
+              if (!has) return;
+              any = true; c[k.code] = c[k.code] || k.letter;
+              var ds = ((dirsAll.site = dirsAll.site || {})[j.low] = dirsAll.site[j.low] || {});
+              (ds[k.code] = ds[k.code] || []).push(k.x.path);
+            });
           }).then(function () { return walk(next, depth + 1); });
         });
       }
@@ -361,6 +368,9 @@ function cpCountStageArts(keys) {
     var same = CP.stageArtsFor === archive, arts = same ? Object.assign({}, CP.stageArts) : {};
     mine.forEach(function (k) { if (fresh[k]) arts[k] = fresh[k]; else delete arts[k]; });
     CP.stageArts = arts;
+    var dmap = same && CP.stageDirs ? Object.assign({}, CP.stageDirs) : {};
+    mine.forEach(function (k) { if (dirsAll[k]) dmap[k] = dirsAll[k]; else delete dmap[k]; });
+    CP.stageDirs = dmap;
     if (mine.indexOf('retouch') !== -1) CP.rtArtDirs = dirsNow;   /* съёмка -> код -> папки артикула в 03 */
     else if (!same) CP.rtArtDirs = {};
     CP.stageArtsFor = archive;

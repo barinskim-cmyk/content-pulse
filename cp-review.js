@@ -26,7 +26,24 @@
 
 var CP_OUTPUT_FILE = 'выработка.csv';
 var CP_OUTPUT_HEAD_OLD = 'дата;время;ретушёр;съёмка;карточка;кадров;событие;кто;версия';
-var CP_OUTPUT_HEAD = CP_OUTPUT_HEAD_OLD + ';способ';   /* способ — как отправили на сайт (2.0.98) */
+var CP_OUTPUT_HEAD_V2 = CP_OUTPUT_HEAD_OLD + ';способ';   /* способ — как отправили на сайт (2.0.98) */
+/* ключ (2.0.119) — у строк о сдаче, найденной на Диске (сдали руками): папка и день. По нему строка пишется
+   один раз, сколько бы компьютеров эту сдачу ни заметили. У строк о действиях в программе он пустой. */
+var CP_OUTPUT_HEAD = CP_OUTPUT_HEAD_V2 + ';ключ';
+
+/** Поля строки CSV (с кавычками, как пишет cpOutputAppend). */
+function cpCsvFields(line) {
+  var out = [], cur = '', q = false;
+  for (var i = 0; i < line.length; i++) {
+    var ch = line.charAt(i);
+    if (q) { if (ch === '"') { if (line.charAt(i + 1) === '"') { cur += '"'; i++; } else q = false; } else cur += ch; }
+    else if (ch === '"') q = true;
+    else if (ch === ';') { out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
 
 function cpReviewRoot() { return (CP.settings && CP.settings.retouched) || ''; }
 
@@ -79,17 +96,36 @@ function cpRvDirOf(ver) { return ver.dir || (ver.files && ver.files[0] ? cpParen
 
 /* ---------- выработка: строка на каждую сдачу и решение ---------- */
 
+var _cpOutChain = Promise.resolve();
 function cpOutputAppend(rows, file, head) {
-  if (!rows.length) return Promise.resolve();
+  if (!rows || !rows.length) return Promise.resolve();
+  /* записи в одну таблицу из этой вкладки — по очереди: две одновременные затирали бы друг друга */
+  var run = function () { return cpOutputAppendNow(rows, file, head); };
+  var p = _cpOutChain.then(run, run);
+  _cpOutChain = p.then(null, function () { });
+  return p;
+}
+function cpOutputAppendNow(rows, file, head) {
   file = file || CP_OUTPUT_FILE; head = head || CP_OUTPUT_HEAD;
   var path = cpServicePath(file);
   var esc = function (v) { v = String(v === undefined || v === null ? '' : v); return /[;"\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
-  var text = rows.map(function (r) { return r.map(esc).join(';'); }).join('\n');
   return CPDisk.proxyFile(path).then(function (b) { return b.text(); }, function (e) { if (e && e.status === 404) return ''; throw e; })
     .then(function (old) {
       old = String(old || '').replace(/^﻿/, '').replace(/\s+$/, '');
-      /* таблица заведена до столбца «способ» — дописываем его в заголовок */
-      if (file === CP_OUTPUT_FILE && old.indexOf(CP_OUTPUT_HEAD_OLD) === 0 && old.indexOf(CP_OUTPUT_HEAD) !== 0) old = CP_OUTPUT_HEAD + old.slice(CP_OUTPUT_HEAD_OLD.length);
+      if (file === CP_OUTPUT_FILE && old) {
+        /* таблица заведена раньше — дописываем в заголовок новые столбцы («способ», «ключ») */
+        var nl = old.indexOf('\n'), first = nl < 0 ? old : old.slice(0, nl);
+        if (first !== CP_OUTPUT_HEAD && (first === CP_OUTPUT_HEAD_V2 || first === CP_OUTPUT_HEAD_OLD)) old = CP_OUTPUT_HEAD + (nl < 0 ? '' : old.slice(nl));
+      }
+      var list = rows;
+      if (file === CP_OUTPUT_FILE) {
+        /* строка с ключом (сдача, найденная на Диске) — один раз */
+        var have = {};
+        old.split('\n').slice(1).forEach(function (l) { var f = cpCsvFields(l); if (f.length > 10 && f[10]) have[f[10]] = true; });
+        list = rows.filter(function (r) { var k = r[10]; if (!k) return true; if (have[k]) return false; have[k] = true; return true; });
+        if (!list.length) return;
+      }
+      var text = list.map(function (r) { return r.map(esc).join(';'); }).join('\n');
       var body = '﻿' + (old || head) + '\n' + text + '\n';   /* BOM — Excel открывает кириллицу */
       return CPDisk.ensureDir(CP_CONFIG.serviceDir).then(function () {
         return CPDisk.uploadBlob(path, new Blob([body], { type: 'text/csv;charset=utf-8' }), true);
@@ -97,10 +133,20 @@ function cpOutputAppend(rows, file, head) {
     }).catch(function (e) { if (window.console) console.warn('[CP] ' + file + ' не записался', e && (e.body || e.message || e)); });
 }
 
+/**
+ * Строка выработки о сдаче, найденной на Диске (сдали руками, а не через программу). o: {stamp — дата файла
+ * на Диске (время сдачи), day — день (иначе по stamp), letter, shoot, card, files, event, way, v, key}.
+ */
+function cpDiskRow(o) {
+  var t = Date.parse(o.stamp || ''), d = isNaN(t) ? new Date() : new Date(t), z = function (n) { return (n < 10 ? '0' : '') + n; };
+  var day = o.day || (d.getFullYear() + '-' + z(d.getMonth() + 1) + '-' + z(d.getDate()));
+  return [day, z(d.getHours()) + ':' + z(d.getMinutes()), o.letter || '', o.shoot || '', o.card || '', o.files || 0, o.event || 'сдано', 'Диск', o.v ? 'v' + o.v : '', o.way || '', o.key || ''];
+}
+
 function cpOutputRow(ver, shootName, card, event, via) {
   var d = new Date(), z = function (n) { return (n < 10 ? '0' : '') + n; };
   return [cpToday(), z(d.getHours()) + ':' + z(d.getMinutes()), ver.letter || '', shootName, card ? card.title || '' : '', (ver.files || []).length, event, cpActor(), 'v' + ver.v,
-    typeof cpRvViaText === 'function' ? cpRvViaText(via) : ''];
+    typeof cpRvViaText === 'function' ? cpRvViaText(via) : '', ''];
 }
 
 /* ---------- номер дропа (Маша, 18.11.2026) ----------
@@ -323,6 +369,9 @@ cpAcceptUpload = function () {
     build();
     return Object.keys(dirs).reduce(function (p, d) { return p.then(function () { return CPDisk.ensureDir(d); }); }, Promise.resolve());
   }).then(function () {
+    /* метка «загружает программа» — чтобы другой компьютер не принял папку за сданную руками (cp-mirror.js) */
+    return Promise.all(Object.keys(dirs).map(function (d) { return CPDisk.proxyProps(d, { cp_up: String(Date.now()) }).catch(function () { }); }));
+  }).then(function () {
     show();
     return cpPool(jobs, 3, function (j, i) {
       now = j.name;
@@ -373,7 +422,7 @@ cpAcceptUpload = function () {
       /* новый дроп этого ретушёра сегодня — запомнить номер (следующая сдача получит следующий) */
       if (Object.keys(byCard).some(function (id) { return !dropOf[id].again; })) cpDropsNote(st.letter, cpToday(), st.n);
       /* метка на папке: кто и когда сдал (видна программе, в Диске не мешает) */
-      Object.keys(byCard).forEach(function (id) { CPDisk.proxyProps(dirOf[id], { cp_rt: st.letter, cp_rt_date: cpToday() }).catch(function () { }); });
+      Object.keys(byCard).forEach(function (id) { CPDisk.proxyProps(dirOf[id], { cp_rt: st.letter, cp_rt_date: cpToday(), cp_up: null }).catch(function () { }); });
       var jobs2 = [cpOutputAppend(rows)];
       if (oldDirs.length) jobs2.push(CPDisk.trash(oldDirs));
       /* по списку прошлой версии, а не по папке: Диск показывает свежие файлы в списке не сразу */
@@ -526,7 +575,8 @@ cpRvApprove = function (ids, via) {
        а она уходит в очередь (cp-queue.js) и переносится, пока не перенесётся */
     return todo.reduce(function (p, t) {
       return p.then(function () {
-        return cpMoveMerge(t.from, t.to).then(function (to) {
+        /* метка «переносит программа» едет вместе с папкой — на сайте её не примут за сданное руками (cp-mirror.js) */
+        return CPDisk.proxyProps(t.from, { cp_mv: String(Date.now()) }).catch(function () { }).then(function () { return cpMoveMerge(t.from, t.to); }).then(function (to) {
           t.to = to;
           moved.push(t);
         }, function (e) {
@@ -626,7 +676,8 @@ cpRvRework = function (id, note) {
   if (note === null) return;
   var from = cpRvDirOf(last), card = cbCardById(id);
   var to = from.replace(/_доработка$/i, '') + '_доработка';
-  var step = from && from !== to ? cpMoveFolder(from, to) : Promise.resolve(from);
+  /* метка «переименовывает программа» едет с папкой — зеркало не примет это за доработку руками (cp-mirror.js) */
+  var step = from && from !== to ? CPDisk.proxyProps(from, { cp_mv: String(Date.now()) }).catch(function () { }).then(function () { return cpMoveFolder(from, to); }) : Promise.resolve(from);
   step.then(function (dir) {
     if (dir && dir !== from) {
       last.files.forEach(function (f) { if (f.path.indexOf(from + '/') === 0) f.path = dir + f.path.slice(from.length); });
@@ -1724,6 +1775,9 @@ function cpRvCardUpload(id, files) {
     dir = d;
     olds.forEach(function (o) { if (o.path.indexOf(from + '/') === 0) { var np = dir + o.path.slice(from.length); if (replaced[o.path]) { replaced[np] = true; } o.path = np; } });
     prog();
+    /* метка «загружает программа» (cp-mirror.js) — снимается после записи версии */
+    return CPDisk.proxyProps(dir, { cp_up: String(Date.now()) }).catch(function () { });
+  }).then(function () {
     return cpPool(jobs, 3, function (j, i) {
       return cpUpSure(dir + '/' + j.name, j.file, true, function (b) { loaded[i] = b; prog(); })
         .then(function () { loaded[i] = j.file.size; ok.push(j); }, function (e) { loaded[i] = j.file.size; failed.push(j.name + ': ' + (e && (e.message || e.status))); })
@@ -1770,7 +1824,8 @@ function cpRvCardUpload(id, files) {
     } else saved = cpMutateState(shoot, apply);
     return saved.then(function () {
       CPDisk.proxyProps(dir, { cp_rt: letter, cp_rt_date: cpToday() }).catch(function () { });
-      return Promise.all([row ? cpOutputAppend([row]) : null, trash.length ? CPDisk.trash(trash).catch(function () { }) : null]);
+      return Promise.all([row ? cpOutputAppend([row]) : null, trash.length ? CPDisk.trash(trash).catch(function () { }) : null,
+        CPDisk.proxyProps(dir, { cp_up: null }).catch(function () { })]);
     }).then(function () {
       cbToast((wasRework ? 'Новая версия загружена' : 'Загружено в карточку') + ': заменено ' + gone.length + ', добавлено ' + Math.max(0, ok.length - gone.length)
         + (failed.length ? ', не загрузилось ' + failed.length : '') + ' — карточка снова на проверке');
