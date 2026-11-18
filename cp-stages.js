@@ -333,11 +333,14 @@ function cpScanStages() {
     var readOld = function () {
       if (key !== 'site' || !oldDates.length) return;
       var cache = cpSiteOldCache(archive), dirty = false;
-      var todo = oldDates.filter(function (o) { var c = cache[o.x.path]; return !(c && c.mod === (o.x.modified || '')); });
+      /* папка дня изменилась — или в неё положили дроп (отметка cp_touch: дата папки на Диске от вложенных
+         папок не меняется, а дроп, принятый позже, ложится в папку своего дня) — перечитать */
+      var sig = function (x) { return (x.modified || '') + ((x.custom_properties || {}).cp_touch ? '|' + x.custom_properties.cp_touch : ''); };
+      var todo = oldDates.filter(function (o) { var c = cache[o.x.path]; return !(c && c.mod === sig(o.x)); });
       return cpPool(todo, 2, function (o) {
         var part = { names: {}, where: {}, info: {} };
         return level([o.x.path], o.depth + 1, part, true).then(function () {
-          cache[o.x.path] = { mod: o.x.modified || '', where: part.where, info: part.info };
+          cache[o.x.path] = { mod: sig(o.x), where: part.where, info: part.info };
           dirty = true;
         }, function () { });
       }).then(function () {

@@ -103,6 +103,166 @@ function cpOutputRow(ver, shootName, card, event, via) {
     typeof cpRvViaText === 'function' ? cpRvViaText(via) : ''];
 }
 
+/* ---------- номер дропа (Маша, 18.11.2026) ----------
+   «У нас буквы ретушёра, дальше номер дропа. Номер дропа — просто порядок: если этот ретушёр в этот день
+   грузит второй раз, это дроп 2; кроме случаев, когда он догружает отдельные картинки артикула — это всё
+   ещё дроп 2. Они грузят привычным способом с номером дропа — оставляем. Чтобы ничего не задублировалось.»
+   На сайте: <сайт>/<ДД.ММ.ГГ дня дропа>/<буква>/<номер дропа>/<съёмка>/<бренд или лук>/<буква_артикул>.
+   - Дроп — это сдача ретушёра в какой-то день: (день, буква, номер). Дата папки на сайте — день дропа, а не
+     день, когда старший принял: принятое по частям в разные дни ляжет в одну папку, а не в две.
+   - Номер: из имени загруженной папки («…_U_2»), как ретушёры привыкли; иначе — следующий за последним
+     дропом этой буквы сегодня (по записи в свойствах папки 04 — общая для всех съёмок, по уже принятым на
+     сайт папкам дня и по версиям этой съёмки). Ретушёр видит номер в окне сдачи и может поправить.
+   - Догрузка: у карточки уже есть версия от этого ретушёра — новая версия остаётся в её дропе (тот же день
+     и номер), куда бы ни сдавалась. «Загрузить в карточку» — тоже.
+   - Папка артикула в этом дропе на сайте уже есть — файлы ложатся в неё (одноимённые заменяются), а не в
+     новую папку с «_2». */
+function cpIsoDots(iso) { var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || ''); return m ? m[3] + '.' + m[2] + '.' + m[1].slice(2) : String(iso || ''); }
+/** День дропа версии (ГГГГ-ММ-ДД). */
+function cpDropDay(ver) { return (ver && (ver.dropDate || ver.date)) || cpToday(); }
+function cpDropKey(letter) { return 'cp_drop_' + String(letter).split('').map(function (c) { return c.charCodeAt(0).toString(16); }).join(''); }
+CP.drops = null;   /* {root, at, props}: последние дропы ретушёров — свойства папки 04 */
+
+function cpDropsLoad(force) {
+  var root = cpReviewRoot();
+  if (!root || !CPDisk.props) return Promise.resolve({});
+  if (!force && CP.drops && CP.drops.root === root && Date.now() - CP.drops.at < 30000) return Promise.resolve(CP.drops.props);
+  return CPDisk.props(root).then(function (p) {
+    CP.drops = { root: root, at: Date.now(), props: p || {} };
+    return CP.drops.props;
+  }, function () { return (CP.drops && CP.drops.props) || {}; });
+}
+
+/** Номер последнего дропа ретушёра в этот день по записи в папке 04; 0 — не было. */
+function cpDropLast(letter, day) {
+  var v = ((CP.drops && CP.drops.props) || {})[cpDropKey(letter)] || '';
+  var m = /^(\d{4}-\d{2}-\d{2}):(\d+)/.exec(v);
+  return m && m[1] === day ? +m[2] : 0;
+}
+
+/** Запомнить дроп (в свойствах папки 04): номер только растёт в пределах дня. */
+function cpDropsNote(letter, day, n) {
+  var root = cpReviewRoot();
+  if (!root || !letter || !(+n) || cpDropLast(letter, day) >= +n) return Promise.resolve();
+  var props = {};
+  props[cpDropKey(letter)] = day + ':' + (+n);
+  if (CP.drops && CP.drops.root === root) CP.drops.props[cpDropKey(letter)] = props[cpDropKey(letter)];
+  return CPDisk.proxyProps(root, props).catch(function (e) { if (window.console) console.warn('[CP] номер дропа не записался', e && (e.body || e.message)); });
+}
+
+/** Дропы дня на сайте: {буква: последний номер} — то, что уже лежит в папке дня (и руками тоже). */
+function cpDropsOnSite(day) {
+  var site = typeof cpSiteRoot === 'function' ? cpSiteRoot() : '';
+  if (!site) return Promise.resolve({});
+  var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  var dayDir = site.replace(/\/+$/, '') + '/' + cpIsoDots(day);
+  return CPDisk.listDir(dayDir, null, 1).then(function (items) {
+    var ls = items.filter(function (x) { return x.type === 'dir' && cpLetterOf(x.name, letters); });
+    return cpPool(ls, 3, function (x) {
+      return CPDisk.listDir(x.path, null, 1).then(function (inner) {
+        return { l: cpLetterOf(x.name, letters), n: inner.reduce(function (a, y) { return y.type === 'dir' && /^\d{1,3}$/.test(y.name) ? Math.max(a, +y.name) : a; }, 0) };
+      }, function () { return { l: cpLetterOf(x.name, letters), n: 0 }; });
+    });
+  }, function () { return []; }).then(function (list) {
+    var out = {};
+    (list || []).forEach(function (x) { out[x.l] = Math.max(out[x.l] || 0, x.n); });
+    return out;
+  });
+}
+
+/** Следующий номер дропа ретушёра сегодня (для окна сдачи). */
+function cpDropSuggest(st) {
+  var day = cpToday(), l = st.letter, max = cpDropLast(l, day);
+  max = Math.max(max, (st.siteDrops || {})[l] || 0);
+  var rv = (((st.data || {}).meta || {}).cp || {}).rv || {};
+  Object.keys(rv).forEach(function (id) { (rv[id] || []).forEach(function (v) { if (v.letter === l && cpDropDay(v) === day && +v.n) max = Math.max(max, +v.n); }); });
+  st.dropMax = max;
+  return String(max + 1);
+}
+
+/** Дроп карточки в этой сдаче: {date, n, again} — again: догрузка в прежний дроп этого ретушёра. */
+function cpDropOf(st, id) {
+  var rv = (((st.data || {}).meta || {}).cp || {}).rv || {}, list = rv[id] || [];
+  for (var i = list.length - 1; i >= 0; i--) {
+    var v = list[i];
+    if (v.letter === st.letter && +v.n) return { date: cpDropDay(v), n: String(+v.n), again: true };
+  }
+  return { date: cpToday(), n: String(st.n || '1'), again: false };
+}
+
+/** Папка съёмки в 04: уже есть (в том числе с номером очереди «1_…») — она, иначе новая по имени съёмки. */
+function cpReviewShootDir(root, name) {
+  var plain = root.replace(/\/+$/, '') + '/' + CPDisk.safeName(name);
+  return cpFindShootIn(root, name, 1).then(function (found) {
+    if (!found.length) return plain;
+    var exact = found.filter(function (f) { return f.path === plain; })[0];
+    var marked = found.filter(function (f) { return f.path !== plain; })[0];
+    return (marked || exact).path;
+  }, function () { return plain; });
+}
+
+/** Путь версии внутри папки съёмки в 04 (бренд/артикул, лук/артикул) — по самой папке версии. */
+function cpReviewRel(root, from) {
+  root = root.replace(/\/+$/, '');
+  if (!from || from.indexOf(root + '/') !== 0) return '';
+  var parts = from.slice(root.length + 1).split('/');
+  parts.shift();   /* папка съёмки (может быть с номером очереди) */
+  return parts.join('/');
+}
+
+/** Перенести папку артикула на сайт; там она уже есть (тот же дроп) — файлы в неё, одноимённые заменяются. */
+function cpMoveMerge(from, to) {
+  return CPDisk.proxyMove([{ from: from, path: to }]).then(function (r) {
+    var st = r && r.results && r.results[0], s = st && st.status;
+    if (s !== 'exists') {
+      var done = s === 'done';
+      return cpWaitThere(to, done ? 1 : (s === 'timeout' ? 18 : 2)).then(function (ok) {
+        if (ok) return to;
+        throw { message: CPDisk.showPath(from) + ': ' + (done ? 'Диск ответил «перенесено», но на новом месте папки нет' : (st && (st.error || s)) || 'не перенеслось') + ' — статус не поставлен, повторите', plain: true };
+      });
+    }
+    return CPDisk.walkPhotos(from, false, 4, true).then(function (files) {
+      var items = files.map(function (f) { return { from: f.path, path: to + f.path.slice(from.length) }; });
+      var chunks = [];
+      for (var i = 0; i < items.length; i += 100) chunks.push(items.slice(i, i + 100));
+      return chunks.reduce(function (p, ch) {
+        return p.then(function () {
+          return CPDisk.proxyMove(ch).then(function (r2) {
+            var res = (r2 && r2.results) || [];
+            var bad = res.filter(function (x) { return x.status === 'failed' || x.status === 'timeout'; });
+            if (bad.length) throw { message: 'на сайт не перенеслись файлы: ' + bad.length + ' (' + (bad[0].error || bad[0].status) + ')', plain: true };
+            var ex = ch.filter(function (it, k) { return res[k] && res[k].status === 'exists'; });
+            if (!ex.length) return;
+            /* такой файл в папке артикула уже есть — новая версия его заменяет (старый — в Корзину Диска) */
+            return CPDisk.trash(ex.map(function (x) { return x.path; })).then(function () { return CPDisk.proxyMove(ex); }).then(function (r3) {
+              var left = ((r3 && r3.results) || []).filter(function (x) { return x.status !== 'done'; });
+              if (left.length) throw { message: 'на сайте не заменились файлы: ' + left.length, plain: true };
+            });
+          });
+        });
+      }, Promise.resolve());
+    }).then(function () {
+      return CPDisk.trash([from]).catch(function () { });   /* опустевшая папка в 04 */
+    }).then(function () { return to; });
+  });
+}
+
+/* окно сдачи: сразу узнать, какие дропы у ретушёров уже есть сегодня (запись в 04 и папки дня на сайте) */
+cpAcceptOpen = (function (orig) {
+  return function () {
+    var r = orig.apply(this, arguments);
+    var st = CP.accept;
+    if (st && cpReviewRoot()) {
+      Promise.all([cpDropsLoad(true), cpDropsOnSite(cpToday())]).then(function (res) {
+        if (CP.accept !== st) return;
+        st.siteDrops = res[1] || {};
+        if (st.data && st.files.length) cpAcceptPlan();
+      });
+    }
+    return r;
+  };
+})(cpAcceptOpen);
+
 /* ---------- сдача: в 04/<съёмка>/<папка артикула> ---------- */
 
 var cpAcceptUploadLegacy = cpAcceptUpload;
@@ -118,23 +278,28 @@ cpAcceptUpload = function () {
   var batch = cpToday() + '_' + st.letter + '_' + st.n;
   var base = root.replace(/\/+$/, '') + '/' + CPDisk.safeName(st.name);
   var cards = st.data.cards || [];
-  var jobs = [], dirs = {}, dirOf = {};
-  Object.keys(plan.groups).forEach(function (id) {
-    var idx = -1;
-    cards.forEach(function (c, i) { if (c.id === id) idx = i; });
-    var dir = base + '/' + cpRvLettered(cpRvDirFor(cards[idx], idx, st.data, { path: st.path, name: st.name }), st.letter);
-    dirOf[id] = dir;
-    dirs[dir] = true;
-    var used = {};
-    plan.groups[id].forEach(function (f) {
-      var name = CPDisk.safeName(f.name), k = 2;
-      while (used[name]) name = name.replace(/(\.[^.]+)?$/, '_' + (k++) + '$1');
-      used[name] = true;
-      jobs.push({ card: id, file: f.file, path: dir + '/' + name, name: name });
+  var jobs = [], dirs = {}, dirOf = {}, dropOf = {}, total = 0;
+  /* папка съёмки в 04 — уже существующая (с номером очереди «1_…» тоже), иначе новая */
+  var build = function () {
+    Object.keys(plan.groups).forEach(function (id) {
+      var idx = -1;
+      cards.forEach(function (c, i) { if (c.id === id) idx = i; });
+      var dir = base + '/' + cpRvLettered(cpRvDirFor(cards[idx], idx, st.data, { path: st.path, name: st.name }), st.letter);
+      dirOf[id] = dir;
+      dropOf[id] = cpDropOf(st, id);
+      dirs[dir] = true;
+      var used = {};
+      plan.groups[id].forEach(function (f) {
+        var name = CPDisk.safeName(f.name), k = 2;
+        while (used[name]) name = name.replace(/(\.[^.]+)?$/, '_' + (k++) + '$1');
+        used[name] = true;
+        jobs.push({ card: id, file: f.file, path: dir + '/' + name, name: name });
+      });
     });
-  });
+    total = jobs.reduce(function (a, j) { return a + j.file.size; }, 0);
+  };
   var label = cpFolderBase(root);
-  var total = jobs.reduce(function (a, j) { return a + j.file.size; }, 0), ok = [], failed = [];
+  var ok = [], failed = [];
   /* прогресс по байтам: Маша, 06.11 — «важно, чтобы отображалась загрузка, иначе человек
      будет думать, что ничего не происходит» */
   var loaded = {}, now = '';
@@ -153,7 +318,11 @@ cpAcceptUpload = function () {
   var planBox = document.getElementById('cpAccPlan');
   if (planBox && !document.getElementById('cpAccProg')) planBox.insertAdjacentHTML('beforeend', '<div class="cp-acc-prog" id="cpAccProg"></div>');
   cbBusyShow('Готовлю папки в ' + label + '...', 0.01);
-  Object.keys(dirs).reduce(function (p, d) { return p.then(function () { return CPDisk.ensureDir(d); }); }, Promise.resolve()).then(function () {
+  cpReviewShootDir(root, st.name).then(function (b) {
+    base = b;
+    build();
+    return Object.keys(dirs).reduce(function (p, d) { return p.then(function () { return CPDisk.ensureDir(d); }); }, Promise.resolve());
+  }).then(function () {
     show();
     return cpPool(jobs, 3, function (j, i) {
       now = j.name;
@@ -180,7 +349,9 @@ cpAcceptUpload = function () {
         /* прошлая версия в той же папке — её файлы, которых нет в новой, уберём (Маша, 09.11:
            «ретушёр удалил один файл, загрузил — файл всё равно был») */
         if (prev && prev.status !== 'approved' && cpRvDirOf(prev) === dirOf[id]) stale[id] = (prev.files || []).map(function (f) { return f.path; });
-        var ver = { v: list.length + 1, batch: batch, letter: st.letter, n: st.n, date: cpToday(), by: who, ts: now, files: byCard[id], status: 'review', dir: dirOf[id] };
+        var dp = dropOf[id];   /* дроп: новый (номер из окна) или прежний — догрузка */
+        var ver = { v: list.length + 1, batch: dp.date + '_' + st.letter + '_' + dp.n, letter: st.letter, n: dp.n, dropDate: dp.date, date: cpToday(), by: who, ts: now, files: byCard[id], status: 'review', dir: dirOf[id] };
+        if (dp.again) ver.again = true;
         list.push(ver);
         var card = (data.cards || []).filter(function (c) { return c.id === id; })[0];
         rows.push(cpOutputRow(ver, st.name, card, 'сдано'));
@@ -199,6 +370,8 @@ cpAcceptUpload = function () {
       saved = Promise.resolve();
     } else saved = cpMutateState({ path: st.path, name: st.name }, apply);
     return saved.then(function () {
+      /* новый дроп этого ретушёра сегодня — запомнить номер (следующая сдача получит следующий) */
+      if (Object.keys(byCard).some(function (id) { return !dropOf[id].again; })) cpDropsNote(st.letter, cpToday(), st.n);
       /* метка на папке: кто и когда сдал (видна программе, в Диске не мешает) */
       Object.keys(byCard).forEach(function (id) { CPDisk.proxyProps(dirOf[id], { cp_rt: st.letter, cp_rt_date: cpToday() }).catch(function () { }); });
       var jobs2 = [cpOutputAppend(rows)];
@@ -316,7 +489,7 @@ cpRvApprove = function (ids, via) {
   if (!site) { cbToast('Нет папки сайта в каталоге: шестерёнка на витрине'); return; }
   var rv = cpRv(), shoot = CP.shoot, todo = [], skip = [];
   var base = root.replace(/\/+$/, '') + '/' + CPDisk.safeName(shoot.name);
-  ids.forEach(function (id) {
+  var ok = ids.filter(function (id) {
     var last = cpLastRv(rv[id]);
     if (!last || last.status !== 'review' || !cpRvDirOf(last) || cpRvHasReworkMarks(last)) {
       /* раньше — молча; теперь говорим, почему карточка не уехала */
@@ -324,38 +497,46 @@ cpRvApprove = function (ids, via) {
       skip.push((c0 && (c0.title || c0.category) || 'карточка') + ' — ' + (!last ? 'ретушь не сдана'
         : last.status === 'approved' ? 'уже на сайте' : last.status === 'rework' ? 'на доработке, ждёт новой версии'
         : cpRvHasReworkMarks(last) ? 'в просмотре есть кадры «на доработку» — завершите просмотр или снимите отметки' : 'нет папки версии в 04'));
-      return;
+      return false;
     }
-    var card = cbCardById(id), idx = App.cards.indexOf(card), from = cpRvDirOf(last);
-    /* На сайт (Маша, 18.11.2026): «папка с датой вида ДД.ММ.ГГ, дальше буква ретушёра, который сдал, дальше
-       папка съёмки, внутри неё папка бренда (или лука в каталоге), если она есть, и только потом папка
-       артикула — всё, что над артикулом в исходниках, сохраняется». Структура берётся из 04 (она там та же,
-       что в исходниках); буква — того, кто сдал эту версию ретуши. */
-    var rel = from.indexOf(base + '/') === 0 ? from.slice(base.length + 1) : cpRvDirFor(card || { title: id }, idx);
-    rel = rel.split('/').map(function (sg) { return sg.replace(/_доработка$/i, ''); }).join('/');
-    var who = last.letter || (card && typeof cpCardLetter === 'function' ? cpCardLetter(card) : '');
-    if (who) rel = cpRvLettered(rel, who);   /* папка артикула — с буквой (U_75327_оптика), как в 03 и 04 */
-    var to = site.replace(/\/+$/, '') + '/' + cpSiteDay() + (who ? '/' + CPDisk.safeName(who) : '') + '/' + CPDisk.safeName(shoot.name) + '/' + rel;
-    todo.push({ id: id, last: last, from: from, to: to, card: card });
+    return true;
   });
   if (skip.length) cbToast('Не отправлено на сайт: ' + skip.join('; '));
-  if (!todo.length) return;
+  if (!ok.length) return;
   var who = cpActor(), now = new Date().toISOString(), rows = [], moved = [], queued = [];
   cbBusyShow('Отправляю на сайт...', 0.3);
-  /* каждая карточка — отдельно: одна не перенеслась — остальные всё равно получают статус,
-     а она уходит в очередь (cp-queue.js) и переносится, пока не перенесётся */
-  todo.reduce(function (p, t) {
-    return p.then(function () {
-      return cpMoveFolder(t.from, t.to).then(function (to) {
-        t.to = to;
-        moved.push(t);
-      }, function (e) {
-        queued.push(t);
-        CPQ.add(shoot, { kind: 'move', label: 'На сайт: ' + (t.card ? t.card.title || t.card.category || 'карточка' : t.id), items: [{ from: t.from, path: t.to }],
-          after: { type: 'rv-approve', id: t.id, from: t.from, to: t.to, who: who, date: cpToday(), base: base, via: cpRvViaOf(via, t.id) }, err: (e && e.message) || '' });
-      });
+  /* номер дропа у версий, сданных руками в 04 (его там нет), — последний дроп этой буквы в тот день */
+  return cpDropsLoad().then(function () {
+    ok.forEach(function (id) {
+      var last = cpLastRv(rv[id]);
+      var card = cbCardById(id), idx = App.cards.indexOf(card), from = cpRvDirOf(last);
+      /* На сайт (Маша, 18.11.2026): «папка с датой ДД.ММ.ГГ, дальше буква ретушёра, который сдал, дальше номер
+         дропа, дальше папка съёмки, внутри неё бренд (или лук), если есть, и только потом папка артикула — всё, что
+         над артикулом в исходниках, сохраняется». Структура — из 04 (она там та же, что в исходниках). */
+      var rel = cpReviewRel(root, from) || cpRvDirFor(card || { title: id }, idx);
+      rel = rel.split('/').map(function (sg) { return sg.replace(/_доработка$/i, ''); }).join('/');
+      var l = last.letter || (card && typeof cpCardLetter === 'function' ? cpCardLetter(card) : '');
+      if (l) rel = cpRvLettered(rel, l);   /* папка артикула — с буквой (U_75327_оптика), как в 03 и 04 */
+      var day = cpDropDay(last), n = String(+last.n || cpDropLast(l, day) || 1);
+      var dayDir = site.replace(/\/+$/, '') + '/' + cpIsoDots(day);
+      var to = dayDir + (l ? '/' + CPDisk.safeName(l) + '/' + n : '') + '/' + CPDisk.safeName(shoot.name) + '/' + rel;
+      todo.push({ id: id, last: last, from: from, to: to, card: card, dayDir: dayDir });
     });
-  }, Promise.resolve()).then(function () {
+    /* каждая карточка — отдельно: одна не перенеслась — остальные всё равно получают статус,
+       а она уходит в очередь (cp-queue.js) и переносится, пока не перенесётся */
+    return todo.reduce(function (p, t) {
+      return p.then(function () {
+        return cpMoveMerge(t.from, t.to).then(function (to) {
+          t.to = to;
+          moved.push(t);
+        }, function (e) {
+          queued.push(t);
+          CPQ.add(shoot, { kind: 'move', label: 'На сайт: ' + (t.card ? t.card.title || t.card.category || 'карточка' : t.id), items: [{ from: t.from, path: t.to }],
+            after: { type: 'rv-approve', id: t.id, from: t.from, to: t.to, who: who, date: cpToday(), base: base, via: cpRvViaOf(via, t.id) }, err: (e && e.message) || '' });
+        });
+      });
+    }, Promise.resolve());
+  }).then(function () {
     cbBusyHide();
     var m = cpMeta();
     moved.forEach(function (t) {
@@ -373,10 +554,16 @@ cpRvApprove = function (ids, via) {
     cbRenderOutline();
     if (!moved.length) return;
     /* в «Сайте» новое: съёмка сразу в его фильтре, у папки даты — снова «не скачано» */
-    var siteDirs = [];
-    moved.forEach(function (t) { var d = cpSiteShootDir(t.to, shoot.name); if (siteDirs.indexOf(d) === -1) siteDirs.push(d); });
+    var siteDirs = [], days = [];
+    moved.forEach(function (t) {
+      var d = cpSiteShootDir(t.to, shoot.name);
+      if (siteDirs.indexOf(d) === -1) siteDirs.push(d);
+      if (days.indexOf(t.dayDir) === -1) days.push(t.dayDir);
+    });
     siteDirs.forEach(function (d) { cpReviewPresentStage('site', shoot.name, d); });
     if (typeof cpSiteMarkNew === 'function') cpSiteMarkNew(siteDirs);
+    /* дроп мог лечь в папку прошлого дня — отметка на папке дня, чтобы её перечитали и на других компьютерах */
+    days.forEach(function (d) { CPDisk.proxyProps(d, { cp_touch: String(Date.now()) }).catch(function () { }); });
     if (typeof cpRetouchCleanupSoon === 'function') cpRetouchCleanupSoon();
     return Promise.all([cpOutputAppend(rows)].concat(moved.map(function (t) { return cpTrashEmptyUp(cpParentDir(t.from), cpParentDir(base)); })));
   }).catch(function (e) {
@@ -1560,7 +1747,8 @@ function cpRvCardUpload(id, files) {
       var m = data.meta.cp, rv = m.rv = m.rv || {};
       var l2 = rv[id] = rv[id] || [], p2 = cpLastRv(l2);
       if (p2 && p2.status === 'review') p2.status = 'replaced';
-      var ver = { v: l2.length + 1, batch: cpToday() + '_' + letter + '_' + (last.n || '1'), letter: letter, n: last.n || '1', date: cpToday(), by: who, ts: now,
+      /* догрузка в карточку — тот же дроп, что у версии, в которую грузят (день и номер) */
+      var ver = { v: l2.length + 1, batch: cpDropDay(last) + '_' + letter + '_' + (last.n || '1'), letter: letter, n: last.n || '1', dropDate: cpDropDay(last), date: cpToday(), by: who, ts: now,
         files: nFiles, status: 'review', dir: dir, kind: kind, added: ok.length - gone.length, replaced: gone.length };
       /* кадры, которые старший уже отметил «на сайт» и которые не заменяли, второй раз смотреть не нужно */
       var fmOld = (p2 && p2.fm) || (last && last.fm) || {}, fmNew = {};

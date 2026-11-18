@@ -278,12 +278,17 @@ function cpAcceptPlan() {
      выбрано и с прошлого раза не запоминается (Маша, 10.11.2026: «чтобы человек не пропустил
      этот этап и не сдал за другого — поедут метрики выработки»). */
   if (!st.letter && plan.letter) { st.letter = plan.letter; st.letterAuto = true; }
-  if (!st.n) st.n = plan.n;
-  if (!st.n && st.letter) {
-    /* номер сдачи этого ретушёра в съёмке — следующий */
-    var max = 0;
-    Object.keys(rv).forEach(function (cid) { (rv[cid] || []).forEach(function (v) { if (v.letter === st.letter) max = Math.max(max, +v.n || 0); }); });
-    st.n = String(max + 1);
+  /* номер дропа: из имени папки («…_U_2») — как ретушёры привыкли; иначе — следующий за последним дропом
+     этого ретушёра сегодня (cp-review.js, cpDropSuggest); поправленный руками больше не трогаем */
+  if (!st.n && plan.n) { st.n = plan.n; st.nAuto = false; }
+  if (st.letter && (!st.n || st.nAuto)) {
+    if (typeof cpDropSuggest === 'function') st.n = cpDropSuggest(st);
+    else {
+      var max = 0;
+      Object.keys(rv).forEach(function (cid) { (rv[cid] || []).forEach(function (v) { if (v.letter === st.letter) max = Math.max(max, +v.n || 0); }); });
+      st.n = String(max + 1);
+    }
+    st.nAuto = true;
   }
   var cards = st.data.cards || [];
   var photosById = {};
@@ -314,14 +319,18 @@ function cpAcceptPlan() {
   var html = '<div class="cp-acc-row">Ретушёр: ' + (letters.length ? letters.map(function (t) {
     return '<button data-cp-acc-l="' + cbEsc(t) + '" class="' + (st.letter === t ? 'cp-on' : sug === t ? 'cp-sug' : '') + '">' + cbEsc(t) + '</button>';
   }).join('') : '<input id="cpAccLetter" value="' + cbEsc(st.letter) + '" placeholder="буква" style="width:60px">')
-    + ' · номер сдачи <input id="cpAccN" value="' + cbEsc(st.n) + '" style="width:50px">'
+    + ' · номер дропа <input id="cpAccN" value="' + cbEsc(st.n) + '" style="width:50px">'
     + (plan.top ? ' <small>из «' + cbEsc(plan.top) + '»</small>' : '') + '</div>'
-    + (hint ? '<div class="cp-acc-who' + (st.needLetter && !st.letter ? ' cp-acc-warn' : '') + '" id="cpAccWho">' + hint + '</div>' : '');
+    + (hint ? '<div class="cp-acc-who' + (st.needLetter && !st.letter ? ' cp-acc-warn' : '') + '" id="cpAccWho">' + hint + '</div>' : '')
+    + (st.letter && st.nAuto && st.dropMax ? '<div class="cp-acc-who">Сегодня у ' + cbEsc(st.letter) + ' уже есть дроп ' + st.dropMax + ' — эта сдача станет дропом ' + cbEsc(st.n)
+      + '. Если догружаете тот же дроп — поставьте ' + st.dropMax + '.</div>' : '');
   html += '<div class="cp-acc-list">' + ids.map(function (id) {
     var c = cards.filter(function (x) { return x.id === id; })[0];
     var last = cpLastRv(rv[id]);
     var miss = c ? cpRvMissing(cpRvExpected(c, photosById, meta.status), plan.groups[id]) : null;
+    var dp = st.letter && typeof cpDropOf === 'function' ? cpDropOf(st, id) : null;
     return '<div><b>' + cbEsc(c ? c.title || 'карточка' : id) + '</b> · файлов ' + plan.groups[id].length
+      + (dp && dp.again ? ' <small>догрузка в дроп ' + cbEsc(dp.n) + ' (' + cbEsc(cpIsoDots(dp.date)) + ')</small>' : '')
       + (last ? ' <small>сейчас версия ' + last.v + ' · ' + (last.status === 'approved' ? 'на сайте' : last.status === 'rework' ? 'на доработке' : 'на проверке') + '</small>' : '')
       + (miss && miss.count ? ' <span class="cp-acc-warn">' + cbEsc(cpRvMissingText(miss)) + '</span>' : '') + '</div>';
   }).join('') + '</div>';
@@ -334,6 +343,13 @@ function cpAcceptPlan() {
     + '<button class="cb-primary" data-cp-acc="go"' + (count ? '' : ' disabled') + '>Загрузить на приёмку</button></div>';
   document.getElementById('cpAccPlan').innerHTML = html;
 }
+
+/* номер дропа поправили руками — дальше он не пересчитывается */
+document.addEventListener('input', function (e) {
+  if (!CP.accept || !e.target || e.target.id !== 'cpAccN') return;
+  CP.accept.n = e.target.value.trim();
+  CP.accept.nAuto = false;
+});
 
 document.addEventListener('click', function (e) {
   var b = e.target.closest('[data-cp-acc],[data-cp-acc-l]');

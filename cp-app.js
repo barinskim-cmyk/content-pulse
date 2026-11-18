@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.117';
+var CP_VERSION = '2.0.118';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1523,6 +1523,8 @@ function cpRetouchCopy(pids, card, label, after) {
        в папку с буквой ретушёра, а не рядом с ней */
     return typeof cpRtRefresh === 'function' ? cpRtRefresh().then(null, function () { return null; }) : null;
   }).then(function () {
+    /* папка съёмки в 03 уже есть с номером очереди («1_…») — кладём в неё, а не рядом */
+    if (typeof cpRtRootOf === 'function' && CP.shoot && CP.shoot.path === shootPath) folder = cpRtRootOf(shootPath, folder);
     var used = {};
     items = files.map(function (p) {
       var target = folder + '/' + cpRetouchRel(p, card, shootPath);

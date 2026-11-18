@@ -222,6 +222,13 @@ var CPDisk = (function () {
     });
   }
 
+  /** Свойства самой папки (custom_properties), без её содержимого: {} — свойств нет. */
+  function props(path, prio) {
+    return bg(prio, function () {
+      return api(ep(path), { path: path, limit: 0, fields: 'name,type,custom_properties' }).then(function (d) { return d.custom_properties || {}; });
+    });
+  }
+
   /** Витрина: папки съёмок в архиве, свежие сверху. */
   function listShoots(archive) {
     return listDir(archive).then(function (items) {
@@ -559,7 +566,7 @@ var CPDisk = (function () {
     mkdir: mkdir,
     DiskError: DiskError,
     STATE_FILE: STATE_FILE, RETOUCH_DIR: RETOUCH_DIR,
-    info: info, listDir: listDir, listHead: listHead, dirWithProps: dirWithProps, listShoots: listShoots, walkPhotos: walkPhotos,
+    info: info, listDir: listDir, listHead: listHead, dirWithProps: dirWithProps, props: props, listShoots: listShoots, walkPhotos: walkPhotos,
     bg: bg, bgStat: function () { return { run: BG.run, queued: BG.q.length, n429: BG.n429, slow: Date.now() < BG.slowUntil }; },
     previewBlob: previewBlob, downloadHref: downloadHref, downloadBlob: downloadBlob,
     ensureDir: ensureDir, uploadBlob: uploadBlob, copy: copy, waitOperation: waitOperation,
