@@ -43,6 +43,17 @@ function cpRvDirFor(card, idx, data, shoot) {
   return CPDisk.safeName(cpCardExportFolder(card || { title: 'Карточка' }, idx < 0 ? 0 : idx));
 }
 
+/* Папка артикула в 04 и на сайте — с буквой ретушёра, который сдал, как в 03 (Маша, 18.11.2026, таблица:
+   «04_ОТРЕТУШИРОВАНО / съёмка / maxmara_оптика / U_75327_оптика»). Прежняя буква в имени заменяется. */
+function cpRvLettered(rel, letter) {
+  var segs = String(rel || '').split('/'), last = segs.pop() || '';
+  var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  var sp = typeof cpLetterSplit === 'function' ? cpLetterSplit(last, letters.indexOf(letter) === -1 && letter ? letters.concat([letter]) : letters) : null;
+  if (sp) last = sp.rest;
+  segs.push((letter ? CPDisk.safeName(letter) + '_' : '') + last);
+  return segs.join('/');
+}
+
 /** Папка артикула карточки (путь внутри съёмки) по её кадрам; '' — кадры из разных папок или артикула нет. */
 function cpCardArtDirByPhotos(card, data, shoot) {
   shoot = shoot || CP.shoot;
@@ -111,7 +122,7 @@ cpAcceptUpload = function () {
   Object.keys(plan.groups).forEach(function (id) {
     var idx = -1;
     cards.forEach(function (c, i) { if (c.id === id) idx = i; });
-    var dir = base + '/' + cpRvDirFor(cards[idx], idx, st.data, { path: st.path, name: st.name });
+    var dir = base + '/' + cpRvLettered(cpRvDirFor(cards[idx], idx, st.data, { path: st.path, name: st.name }), st.letter);
     dirOf[id] = dir;
     dirs[dir] = true;
     var used = {};
@@ -163,6 +174,8 @@ cpAcceptUpload = function () {
         var prev = cpLastRv(list);
         /* новая версия после доработки: папка с доработкой больше не нужна */
         if (prev && prev.status === 'rework' && cpRvDirOf(prev) && cpRvDirOf(prev) !== dirOf[id]) oldDirs.push(cpRvDirOf(prev));
+        /* прошлую версию на проверке сдавал другой ретушёр (папка с другой буквой) — новая её заменяет */
+        else if (prev && prev.status === 'review' && cpRvDirOf(prev) && cpRvDirOf(prev) !== dirOf[id]) oldDirs.push(cpRvDirOf(prev));
         if (prev && prev.status === 'review') prev.status = 'replaced';
         /* прошлая версия в той же папке — её файлы, которых нет в новой, уберём (Маша, 09.11:
            «ретушёр удалил один файл, загрузил — файл всё равно был») */
@@ -321,6 +334,7 @@ cpRvApprove = function (ids, via) {
     var rel = from.indexOf(base + '/') === 0 ? from.slice(base.length + 1) : cpRvDirFor(card || { title: id }, idx);
     rel = rel.split('/').map(function (sg) { return sg.replace(/_доработка$/i, ''); }).join('/');
     var who = last.letter || (card && typeof cpCardLetter === 'function' ? cpCardLetter(card) : '');
+    if (who) rel = cpRvLettered(rel, who);   /* папка артикула — с буквой (U_75327_оптика), как в 03 и 04 */
     var to = site.replace(/\/+$/, '') + '/' + cpSiteDay() + (who ? '/' + CPDisk.safeName(who) : '') + '/' + CPDisk.safeName(shoot.name) + '/' + rel;
     todo.push({ id: id, last: last, from: from, to: to, card: card });
   });

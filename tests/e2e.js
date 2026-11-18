@@ -1044,8 +1044,8 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     const inRv = n => [...FILES.keys()].filter(k => k.indexOf(RV + '/' + SN + '/') === 0 && k.endsWith('/' + n));
     check('сдача: буква ретушёра с прошлого раза не подставляется; «Загрузить» без неё не грузит и просит выбрать имя',
       needLog.length >= 1 && needLog[0].every(Boolean), JSON.stringify(needLog));
-    check('сдача в 04: кнопка «Загрузить в 04_ОТРЕТУШИРОВАНО», буква выбрана нажатием (U), файлы — 04/<съёмка>/<папка артикула>/',
-      /Загрузить в 04_ОТРЕТУШИРОВАНО/.test(t1) && inRv('manekin.tif').length === 1 && inRv('manekin2.tif').length === 1 && /\/74595[^/]*\/manekin\.tif$/.test(inRv('manekin.tif')[0]),
+    check('сдача в 04: кнопка «Загрузить в 04_ОТРЕТУШИРОВАНО», буква выбрана нажатием (U), файлы — 04/<съёмка>/<лук>/<буква_папка артикула>/ (2.0.117: с буквой, как в 03)',
+      /Загрузить в 04_ОТРЕТУШИРОВАНО/.test(t1) && inRv('manekin.tif').length === 1 && inRv('manekin2.tif').length === 1 && /\/1\/U_74595_модель\/manekin\.tif$/.test(inRv('manekin.tif')[0]),
       JSON.stringify([t1, inRv('manekin.tif'), inRv('manekin2.tif')]));
     /* карточки, которым досталась эта сдача (у артикула бывает две карточки — смотрим по версиям) */
     const prog = await page.evaluate(() => window.__prog);
@@ -1107,10 +1107,10 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     /* 2.0.116: сайт / ДД.ММ.ГГ / буква того, кто сдал / съёмка / лук / артикул — структура исходников */
     const sday = (() => { const d = new Date(), z = n => (n < 10 ? '0' : '') + n; return z(d.getDate()) + '.' + z(d.getMonth() + 1) + '.' + String(d.getFullYear()).slice(2); })();
     const lB = await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].letter, ids.b);
-    const siteB = ST + '/' + sday + '/' + lB + '/' + SN + '/1/74596_модель/manekin2.tif';
+    const siteB = ST + '/' + sday + '/' + lB + '/' + SN + '/1/' + lB + '_74596_модель/manekin2.tif';
     for (let i = 0; i < 60 && !FILES.has(siteB); i++) await page.waitForTimeout(100);
     await page.waitForFunction(i => cpMeta().rv[i].slice(-1)[0].status === 'approved', ids.b, { timeout: 5000 }).catch(() => {});
-    check('«На сайт»: папка артикула переехала в 05/<ДД.ММ.ГГ>/<буква>/<съёмка>/<лук>/<артикул>, в 04 её больше нет', !!lB && FILES.has(siteB) && !inRv('manekin2.tif').length
+    check('«На сайт»: папка артикула переехала в 05/<ДД.ММ.ГГ>/<буква>/<съёмка>/<лук>/<буква_артикул>, в 04 её больше нет', !!lB && FILES.has(siteB) && !inRv('manekin2.tif').length
       && await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].status === 'approved' && !!cpMeta().delivered[i], ids.b), JSON.stringify([...FILES.keys()].filter(k => /Этапы/.test(k))));
     for (let i = 0; i < 60 && FILES.has(RT3 + '/1/74596_модель/manekin2.jpg'); i++) await page.waitForTimeout(100);
     check('«На сайт» — копия артикула в 03_РЕТУШЬ сразу в Корзине (и при второй карточке того же артикула)', !FILES.has(RT3 + '/1/74596_модель/manekin2.jpg') && TRASHED.some(p => p.indexOf(RT3) === 0), JSON.stringify(TRASHED.slice(-3)));
@@ -1176,7 +1176,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     for (let i = 0; i < 80 && !TRASHED.includes(RV + '/' + SN); i++) await page.waitForTimeout(100);
     check('очередь перенесла — теперь «на сайте» и сдано', await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].status === 'approved' && !!cpMeta().delivered[i] && !cpqCount(), ids.a));
     const lA = await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].letter, ids.a);
-    check('всё на сайте — папка съёмки в 04 опустела и ушла в Корзину', FILES.has(ST + '/' + sday + '/' + lA + '/' + SN + '/1/74595_модель/manekin.tif') && TRASHED.includes(RV + '/' + SN), JSON.stringify(TRASHED.slice(-4)));
+    check('всё на сайте — папка съёмки в 04 опустела и ушла в Корзину', FILES.has(ST + '/' + sday + '/' + lA + '/' + SN + '/1/' + lA + '_74595_модель/manekin.tif') && TRASHED.includes(RV + '/' + SN), JSON.stringify(TRASHED.slice(-4)));
     for (let i = 0; i < 40 && !/принято[\s\S]*принято/.test((FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString()); i++) await page.waitForTimeout(100);
     const out = (FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString();
     check('выработка: таблица в служебной папке — сдано ×4, доработка, в карточку, принято ×2, с буквой и датой', /^\uFEFFдата;время;ретушёр/.test(out) && (out.match(/;сдано;/g) || []).length === 4
@@ -2119,6 +2119,9 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         return [cpRvDirFor(one, 0, data, sh), cpRvDirFor(two, 1, data, sh), cpRvDirFor({ id: 'k3', title: '77112', cpArticleDir: 'befree/77112_сумка' }, 2, data, sh),
           cpSiteShootDir('disk:/КАТАЛОГ/05_САЙТ/18.11.2026/' + sh.name + '/zarina/77110_сумка', sh.name)];
       });
+      const lett = await page.evaluate(() => [cpRvLettered('maxmara_оптика/75327_оптика', 'U'), cpRvLettered('maxmara_оптика/Y_75327_оптика', 'U'), cpRvLettered('1/75321', 'U'), cpRvLettered('1/u_75321', 'U')]);
+      check('2.0.117: папка артикула в 04 и на сайте — с буквой сдавшего: maxmara_оптика/U_75327_оптика; прежняя буква (Y_, u_) заменяется, а не дописывается',
+        JSON.stringify(lett) === JSON.stringify(['maxmara_оптика/U_75327_оптика', 'maxmara_оптика/U_75327_оптика', '1/U_75321', '1/U_75321']), JSON.stringify(lett));
       check('2.0.116: карточка, собранная руками, — в 04 и на сайт папкой своего артикула со структурой: zarina/77110_сумка; кадры из двух артикулов — по названию; папка съёмки на сайте находится по папке карточки',
         JSON.stringify(struct) === JSON.stringify(['zarina/77110_сумка', '02 микс', 'befree/77112_сумка', 'disk:/КАТАЛОГ/05_САЙТ/18.11.2026/2026-11-10_N_ПРЕДМЕТКА']), JSON.stringify(struct));
       /* убрать за собой */
@@ -2382,16 +2385,18 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       check('переключатель папок: соседний каталог ИМИДЖ найден сам (рядом, внутри этапы), «Архив» — нет', await page.evaluate(() =>
         !!document.querySelector('#cpCats option[value="disk:/ИМИДЖ"]') && !document.querySelector('#cpCats option[value="disk:/Архив"]')
         && document.querySelector('#cpCats select').value === 'disk:/КАТАЛОГ'), await page.evaluate(() => (document.getElementById('cpCats') || {}).innerHTML || ''));
-      await page.selectOption('#cpCats select', 'disk:/ИМИДЖ', { force: true });
+      const pickCat = async v => { await page.waitForFunction(x => !!document.querySelector('#cpCats option[value="' + x + '"]'), v, { timeout: 8000 }).catch(() => {});
+        await page.evaluate(x => { const sel = document.querySelector('#cpCats select'); sel.value = x; sel.dispatchEvent(new Event('change', { bubbles: true })); }, v); };
+      await pickCat('disk:/ИМИДЖ');
       await page.waitForFunction(() => CP.archive === 'disk:/ИМИДЖ' && CP.shoots && CP.shoots.some(s => s.name === '2026-11-08_IMG_ЗОЛОТО'), null, { timeout: 10000 }).catch(() => {});
       check('выбрали ИМИДЖ — его съёмки и его служебная папка', await page.evaluate(() => CP.archive === 'disk:/ИМИДЖ' && CP.shoots.some(s => s.name === '2026-11-08_IMG_ЗОЛОТО')
         && CP_CONFIG.serviceDir === 'disk:/ИМИДЖ/_ContentPulse'), await page.evaluate(() => JSON.stringify([CP.archive, CP_CONFIG.serviceDir])));
       await page.waitForFunction(() => !!document.querySelector('#cpCats option[value="disk:/КАТАЛОГ"]'), null, { timeout: 8000 }).catch(() => {});
-      await page.selectOption('#cpCats select', 'disk:/КАТАЛОГ', { force: true });
+      await pickCat('disk:/КАТАЛОГ');
       await page.waitForFunction(() => CP.archive === 'disk:/КАТАЛОГ' && CP.catalogList, null, { timeout: 10000 }).catch(() => {});
       await page.waitForFunction(() => !!document.querySelector('#cpCats option[value="+"]'), null, { timeout: 8000 }).catch(() => {});
       page.once('dialog', d => d.accept('disk:/Отделы/ПРЕДМЕТКА_ИМИДЖ'));
-      await page.selectOption('#cpCats select', '+', { force: true });
+      await pickCat('+');
       for (let i = 0; i < 60 && !/ещё папки = disk:\/Отделы\/ПРЕДМЕТКА_ИМИДЖ/.test((FILES.get('disk:/КАТАЛОГ/_ContentPulse/настройки.txt') || '').toString()); i++) await page.waitForTimeout(100);
       for (let i = 0; i < 40 && !FILES.has('disk:/Отделы/ПРЕДМЕТКА_ИМИДЖ/_ContentPulse/настройки.txt'); i++) await page.waitForTimeout(100);
       check('«+ Добавить папку»: в настройках обеих папок «ещё папки», в переключателе — новая', /ещё папки = disk:\/Отделы\/ПРЕДМЕТКА_ИМИДЖ/.test((FILES.get('disk:/КАТАЛОГ/_ContentPulse/настройки.txt') || '').toString())
