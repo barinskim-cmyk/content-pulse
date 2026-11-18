@@ -490,6 +490,7 @@ cbRenderCards = (function (orig) {
       bar.addEventListener('change', function (e) {
         if (e.target.id !== 'cpRvOnly') return;
         CP.rvOnly = e.target.checked;
+        CP.viewReveal = {};
         cbRenderCards();
       });
       bar.addEventListener('click', function (e) {

@@ -1123,6 +1123,34 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     const v2 = await vis();
     check('отправили на сайт — карточка сразу пропала из этого вида', v2.length === 1 && v2[0] === ids.a, JSON.stringify([v2, ids, await page.evaluate(v => v.map(id => { const c = cbCardById(id), l = (cpMeta().rv[id] || []).slice(-1)[0];
       return [id, c && c.title, l && l.status, !!(cpMeta().delivered || {})[id], (cpMeta().cardStatus[id] || {}).s]; }), v2)]));
+    /* 2.0.120 (ретушёр, 18.11): «если кликать по карточкам „сдано“, то ничего не происходит», «тут не расширяется поле» */
+    {
+      const row = () => page.evaluate(i => {
+        const b = document.querySelector('#cbOutline .cb-outline-item[data-target="' + i + '"]'), r = b && b.closest('.cp-oi');
+        return r ? { off: r.classList.contains('cp-oi-off'), title: b.title, hint: (document.querySelector('#cbOutline .cp-oi-hint') || {}).textContent || '' } : null; }, ids.b);
+      const r0 = await row();
+      check('2.0.120: в навигации ушедшая на сайт карточка приглушена, в подсказке — «клик — показать»', r0 && r0.off && /сдано/.test(r0.title) && /клик — показать/.test(r0.hint), JSON.stringify(r0));
+      await page.evaluate(i => { const b = '#cbOutline .cb-outline-item[data-target="' + i + '"]'; (document.querySelector(b + ' .cp-oi-ok') || document.querySelector(b)).click(); }, ids.b);
+      const shown = await page.evaluate(i => {
+        const el = document.querySelector('.cb-card[data-cid="' + i + '"]'), n = el && el.querySelector('.cp-reveal-note');
+        return { vis: !!el && el.style.display !== 'none' && el.offsetParent !== null, note: n ? n.textContent : '' }; }, ids.b);
+      const r1 = await row();
+      if (process.env.CP_SHOTS) await page.screenshot({ path: process.env.CP_SHOTS + '/reveal.png' });
+      check('2.0.120: клик по «сдано» в навигации — карточка показана на своём месте с пометкой, почему её обычно здесь нет, и кнопкой «Скрыть»; в навигации больше не приглушена',
+        shown.vis && /Обычно здесь не видна/.test(shown.note) && /сдано/.test(shown.note) && /Скрыть/.test(shown.note) && r1 && !r1.off, JSON.stringify([shown, r1]));
+      await page.evaluate(i => document.querySelector('.cb-card[data-cid="' + i + '"] [data-cp-unreveal]').click(), ids.b);
+      const v3 = await vis(), r2 = await row();
+      check('2.0.120: «Скрыть» — карточка снова не видна, в навигации снова приглушена', v3.length === 1 && v3[0] === ids.a && r2 && r2.off, JSON.stringify([v3, r2]));
+      const w0 = await page.evaluate(() => document.getElementById('cbOutline').getBoundingClientRect().width);
+      const rz = await page.evaluate(() => { const r = document.getElementById('cbOutlineResizer').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + Math.min(200, r.height / 2) }; });
+      await page.mouse.move(rz.x, rz.y); await page.mouse.down(); await page.mouse.move(rz.x - 150, rz.y, { steps: 6 }); await page.mouse.up();
+      const w1 = await page.evaluate(() => ({ w: document.getElementById('cbOutline').getBoundingClientRect().width, saved: localStorage.getItem('cardboard_outline_width') }));
+      check('2.0.120: навигацию справа можно растянуть — потянули ручку влево на 150 px, панель стала шире, ширина запомнилась',
+        Math.abs(w1.w - (w0 + 150)) <= 3 && Math.abs(+w1.saved - w1.w) <= 1, JSON.stringify([w0, w1]));
+      await page.dblclick('#cbOutlineResizer');
+      const w2 = await page.evaluate(() => ({ w: document.getElementById('cbOutline').getBoundingClientRect().width, saved: localStorage.getItem('cardboard_outline_width') }));
+      check('2.0.120: двойной клик по ручке — обычная ширина', Math.abs(w2.w - w0) <= 1 && w2.saved === null, JSON.stringify([w0, w2]));
+    }
     page.once('dialog', d => d.accept('тени'));
     await page.click('[data-cp-rv="' + ids.a + '"] [data-cp-rva="rework"]');
     for (let i = 0; i < 60 && !inRv('manekin.tif').some(k => /_доработка\//.test(k)); i++) await page.waitForTimeout(100);
@@ -2732,7 +2760,8 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     const SD = await page.evaluate(() => CP_CONFIG.serviceDir), MAN = SD + '/_в_пути/test.json', KEY = 'exports/in_test/0', LATE = 'disk:/Архив/' + CS + '/1/late.jpg';
     SPEED_OBJ.set(KEY, Buffer.from('L'.repeat(33)));
     DIRS.add(SD + '/_в_пути');
-    FILES.set(MAN, Buffer.from(JSON.stringify({ ts: '2026-11-09T10:00:00Z', items: [{ path: LATE, key: KEY, size: 33, op: '', st: 'retry', tries: 1 }] })));
+    /* время записи — «час назад»: старше CP.transitKeepMs (2,5 суток) запись уже считается потерянной */
+    FILES.set(MAN, Buffer.from(JSON.stringify({ ts: new Date(Date.now() - 3600000).toISOString(), items: [{ path: LATE, key: KEY, size: 33, op: '', st: 'retry', tries: 1 }] })));
     await page.evaluate(() => cpTransitScan());
     await page.waitForFunction(() => /едет на Диск: 0 из 1/.test(document.getElementById('cpShelfList').textContent), null, { timeout: 5000 }).catch(() => {});
     check('витрина: «едет на Диск: 0 из 1» у съёмки; Диск снова попросили забрать', /едет на Диск: 0 из 1/.test(await page.textContent('#cpShelfList')) && CLOUD_FETCH.includes(LATE), JSON.stringify(CLOUD_FETCH.slice(-2)));
@@ -2744,7 +2773,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     /* разбор 10.11: файл, который Диск так и не забрал («не удалось»), не забывается */
     {
       const MAN2 = SD + '/_в_пути/lost.json', LOSTF = 'disk:/Архив/' + CS + '/1/lost.jpg';
-      FILES.set(MAN2, Buffer.from(JSON.stringify({ ts: '2026-11-09T10:00:00Z', items: [{ path: LOSTF, key: 'exports/in_test/9', size: 44, op: '', st: 'lost', tries: 3 }] })));
+      FILES.set(MAN2, Buffer.from(JSON.stringify({ ts: new Date(Date.now() - 3600000).toISOString(), items: [{ path: LOSTF, key: 'exports/in_test/9', size: 44, op: '', st: 'lost', tries: 3 }] })));
       await page.evaluate(() => cpTransitScan());
       await page.waitForFunction(() => /не доехало до Диска: 1/.test(document.getElementById('cpShelfList').textContent), null, { timeout: 5000 }).catch(() => {});
       check('файл не доехал до Диска — запись «в пути» остаётся, у съёмки на витрине «не доехало: 1» с именем файла', FILES.has(MAN2) && /не доехало до Диска: 1.*lost\.jpg/.test(await page.textContent('#cpShelfList')),

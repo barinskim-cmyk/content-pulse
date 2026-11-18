@@ -174,7 +174,7 @@ input.cb-color {
 #cbStripTray { border-right: 1px solid #262626; }
 #cbStripOutline { border-left: 1px solid #262626; }
 body.cb-tray-off .cb-tray, body.cb-tray-off .cb-resizer { display: none; }
-body.cb-outline-off .cb-outline { display: none; }
+body.cb-outline-off .cb-outline, body.cb-outline-off #cbOutlineResizer { display: none; }
 
 .cb-resizer {
   width: 5px; cursor: col-resize; background: #262626;
@@ -720,6 +720,7 @@ body.cb-file-drag #cbDropOverlay { display: flex; }
     <div id="cbTabCards"><div id="cbCards"></div></div>
     <div id="cbTabConts" style="display:none"><div id="cbConts"></div></div>
   </div>
+  <div class="cb-resizer" id="cbOutlineResizer" title="Потяните, чтобы изменить ширину навигации; двойной клик — обычная ширина"></div>
   <div class="cb-outline" id="cbOutline"></div>
   <button class="cb-strip" id="cbStripOutline" title="Свернуть/развернуть навигацию">Навигация</button>
 </div>
@@ -1938,6 +1939,45 @@ var TRAY_W_KEY = 'cardboard_tray_width';
       rz.classList.remove('cb-dragging');
       document.body.classList.remove('cb-resizing');
       try { localStorage.setItem(TRAY_W_KEY, parseInt(tray.style.width, 10)); } catch (e2) { }
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+})();
+
+/* Ширина навигации справа (ретушёр, 18.11: «тут не расширяется поле») — та же ручка, что у галереи:
+   тянуть влево — шире, двойной клик — обычные 190 px. Запоминается в этом браузере. */
+var OUTLINE_W_KEY = 'cardboard_outline_width';
+
+(function cbInitOutlineResizer() {
+  var box = document.getElementById('cbOutline');
+  var rz = document.getElementById('cbOutlineResizer');
+  if (!box || !rz) return;
+  function clamp(w) { return Math.max(150, Math.min(600, Math.round(w))); }
+  try {
+    var saved = parseInt(localStorage.getItem(OUTLINE_W_KEY), 10);
+    if (saved) box.style.width = clamp(saved) + 'px';
+  } catch (e) { /* приватный режим */ }
+  rz.addEventListener('mousedown', function (e) {
+    if (e.button) return;
+    e.preventDefault();
+    /* двойной клик ловим по второму нажатию: пока тянем, у страницы выключены клики (body.cb-resizing),
+       и событие dblclick до ручки не доходит */
+    if (e.detail >= 2) {
+      box.style.width = '';
+      try { localStorage.removeItem(OUTLINE_W_KEY); } catch (e1) { }
+      return;
+    }
+    rz.classList.add('cb-dragging');
+    document.body.classList.add('cb-resizing');
+    var x0 = e.clientX, w0 = box.getBoundingClientRect().width, moved = false;
+    function onMove(ev) { moved = true; box.style.width = clamp(w0 + x0 - ev.clientX) + 'px'; }
+    function onUp() {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      rz.classList.remove('cb-dragging');
+      document.body.classList.remove('cb-resizing');
+      if (moved) try { localStorage.setItem(OUTLINE_W_KEY, parseInt(box.style.width, 10)); } catch (e2) { }
     }
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
@@ -3325,24 +3365,24 @@ cbHistoryReset();
 /* при запуске — «лаунчер»: cp-app.js показывает вместо него витрину съёмок */
 setTimeout(function () { cbProjModalOpen('launcher', true); }, 150);
 </script>
-<script src="cp-disk.js?v=2.0.119"></script>
-<script src="cp-app.js?v=2.0.119"></script>
-<script src="cp-queue.js?v=2.0.119"></script>
-<script src="cp-shelf.js?v=2.0.119"></script>
-<script src="cp-rules.js?v=2.0.119"></script>
-<script src="cp-guard.js?v=2.0.119"></script>
-<script src="cp-deliver.js?v=2.0.119"></script>
-<script src="cp-stages.js?v=2.0.119"></script>
-<script src="cp-accept.js?v=2.0.119"></script>
-<script src="cp-mirror.js?v=2.0.119"></script>
-<script src="cp-catalog.js?v=2.0.119"></script>
-<script src="cp-review.js?v=2.0.119"></script>
-<script src="cp-rvview.js?v=2.0.119"></script>
-<script src="cp-brak.js?v=2.0.119"></script>
-<script src="cp-site.js?v=2.0.119"></script>
-<script src="cp-upload.js?v=2.0.119"></script>
-<script src="cp-speed.js?v=2.0.119"></script>
-<script src="cp-archive.js?v=2.0.119"></script>
-<script src="cp-catalogs.js?v=2.0.119"></script>
+<script src="cp-disk.js?v=2.0.120"></script>
+<script src="cp-app.js?v=2.0.120"></script>
+<script src="cp-queue.js?v=2.0.120"></script>
+<script src="cp-shelf.js?v=2.0.120"></script>
+<script src="cp-rules.js?v=2.0.120"></script>
+<script src="cp-guard.js?v=2.0.120"></script>
+<script src="cp-deliver.js?v=2.0.120"></script>
+<script src="cp-stages.js?v=2.0.120"></script>
+<script src="cp-accept.js?v=2.0.120"></script>
+<script src="cp-mirror.js?v=2.0.120"></script>
+<script src="cp-catalog.js?v=2.0.120"></script>
+<script src="cp-review.js?v=2.0.120"></script>
+<script src="cp-rvview.js?v=2.0.120"></script>
+<script src="cp-brak.js?v=2.0.120"></script>
+<script src="cp-site.js?v=2.0.120"></script>
+<script src="cp-upload.js?v=2.0.120"></script>
+<script src="cp-speed.js?v=2.0.120"></script>
+<script src="cp-archive.js?v=2.0.120"></script>
+<script src="cp-catalogs.js?v=2.0.120"></script>
 </body>
 </html>

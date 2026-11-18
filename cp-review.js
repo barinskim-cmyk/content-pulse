@@ -956,6 +956,7 @@ CP.openedHooks.push(function () {
   var f = CP.stageFilter || '';
   CP.viewStage = f && f !== 'select' && typeof CP_STAGE_SETTING !== 'undefined' && CP_STAGE_SETTING[f] ? f : '';
   CP.rvOnly = false;
+  CP.viewReveal = {};
   cbRenderCards();
 });
 
@@ -989,6 +990,111 @@ cbRenderCards = (function (orig) {
     return r;
   };
 })(cbRenderCards);
+
+/* ---------- навигация справа: клик по карточке, которой нет в этом виде ----------
+   Ретушёр, 18.11: «если кликать по карточкам „сдано“, то ничего не происходит». Открыто из этапа —
+   карточки, которые ушли дальше (сдано, на сайте) или ещё не дошли, в середине скрыты, а в навигации
+   остаются: видно, что сделано. Клик по такой — она показывается на своём месте с пометкой, почему
+   её обычно здесь нет, и кнопкой «Скрыть». В навигации такие приглушены. То же для галочки
+   «Ретушь на проверке». */
+CP.viewReveal = {};
+
+function cpCardWhereText(card) {
+  var m = cpMeta(), id = card.id, del = (m.delivered || {})[id];
+  if (del) return 'сдано' + (del.letter ? ' · ' + del.letter : '') + (del.date ? ' · ' + del.date : '');
+  var last = cpLastRv(cpRv()[id]);
+  if (last) return last.status === 'review' ? 'ретушь на проверке' : last.status === 'rework' ? 'на доработке' : 'на сайте';
+  var cs = m.cardStatus[id] && m.cardStatus[id].s;
+  return cs === 'retouch' ? 'на ретуши' : cs === 'approval' ? 'на согласовании' : cs === 'reshoot' ? 'в браке' : 'без статуса';
+}
+
+/* почему карточка скрыта в этом виде ('' — не скрыта) */
+function cpCardHiddenWhy(card) {
+  if (!card || !CP.shoot) return '';
+  if (CP.viewStage && !cpCardOnStage(card, CP.viewStage)) return 'сейчас не в «' + cpStageLabel(CP.viewStage) + '»: ' + cpCardWhereText(card);
+  if (CP.rvOnly) {
+    var list = cpRv()[card.id], ls = list && list.length ? list[list.length - 1].status : '';
+    if (ls !== 'review' && ls !== 'rework') return 'не на проверке (включено «Ретушь на проверке»): ' + cpCardWhereText(card);
+  }
+  return '';
+}
+
+cbRenderCards = (function (orig) {
+  return function () {
+    var r = orig.apply(this, arguments);
+    var root = document.getElementById('cbCards');
+    if (!CP.shoot || !root) return r;
+    Array.prototype.forEach.call(root.querySelectorAll('.cb-card'), function (el) {
+      var id = el.getAttribute('data-cid'), card = cbCardById(id);
+      var why = CP.viewReveal[id] && card && cpCardMatchesFolders(card) ? cpCardHiddenWhy(card) : '';
+      var note = el.querySelector(':scope > .cp-reveal-note');
+      el.classList.toggle('cp-revealed', !!why);
+      if (!why) { if (note) note.remove(); return; }
+      el.style.display = '';
+      var html = '<span>Обычно здесь не видна — ' + cbEsc(why) + '. Показана по клику в навигации.</span>'
+        + '<button data-cp-unreveal="' + cbEsc(id) + '">Скрыть</button>';
+      if (note) note.innerHTML = html;
+      else el.insertAdjacentHTML('afterbegin', '<div class="cp-reveal-note">' + html + '</div>');
+    });
+    return r;
+  };
+})(cbRenderCards);
+
+document.getElementById('cbCards').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-cp-unreveal]');
+  if (!b) return;
+  e.preventDefault();
+  delete CP.viewReveal[b.getAttribute('data-cp-unreveal')];
+  cbRenderCards();
+});
+
+cbRenderOutline = (function (orig) {
+  return function () {
+    var r = orig.apply(this, arguments);
+    var host = document.getElementById('cbOutline');
+    if (!CP.shoot || !host || App.activeTab === 'conts') return r;
+    var nOff = 0;
+    Array.prototype.forEach.call(host.querySelectorAll('.cp-oi'), function (row) {
+      var btn = row.querySelector('.cb-outline-item'), id = btn && btn.getAttribute('data-target'), card = id ? cbCardById(id) : null;
+      if (!card) return;
+      var why = cpCardHiddenWhy(card), off = !!why && !CP.viewReveal[id];
+      row.classList.toggle('cp-oi-off', off);
+      if (off && row.style.display !== 'none') nOff++;
+      btn.title = (card.title || '') + (why ? ' — ' + why + (off ? '. В этом виде скрыта: клик — показать карточку' : '. Показана по клику') : '');
+    });
+    var hint = host.querySelector('.cp-oi-hint');
+    if (!nOff) { if (hint) hint.remove(); return r; }
+    var txt = 'Приглушены карточки, которых сейчас нет ' + (CP.viewStage ? 'в «' + cpStageLabel(CP.viewStage) + '»' : 'среди «на проверке»') + ' (' + nOff + '): клик — показать';
+    if (!hint) {
+      var title = host.querySelector('.cb-outline-title');
+      hint = document.createElement('div');
+      hint.className = 'cp-oi-hint';
+      if (title) title.parentNode.insertBefore(hint, title.nextSibling); else host.insertBefore(hint, host.firstChild);
+    }
+    hint.textContent = txt;
+    return r;
+  };
+})(cbRenderOutline);
+
+/* клик в навигации: скрытую — показать; найденную — подсветить на секунду */
+document.getElementById('cbOutline').addEventListener('click', function (e) {
+  var btn = e.target.closest('.cb-outline-item');
+  if (!btn || !CP.shoot || App.activeTab === 'conts') return;
+  var id = btn.getAttribute('data-target'), card = cbCardById(id);
+  if (!card) return;
+  if (!CP.viewReveal[id] && cpCardHiddenWhy(card)) {
+    CP.viewReveal[id] = true;
+    cbRenderCards();
+  }
+  setTimeout(function () {
+    var el = document.querySelector('#cbCards .cb-card[data-cid="' + id + '"]');
+    if (!el) return;
+    el.classList.remove('cp-flash');
+    void el.offsetWidth;
+    el.classList.add('cp-flash');
+    setTimeout(function () { el.classList.remove('cp-flash'); }, 1400);
+  }, 0);
+}, true);
 
 /* ---------- панель съёмки в фильтре этапа: что лежит в папке этапа сейчас ----------
    Маша, 06.11: «в боковой менюшке отображается всё, что есть в исходниках, а не
@@ -1922,6 +2028,11 @@ cbRenderCards = (function (orig) {
 (function cpReviewCss() {
   var st = document.createElement('style');
   st.textContent = '.cp-viewbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px;color:#cfcac2;margin:0 0 10px;padding:8px 10px;border:1px solid #3a3a37;border-radius:4px;background:#1a1a18}'
+    + '.cp-reveal-note{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px;color:#e7c9a8;background:#211c17;border:1px dashed #5a4632;border-radius:4px;padding:6px 10px;margin:0 0 8px}'
+    + '.cp-reveal-note button{padding:2px 10px;font-size:12px}'
+    + '.cb-card.cp-flash{box-shadow:0 0 0 2px #C9956B;transition:box-shadow .3s}'
+    + '.cp-oi-off{opacity:.5}.cp-oi-off:hover{opacity:.85}'
+    + '.cp-oi-hint{font-size:10px;line-height:1.4;color:#8c8c8b;padding:0 14px 8px}'
     + '.cp-viewbar b{color:#e7c9a8}'
     + '.cp-acc-prog{font-size:12px;color:#cfcac2;display:flex;flex-direction:column;gap:6px;margin-top:10px}'
     + '.cp-acc-bar{height:8px;background:#232321;border-radius:4px;overflow:hidden}.cp-acc-bar i{display:block;height:100%;background:#C9956B;transition:width .2s}'
