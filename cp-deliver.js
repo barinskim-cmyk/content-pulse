@@ -232,12 +232,11 @@ function cpBatchStatus(status) {
     return;
   }
   /* Ретушь (Маша, 10.11.2026): сначала копии в папку ретуши, статус — кадрам и карточкам, чьи
-     файлы на месте. Уже на ретуши в этом же составе — повторно не отправляем; добавили кадры
-     после отправки — уходят только они. */
+     файлы на месте. Карточку артикула отправляем целиком, включая повторную отправку. */
   var plan = [], same = [], names = [], going = cpGoingFrom('retouch'), all = [], cardOf = {};
   cards.forEach(function (c) {
     var pids = pidsOf(c), cst = m.cardStatus[c.id];
-    var notYet = pids.filter(function (pid) { return !(m.status[pid] && m.status[pid].s === 'retouch'); });
+    var notYet = c.cpArticleDir ? pids : pids.filter(function (pid) { return !(m.status[pid] && m.status[pid].s === 'retouch'); });
     var fresh = notYet.filter(function (pid) { var p = cbPhotoById(pid); return !(p && p.disk && going[p.disk]); });
     if (!notYet.length) {
       if (cst && cst.s === 'retouch') { same.push(c.title || 'карточка'); return; }

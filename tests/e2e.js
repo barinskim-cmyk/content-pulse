@@ -981,8 +981,8 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     check('копия доехала в 02 — статус «на согласовании» появился, путь копии запомнен', FILES.has(ap2) && await page.evaluate(id => cpMeta().status[id] && cpMeta().status[id].s === 'approval' && !!cpMeta().ap2[id] && !cpqCount(), ph.id));
     await page.evaluate(id => cpDoAction('retouch', [id], null), ph.id);
     const rt3 = 'disk:/Архив/РЕТУШЬ/' + SN + '/' + ph.rel;
-    for (let i = 0; i < 60 && (FILES.has(ap2) || !FILES.has(rt3)); i++) await page.waitForTimeout(100);
-    check('с согласования на ретушь: из 02 — в Корзину, в 03 — копия (перенос)', !FILES.has(ap2) && FILES.has(rt3), JSON.stringify([FILES.has(ap2), FILES.has(rt3)]));
+    for (let i = 0; i < 60 && !FILES.has(rt3); i++) await page.waitForTimeout(100);
+    check('переход на ретушь создаёт копию в 03 и оставляет файл в 02', FILES.has(ap2) && FILES.has(rt3), JSON.stringify([FILES.has(ap2), FILES.has(rt3)]));
     /* брак: копия в «брак» не проходит — кадр остаётся со своим статусом; доехала — «брак», копия из 03 в Корзину */
     {
       await page.waitForFunction(id => cpMeta().status[id] && cpMeta().status[id].s === 'retouch', ph.id, { timeout: 5000 }).catch(() => {});
@@ -995,7 +995,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       FAIL_COPY = null;
       await page.waitForFunction(id => cpMeta().status[id] && cpMeta().status[id].s === 'reshoot' && !cpqCount(), ph.id, { timeout: 8000 }).catch(() => {});
       const fin = await page.evaluate(id => { var st = cpMeta().status[id] || {}; return [st.s, st.kind, st.note, (cpMeta().brak || {})[id] || '']; }, ph.id);
-      check('копия в браке — кадр получил «брак» с видом и комментарием, путь копии запомнен', fin[0] === 'reshoot' && fin[1] === 'photo' && fin[2] === 'тест очереди брака' && FILES.has(fin[3]), JSON.stringify(fin));
+      check('копия в браке — кадр получил «брак» с видом и комментарием, путь копии запомнен', fin[0] === 'reshoot' && fin[1] === 'photo' && fin[2] === 'тест очереди брака' && FILES.has(fin[3]) && FILES.has(rt3), JSON.stringify(fin));
       await page.evaluate(id => { if (cpMeta().brak) delete cpMeta().brak[id]; }, ph.id);
       FILES.delete(fin[3]);
     }
@@ -1068,20 +1068,14 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       await page.evaluate(([rv, rt, sn]) => { const low = sn.toLowerCase(); CP.stagePaths = CP.stagePaths || {};
         (CP.stagePaths.review = CP.stagePaths.review || {})[low] = [rv + '/' + sn]; (CP.stagePaths.retouch = CP.stagePaths.retouch || {})[low] = [rt];
         CP.stageFilter = 'review'; cpSelectShoot(CP.shoot.path, CP.shoot.name, ''); }, [RV, RT0, SN]);
-      await page.waitForFunction(() => /Сдано — с ретушью/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
+      await page.waitForFunction(() => CP.sel && !CP.sel.loading && !!document.querySelector('#cpPanel [data-cp-stdl]'));
       const pt = await page.textContent('#cpPanel');
-      check('04: «Сдано — с ретушью 2 · Не сдано — без ретуши 1 · Всё 3», по умолчанию — сдано; чипы брака', /Сдано — с ретушью\s*2/.test(pt) && /Не сдано — без ретуши\s*1/.test(pt) && /Всё\s*3/.test(pt)
-        && /без брака/.test(pt) && /только брак/.test(pt) && await page.evaluate(() => CP.sel.scope === 'done'), pt.slice(0, 600));
-      const nBrak = () => page.evaluate(() => +(/\d+/.exec(document.querySelector('#cpPanel [data-cp-sbrak="only"] small').textContent) || [0])[0]);
-      const b0 = await nBrak();
-      await page.evaluate(() => { CP.sel.data.photos.filter(x => /^manekin2?\.jpg$/.test(x.name)).forEach(p => { CP.sel.data.meta.cp.status[p.id] = { s: 'reshoot' }; }); cpStageTagIndex(CP.sel); cpRenderPanel(); });
-      check('кадры в браке — «только брак 2», «без брака 0» (было ' + b0 + ')', await nBrak() === 2 && /без брака\s*0/.test(await page.textContent('#cpPanel')), await page.textContent('#cpPanel'));
-      await page.evaluate(() => document.querySelector('#cpPanel [data-cp-scope="todo"]').click());
+      check('панель «Отретушировано» показывает только папки 04', /Здесь файлов: 2/.test(pt) && !/99999|Не сдано — без ретуши/.test(pt), pt);
       const zb = new Set(ZIPS.keys());
-      await page.evaluate(() => document.querySelector('[data-cp-stdl]').click());
+      await page.evaluate(() => document.querySelector('#cpPanel [data-cp-stdl]').click());
       for (let i = 0; i < 80 && ![...ZIPS.keys()].some(k => !zb.has(k)); i++) await page.waitForTimeout(100);
       const zt = [...ZIPS.entries()].filter(([k]) => !zb.has(k)).flatMap(([, v]) => v);
-      check('«Не сдано — без ретуши»: из 03 только кадры карточек без версии (99999/zzz.jpg, не 74595)', zt.length === 1 && /\/1\/99999\/zzz\.jpg$/.test(zt[0]), JSON.stringify(zt));
+      check('скачивание из «Отретушировано» берёт файлы только из 04', zt.length === 2 && zt.every(p => /\.tif$/.test(p)) && !zt.some(p => /99999/.test(p)), JSON.stringify(zt));
       [RT0 + '/1/74595_модель/manekin.jpg', RT0 + '/1/99999/zzz.jpg'].forEach(f => FILES.delete(f));
       [RT0 + '/1/74595_модель', RT0 + '/1/99999', RT0 + '/1', RT0, 'disk:/Этапы/03_ТЕСТ'].forEach(d => DIRS.delete(d));
       await page.evaluate(sn => { delete CP.stagePaths.retouch[sn.toLowerCase()]; CP.stageFilter = ''; CP.sel = null; cpRenderPanel(); }, SN);
@@ -1113,7 +1107,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     const siteB = ST + '/' + sday + '/' + lB + '/' + nB + '/' + SN + '/1/' + lB + '_74596_модель/manekin2.tif';
     for (let i = 0; i < 60 && !FILES.has(siteB); i++) await page.waitForTimeout(100);
     await page.waitForFunction(i => cpMeta().rv[i].slice(-1)[0].status === 'approved', ids.b, { timeout: 5000 }).catch(() => {});
-    check('«На сайт»: папка артикула переехала в 05/<ДД.ММ.ГГ>/<буква>/<номер дропа>/<съёмка>/<лук>/<буква_артикул>, в 04 её больше нет', !!lB && /^\d+$/.test(nB || '') && FILES.has(siteB) && !inRv('manekin2.tif').length
+    check('«На сайт»: копия появляется в 05, файлы в 04 остаются', !!lB && /^\d+$/.test(nB || '') && FILES.has(siteB) && inRv('manekin2.tif').length === 1
       && await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].status === 'approved' && !!cpMeta().delivered[i], ids.b), JSON.stringify([...FILES.keys()].filter(k => /Этапы/.test(k))));
     check('«На сайт» оставляет копию артикула в «Ретуши»', FILES.has(RT3 + '/1/74596_модель/manekin2.jpg') && !TRASHED.some(p => p.indexOf(RT3) === 0));
     const v2 = await vis();
@@ -1198,16 +1192,16 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     check('новая версия после доработки — рядом, папка с доработкой ушла в Корзину', inRv('manekin.tif').length === 1 && !/_доработка/.test(inRv('manekin.tif')[0]) && TRASHED.some(p => /_доработка$/.test(p))
       && await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].status === 'review', ids.a), JSON.stringify([inRv('manekin.tif'), TRASHED.slice(-3)]));
     /* «На сайт», а Диск не перенёс — раньше статус терялся; теперь — очередь, статус ставится, когда папка на месте */
-    FAIL_MOVE = /74595/;
+    FAIL_COPY = /_cp_new_[^/]+\/manekin\.tif$/;
     await page.click('[data-cp-rv="' + ids.a + '"] [data-cp-rva="approve"]');
     await page.waitForFunction(() => /На сайт:/.test((document.getElementById('cpQueue') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
     check('«На сайт» не перенеслось — в очереди, статус «на сайте» пока не поставлен', await page.evaluate(i => /На сайт:/.test(document.getElementById('cpQueue').textContent)
       && cpMeta().rv[i].slice(-1)[0].status === 'review', ids.a), await page.evaluate(i => JSON.stringify(cpMeta().rv[i].slice(-1)[0].status), ids.a));
-    FAIL_MOVE = null;
-    for (let i = 0; i < 80 && !TRASHED.includes(RV + '/' + SN); i++) await page.waitForTimeout(100);
-    check('очередь перенесла — теперь «на сайте» и сдано', await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].status === 'approved' && !!cpMeta().delivered[i] && !cpqCount(), ids.a));
+    FAIL_COPY = null;
+    await page.waitForFunction(i => cpMeta().rv[i].slice(-1)[0].status === 'approved' && !cpqCount(), ids.a, { timeout: 12000 });
+    check('очередь докопировала — теперь «на сайте» и сдано', await page.evaluate(i => !!cpMeta().delivered[i], ids.a));
     const lA = await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].letter, ids.a), nDropA = await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].n, ids.a);
-    check('всё на сайте — папка съёмки в 04 опустела и ушла в Корзину', FILES.has(ST + '/' + sday + '/' + lA + '/' + nDropA + '/' + SN + '/1/' + lA + '_74595_модель/manekin.tif') && TRASHED.includes(RV + '/' + SN), JSON.stringify(TRASHED.slice(-4)));
+    check('после копирования всех артикулов папка 04 остаётся', FILES.has(ST + '/' + sday + '/' + lA + '/' + nDropA + '/' + SN + '/1/' + lA + '_74595_модель/manekin.tif') && DIRS.has(RV + '/' + SN) && inRv('manekin.tif').length === 1, JSON.stringify(TRASHED.slice(-4)));
     for (let i = 0; i < 40 && !/принято[\s\S]*принято/.test((FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString()); i++) await page.waitForTimeout(100);
     const out = (FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString();
     check('выработка: таблица в служебной папке — сдано ×4, доработка, в карточку, принято ×2, с буквой и датой', /^\uFEFFдата;время;ретушёр/.test(out) && (out.match(/;сдано;/g) || []).length === 4
@@ -1254,17 +1248,24 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         return out;
       });
       check('2.0.118: в 03 есть папка съёмки с номером очереди — копии на ретушь кладутся в неё', rt.join() === 'true,true', rt.join());
-      /* тот же дроп и артикул на сайте уже есть — файлы в ту же папку, одноимённый заменяется, «_2» нет */
       const MF = RV + '/MERGE_SN/1/U_75001', MT = ST + '/01.01.26/U/1/MERGE_SN/1/U_75001';
       [RV + '/MERGE_SN', RV + '/MERGE_SN/1', MF, ST + '/01.01.26', ST + '/01.01.26/U', ST + '/01.01.26/U/1', ST + '/01.01.26/U/1/MERGE_SN', ST + '/01.01.26/U/1/MERGE_SN/1', MT].forEach(d => DIRS.add(d));
       FILES.set(MF + '/a.tif', Buffer.from('NEW-A')); FILES.set(MF + '/b.tif', Buffer.from('NEW-B'));
       FILES.set(MT + '/a.tif', Buffer.from('OLD-A')); FILES.set(MT + '/c.tif', Buffer.from('OLD-C'));
-      const mres = await page.evaluate(([f, t]) => cpMoveMerge(f, t).then(x => x, e => 'ошибка: ' + (e && e.message)), [MF, MT]);
-      const merged = [mres === MT, (FILES.get(MT + '/a.tif') || '').toString(), FILES.has(MT + '/b.tif'), FILES.has(MT + '/c.tif'), !DIRS.has(MT + '_2'), !FILES.has(MF + '/a.tif')];
+      FAIL_COPY = /_cp_new_[^/]+\/b\.tif$/;
+      const failed = await page.evaluate(([f, t]) => cpCopyToSite(f, t).then(() => false, () => true), [MF, MT]);
+      check('незаконченная копия оставляет старую папку сайта целой', failed && FILES.get(MT + '/a.tif').toString() === 'OLD-A' && FILES.has(MT + '/c.tif') && !FILES.has(MT + '/b.tif'));
+      FAIL_COPY = null;
+      FAIL_MOVE = /_cp_new_/;
+      const swapFailed = await page.evaluate(([f, t]) => cpCopyToSite(f, t).then(() => false, () => true), [MF, MT]);
+      check('при сбое установки новой папки старая возвращается на сайт', swapFailed && FILES.get(MT + '/a.tif').toString() === 'OLD-A' && FILES.has(MT + '/c.tif'));
+      FAIL_MOVE = null;
+      await page.evaluate(([f, t]) => cpCopyToSite(f, t).then(() => cpCopyToSite(f, t)), [MF, MT]);
+      check('повторная отправка полностью заменяет артикул; 04 остаётся целой и дублей на сайте нет',
+        FILES.get(MT + '/a.tif').toString() === 'NEW-A' && FILES.has(MT + '/b.tif') && !FILES.has(MT + '/c.tif') && !DIRS.has(MT + '_2')
+        && FILES.has(MF + '/a.tif') && FILES.has(MF + '/b.tif'));
       for (const d of [...DIRS]) if (d.indexOf(RV + '/MERGE_SN') === 0 || d.indexOf(ST + '/01.01.26') === 0) DIRS.delete(d);
       for (const k of [...FILES.keys()]) if (k.indexOf(RV + '/MERGE_SN') === 0 || k.indexOf(ST + '/01.01.26') === 0) FILES.delete(k);
-      check('2.0.118: «На сайт», а папка артикула в этом дропе уже есть — файлы ложатся в неё (одноимённый заменён новым), папки «_2» нет',
-        JSON.stringify(merged) === JSON.stringify([true, 'NEW-A', true, true, true, true]), JSON.stringify([mres, merged]));
       /* сдали в 04 руками: файлы переименованы — версия «с Диска» по папке артикула, буква из имени папки */
       const HD = RV + '/' + SN + '/1/U_74598_модель';
       [RV + '/' + SN, RV + '/' + SN + '/1', HD].forEach(d => DIRS.add(d));
@@ -1482,14 +1483,19 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
   await page.waitForFunction(x => cpMeta().status[x[2]] && cpMeta().status[x[2]].s === 'retouch' && cpMeta().events.some(e => e.action === 'to_retouch' && /74596/.test(e.card || '') && e.folder), bt, { timeout: 8000 }).catch(() => {});
   check('пачкой «На ретушь»: статусы и одна запись в журнале с копированием', await page.evaluate(x => cpMeta().cardStatus[x[0]].s === 'retouch' && cpMeta().events.some(e => e.action === 'to_retouch' && /74596/.test(e.card || '') && e.folder), bt));
   check('пачкой «На ретушь»: пустая карточка (файлов на Диске нет) статус не получает — статус только там, где есть файлы', await page.evaluate(x => !cpMeta().cardStatus[x[1]], bt));
-  /* повторно «На ретушь» в том же составе — не отправляется и не перезаписывается */
   {
-    const before = await page.evaluate(x => [cpMeta().status[x[2]].ts, cpMeta().events.filter(e => e.action === 'to_retouch').length], bt);
-    await page.waitForTimeout(20);
+    const target = await page.evaluate(x => {
+      const card = cbCardById(x[0]), p = cbPhotoById(x[2]);
+      const root = cpRtRootOf(CP.shoot.path, cpRetouchBase(CP.shoot.path, CP.shoot.name));
+      return cpRtCopyPath(root + '/' + cpRetouchRel(p, card, CP.shoot.path), CP.shoot.path);
+    }, bt);
+    const stale = target.slice(0, target.lastIndexOf('/')) + '/старый_отбор.jpg';
+    FILES.set(stale, Buffer.from('old selection'));
+    const before = await page.evaluate(x => cpMeta().events.filter(e => e.action === 'to_retouch').length, bt);
     await page.click('[data-cp-batch="retouch"]');
-    await page.waitForTimeout(300);
-    const after = await page.evaluate(x => [cpMeta().status[x[2]].ts, cpMeta().events.filter(e => e.action === 'to_retouch').length], bt);
-    check('повторно «На ретушь» в том же составе — без повторной записи', before[0] === after[0] && before[1] === after[1], JSON.stringify([before, after]));
+    for (let i = 0; i < 60 && FILES.has(stale); i++) await page.waitForTimeout(100);
+    await page.waitForFunction(n => cpMeta().events.filter(e => e.action === 'to_retouch').length > n, before);
+    check('повторная отправка на ретушь заменяет артикул целиком, включая удаление лишнего файла', FILES.has(target) && !FILES.has(stale), target);
   }
   await page.evaluate(() => { CP.checked = {}; cbRenderOutline(); });
 
@@ -2024,7 +2030,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     await page.click('#cpShelfList .cp-shoot[data-name="2026-11-06_SV_КАТ"]');
     await page.waitForFunction(() => /Здесь файлов: 2/.test(document.getElementById('cpPanel').textContent));
     pan = await page.textContent('#cpPanel');
-    check('видна папка сданного артикула и отметка «сдано»', /74002_модель/.test(pan) && /сдано/.test(pan) && /к скачиванию: 0/.test(pan), pan);
+    check('видна папка сданного артикула и отметка «сдано»', /74002_модель/.test(pan) && /На сайте/.test(pan) && /к скачиванию: 0/.test(pan), pan);
     await page.check('#cpPanel [data-cp-staken]');
     check('сданный артикул скрывается только после включения ручного фильтра', !/74002_модель/.test(await page.textContent('#cpPanel')));
     await page.evaluate(() => { CP.stageArts = JSON.parse(window.__keep96.arts); CP.stagePresence = JSON.parse(window.__keep96.pres); cpRenderShoots(); });
@@ -2381,20 +2387,13 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       FILES.set(CLIP, Buffer.from('V'.repeat(70)));
       await page.click('[data-cp-stage="approval"]');
       await page.click('#cpShelfList .cp-shoot[data-name="2026-11-06_SV_КАТ"]');
-      await page.waitForFunction(() => /Только отбор/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
-      check('02: чипы «Только отбор 1» и «Все файлы съёмки», по умолчанию — только отбор', await page.evaluate(() => {
-        const on = document.querySelector('#cpPanel [data-cp-scope].cp-on'); return on && on.getAttribute('data-cp-scope') === 'stage' && /Только отбор\s*1/.test(on.textContent) && !!document.querySelector('#cpPanel [data-cp-scope="all"]'); }),
-        await page.textContent('#cpPanel'));
-      await page.click('#cpPanel [data-cp-scope="all"]');
-      await page.waitForFunction(() => /Все файлы съёмки\s*2/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => {});
-      check('«Все файлы съёмки» — исходники (кадр и видео), чипы «только видео 1 · без видео 1»', await page.evaluate(() => {
-        const t = document.getElementById('cpPanel').textContent; return /Все файлы съёмки\s*2/.test(t) && /только видео\s*1/.test(t) && /без видео\s*1/.test(t) && /Скачать файлы съёмки · 2/.test(t); }), await page.textContent('#cpPanel'));
-      await page.click('#cpPanel [data-cp-smedia="video"]');
+      await page.waitForFunction(() => CP.sel && !CP.sel.loading && !!document.querySelector('#cpPanel [data-cp-stdl]'));
+      check('панель «Отбор» не подтягивает видео из исходников', /Здесь файлов: 1/.test(await page.textContent('#cpPanel')) && !await page.locator('#cpPanel [data-cp-smedia="video"]').count());
       const zb = new Set(ZIPS.keys());
-      await page.click('[data-cp-stdl]');
+      await page.click('#cpPanel [data-cp-stdl]');
       for (let i = 0; i < 80 && ![...ZIPS.keys()].some(k => !zb.has(k)); i++) await page.waitForTimeout(100);
       const zv = [...ZIPS.entries()].filter(([k]) => !zb.has(k)).flatMap(([, v]) => v);
-      check('из 02 скачали «все файлы съёмки, только видео» — в архиве clip.mov', zv.length === 1 && /\/clip\.mov$/.test(zv[0]) && [...ZIPS.keys()].some(k => !zb.has(k) && /_02_ОТБОР_все файлы\+видео_/.test(k)), JSON.stringify([[...ZIPS.keys()].filter(k => !zb.has(k)), zv]));
+      check('скачивание из 02 берёт только файлы папки 02', zv.length === 1 && /\/k1\.jpg$/.test(zv[0]), JSON.stringify(zv));
       FILES.delete(CLIP);
       await page.click('[data-cp-p="close"]');
       await page.click('[data-cp-stage="retouch"]');

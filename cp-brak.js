@@ -89,9 +89,7 @@ function cpBrakSend(groups, info) {
   var root = cpBrakRoot(shoot.name);
   if (!root) return;
   m.brak = m.brak || {};
-  var rtBase = '';
-  try { rtBase = cpRetouchBase(shoot.path, shoot.name); } catch (e) { rtBase = ''; }
-  var items = [], cardOf = {}, relOf = {}, was = {}, seen = {}, nofile = 0;
+  var items = [], cardOf = {}, relOf = {}, seen = {}, nofile = 0;
   groups.forEach(function (g) {
     var card = g.cardId ? cbCardById(g.cardId) : null;
     (g.pids || []).forEach(function (pid) {
@@ -99,23 +97,25 @@ function cpBrakSend(groups, info) {
       if (!p || (p.kind || 'photo') === 'ref' || seen[pid]) return;
       seen[pid] = true;
       cardOf[pid] = g.cardId || null;
-      was[pid] = m.status[pid] ? m.status[pid].s : '';
       if (!p.disk || p.missing) { nofile++; return; }
       relOf[pid] = cpRetouchRel(p, card, shoot.path);
-      items.push({ pid: pid, from: p.disk, path: m.brak[pid] || (root + '/' + relOf[pid]) });
+      var target = m.brak[pid] || (root + '/' + relOf[pid]);
+      var full = card && card.cpArticleDir && cpCardPids(card).every(function (id) {
+        var source = cbPhotoById(id);
+        return g.pids.indexOf(id) !== -1 && source && source.disk && !source.missing;
+      });
+      items.push({ pid: pid, from: p.disk, path: target, articleRoot: full ? cpStageArticleRoot(root, target, card) : '' });
     });
   });
   var d = new Date(), z = function (n) { return (n < 10 ? '0' : '') + n; };
   var finish = function (okItems, queued) {
     if (!CP.shoot || CP.shoot.path !== shoot.path) return;
-    var mm = cpMeta(), ts = new Date().toISOString(), okPid = {}, trash = [], rows = [], names = [], nCards = 0;
+    var mm = cpMeta(), ts = new Date().toISOString(), okPid = {}, rows = [], names = [], nCards = 0;
     mm.brak = mm.brak || {};
     okItems.forEach(function (x) {
       mm.status[x.pid] = { s: 'reshoot', by: who, ts: ts, card: cardOf[x.pid] || undefined, kind: info.kind, note: info.note };
       mm.brak[x.pid] = x.path;
       okPid[x.pid] = true;
-      /* был на ретуши — копия в 03 больше не нужна */
-      if (rtBase && was[x.pid] === 'retouch') trash.push(typeof cpRtLetteredPath === 'function' ? cpRtLetteredPath(rtBase + '/' + relOf[x.pid], shoot.path) : rtBase + '/' + relOf[x.pid]);
     });
     groups.forEach(function (g) {
       var card = g.cardId ? cbCardById(g.cardId) : null;
@@ -131,7 +131,6 @@ function cpBrakSend(groups, info) {
     if (okItems.length || nCards) {
       cpEvent('to_reshoot', cpPhotoNames(okItems.map(function (x) { return x.pid; })), names.length ? { card: names.join(', ') } : {});
       cpEvent('to_reshoot_info', [], { note: 'брак ' + cpBrakKindLabel(info.kind) + (info.note ? ': ' + info.note : '') + ' → ' + CPDisk.showPath(root) }, true);
-      if (trash.length) CPQ.add(shoot, { kind: 'trash', label: 'Брак — убрать из ретуши: ' + trash.length, paths: trash });
       cpOutputAppend(rows, CP_BRAK_FILE, CP_BRAK_HEAD);
     }
     cpAfterStatus();
@@ -143,10 +142,10 @@ function cpBrakSend(groups, info) {
   var queue = function (list, err) {
     var a = { type: 'brak-st', by: who, kind: info.kind, note: info.note, map: {}, cards: {} };
     list.forEach(function (x) { a.map[x.from] = [x.pid, x.path]; if (cardOf[x.pid]) a.cards[x.pid] = cardOf[x.pid]; });
-    CPQ.add(shoot, { kind: 'copy', label: 'В брак: ' + list.length + ' кадр(ов)', items: list.map(function (x) { return { from: x.from, path: x.path }; }), dirs: [root], after: a, err: err || '' });
+    CPQ.add(shoot, { kind: 'copy', label: 'В брак: ' + list.length + ' кадр(ов)', items: list.map(cpStageCopyItem), dirs: [root], after: a, err: err || '' });
   };
   if (!items.length) { finish([], 0); return; }
-  cpCopyOnDisk(items.map(function (x) { return { from: x.from, path: x.path }; }), [root], 'Копирую в брак').then(function (r) {
+  cpCopyOnDisk(items.map(cpStageCopyItem), [root], 'Копирую в брак').then(function (r) {
     cbBusyHide();
     var bad = {};
     (r.failedFrom || []).forEach(function (f) { bad[f] = true; });

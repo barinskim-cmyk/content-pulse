@@ -256,40 +256,88 @@ function cpReviewRel(root, from) {
   return parts.join('/');
 }
 
-/** Перенести папку артикула на сайт; там она уже есть (тот же дроп) — файлы в неё, одноимённые заменяются. */
-function cpMoveMerge(from, to) {
-  return CPDisk.proxyMove([{ from: from, path: to }]).then(function (r) {
-    var st = r && r.results && r.results[0], s = st && st.status;
-    if (s !== 'exists') {
-      var done = s === 'done';
-      return cpWaitThere(to, done ? 1 : (s === 'timeout' ? 18 : 2)).then(function (ok) {
-        if (ok) return to;
-        throw { message: CPDisk.showPath(from) + ': ' + (done ? 'Диск ответил «перенесено», но на новом месте папки нет' : (st && (st.error || s)) || 'не перенеслось') + ' — статус не поставлен, повторите', plain: true };
+/* Сначала проверенная копия в служебной папке, затем замена целевой.
+   При сбое установки прежняя папка возвращается на место. */
+var CP_STAGE_REPLACING = Object.create(null);
+function cpReplaceStageArticle(items, to, markDelivery) {
+  if (!items.length) return Promise.reject({ message: 'В артикуле нет файлов', plain: true });
+  var digest = function (meta) { return meta.sha256 || meta.md5 || [meta.size, meta.modified].join(':'); };
+  var wait = CP_STAGE_REPLACING[to] || Promise.resolve();
+  var task = wait.catch(function () { }).then(function () {
+    return cpPool(items, 4, function (it) {
+      return (it.meta ? Promise.resolve(it.meta) : CPDisk.meta(it.from)).then(function (meta) {
+        return { from: it.from, rel: it.path.slice(to.length), digest: digest(meta) };
       });
-    }
-    return CPDisk.walkPhotos(from, false, 4, true).then(function (files) {
-      var items = files.map(function (f) { return { from: f.path, path: to + f.path.slice(from.length) }; });
-      var chunks = [];
-      for (var i = 0; i < items.length; i += 100) chunks.push(items.slice(i, i + 100));
-      return chunks.reduce(function (p, ch) {
-        return p.then(function () {
-          return CPDisk.proxyMove(ch).then(function (r2) {
-            var res = (r2 && r2.results) || [];
-            var bad = res.filter(function (x) { return x.status === 'failed' || x.status === 'timeout'; });
-            if (bad.length) throw { message: 'на сайт не перенеслись файлы: ' + bad.length + ' (' + (bad[0].error || bad[0].status) + ')', plain: true };
-            var ex = ch.filter(function (it, k) { return res[k] && res[k].status === 'exists'; });
-            if (!ex.length) return;
-            /* такой файл в папке артикула уже есть — новая версия его заменяет (старый — в Корзину Диска) */
-            return CPDisk.trash(ex.map(function (x) { return x.path; })).then(function () { return CPDisk.proxyMove(ex); }).then(function (r3) {
-              var left = ((r3 && r3.results) || []).filter(function (x) { return x.status !== 'done'; });
-              if (left.length) throw { message: 'на сайте не заменились файлы: ' + left.length, plain: true };
-            });
+    }).then(function (files) {
+      var parent = cpParentDir(to), key = cpHash(to + JSON.stringify(files));
+      var staging = parent + '/_cp_new_' + key, backup = parent + '/_cp_old_' + key;
+      var exists = function (path) { return CPDisk.meta(path).then(function (m) { return m; }, function (e) { if (e && e.status === 404) return null; throw e; }); };
+      var move = function (from, path) {
+        return CPDisk.proxyMove([{ from: from, path: path }]).then(function (out) {
+          var r = (out.results || [])[0];
+          if (r && r.status === 'done') return;
+          return Promise.all([exists(from), exists(path)]).then(function (state) {
+            if (!state[0] && state[1]) return;
+            throw { message: (r && r.error || 'Не удалось заменить папку') + ': ' + CPDisk.showPath(path), plain: true };
           });
         });
-      }, Promise.resolve());
-    }).then(function () {
-      return CPDisk.trash([from]).catch(function () { });   /* опустевшая папка в 04 */
-    }).then(function () { return to; });
+      };
+      var clearBackup = function () {
+        return exists(backup).then(function (old) { if (old) return CPDisk.trash([backup]); }).catch(function () { });
+      };
+      return exists(to).then(function (current) {
+        if (!current || (current.custom_properties || {}).cp_stage_copy !== key) return { current: current, same: false };
+        return CPDisk.walkPhotos(to, false, 4, true).then(function (existing) {
+          var expected = Object.create(null);
+          files.forEach(function (file) { expected[file.rel] = file.digest; });
+          var same = existing.length === files.length && existing.every(function (file) {
+            return expected[file.path.slice(to.length)] === digest(file);
+          });
+          return { current: current, same: same };
+        });
+      }).then(function (state) {
+        if (state.same) return clearBackup();
+        return cpqChunks(files, CPQ.copyChunk).reduce(function (p, chunk) {
+          return p.then(function () {
+            var batch = chunk.map(function (f) { return { from: f.from, path: staging + f.rel }; });
+            return CPDisk.proxyCopy(batch, [staging]).then(function (out) {
+              return cpPool(batch, 4, function (it, i) {
+                var r = (out.results || [])[i];
+                if (r && r.status === 'done') return Promise.resolve();
+                if (!r || r.status !== 'exists') return Promise.reject({ message: (r && r.error || 'Не скопировался файл') + ': ' + CPDisk.showPath(to + chunk[i].rel), plain: true });
+                return CPDisk.meta(it.path).then(function (m) {
+                  if (digest(m) !== chunk[i].digest) throw { message: 'Промежуточная копия отличается от исходника', plain: true };
+                });
+              });
+            });
+          });
+        }, Promise.resolve()).then(function () {
+          var props = { cp_stage_copy: key };
+          if (markDelivery) props.cp_mv = String(Date.now());
+          return CPDisk.proxyProps(staging, props);
+        }).then(function () {
+          return (state.current ? move(to, backup) : Promise.resolve()).then(function () {
+            return move(staging, to).catch(function (e) {
+              return Promise.all([exists(to), exists(backup)]).then(function (state) {
+                if (!state[0] && state[1]) return move(backup, to);
+              }).then(function () { throw e; });
+            });
+          });
+        }).then(clearBackup);
+      });
+    });
+  });
+  CP_STAGE_REPLACING[to] = task;
+  var release = function () { if (CP_STAGE_REPLACING[to] === task) delete CP_STAGE_REPLACING[to]; };
+  task.then(release, release);
+  return task;
+}
+
+function cpCopyToSite(from, to) {
+  return CPDisk.walkPhotos(from, false, 4, true).then(function (files) {
+    return cpReplaceStageArticle(files.map(function (f) {
+      return { from: f.path, path: to + f.path.slice(from.length), meta: f };
+    }), to, true);
   });
 }
 
@@ -493,7 +541,7 @@ cpAcceptPlan = (function (orig) {
   };
 })(cpAcceptPlan);
 
-/* ---------- на сайт: папка артикула переезжает 04 → 05/<дата>/<съёмка>/<артикул> ---------- */
+/* ---------- на сайт: копия артикула из 04 в 05 ---------- */
 
 /** Убрать опустевшие папки от dir вверх до stop (не включая). */
 function cpTrashEmptyUp(dir, stop) {
@@ -537,7 +585,6 @@ cpRvApprove = function (ids, via) {
   if (!root) { if (cpCatStageMissing('retouched')) return; return cpRvApproveLegacy(ids, via); }
   if (!site) { cbToast('Нет папки сайта в каталоге: шестерёнка на витрине'); return; }
   var rv = cpRv(), shoot = CP.shoot, todo = [], skip = [];
-  var base = root.replace(/\/+$/, '') + '/' + CPDisk.safeName(shoot.name);
   var ok = ids.filter(function (id) {
     var last = cpLastRv(rv[id]);
     if (!last || last.status !== 'review' || !cpRvDirOf(last) || cpRvHasReworkMarks(last)) {
@@ -552,7 +599,7 @@ cpRvApprove = function (ids, via) {
   });
   if (skip.length) cbToast('Не отправлено на сайт: ' + skip.join('; '));
   if (!ok.length) return;
-  var who = cpActor(), now = new Date().toISOString(), rows = [], moved = [], queued = [];
+  var who = cpActor(), now = new Date().toISOString(), rows = [], copied = [], queued = [];
   cbBusyShow('Отправляю на сайт...', 0.3);
   /* номер дропа у версий, сданных руками в 04 (его там нет), — последний дроп этой буквы в тот день */
   return cpDropsLoad().then(function () {
@@ -571,41 +618,38 @@ cpRvApprove = function (ids, via) {
       var to = dayDir + (l ? '/' + CPDisk.safeName(l) + '/' + n : '') + '/' + CPDisk.safeName(shoot.name) + '/' + rel;
       todo.push({ id: id, last: last, from: from, to: to, card: card, dayDir: dayDir });
     });
-    /* каждая карточка — отдельно: одна не перенеслась — остальные всё равно получают статус,
-       а она уходит в очередь (cp-queue.js) и переносится, пока не перенесётся */
+    /* Карточки копируются независимо. Статус появляется только после успешной копии. */
     return todo.reduce(function (p, t) {
       return p.then(function () {
-        /* метка «переносит программа» едет вместе с папкой — на сайте её не примут за сданное руками (cp-mirror.js) */
-        return CPDisk.proxyProps(t.from, { cp_mv: String(Date.now()) }).catch(function () { }).then(function () { return cpMoveMerge(t.from, t.to); }).then(function (to) {
-          t.to = to;
-          moved.push(t);
+        return cpCopyToSite(t.from, t.to).then(function () {
+          copied.push(t);
         }, function (e) {
           queued.push(t);
-          CPQ.add(shoot, { kind: 'move', label: 'На сайт: ' + (t.card ? t.card.title || t.card.category || 'карточка' : t.id), items: [{ from: t.from, path: t.to }],
-            after: { type: 'rv-approve', id: t.id, from: t.from, to: t.to, who: who, date: cpToday(), base: base, via: cpRvViaOf(via, t.id) }, err: (e && e.message) || '' });
+          CPQ.add(shoot, { kind: 'site-copy', label: 'На сайт: ' + (t.card ? t.card.title || t.card.category || 'карточка' : t.id), items: [{ from: t.from, path: t.to }],
+            after: { type: 'rv-approve', id: t.id, from: t.from, to: t.to, who: who, date: cpToday(), via: cpRvViaOf(via, t.id) }, err: (e && e.message) || '' });
         });
       });
     }, Promise.resolve());
   }).then(function () {
     cbBusyHide();
     var m = cpMeta();
-    moved.forEach(function (t) {
+    copied.forEach(function (t) {
       cpRvApplyApproved(m, t.id, t.from, t.to, who, now, cpToday(), cpRvViaOf(via, t.id));
       rows.push(cpOutputRow(t.last, shoot.name, t.card, 'принято', cpRvViaOf(via, t.id)));
     });
-    if (moved.length) {
-      var mids = moved.map(function (t) { return t.id; });
-      cpEvent('rt_approve', [], { card: moved.map(function (t) { return t.card ? t.card.title : t.id; }).join(', '), via: cpRvViaKeys(via, mids),
-        note: 'на сайт: ' + CPDisk.showPath(cpSiteShootDir(moved[0].to, shoot.name)) + cpRvViaNote(via, mids) });
-      cbToast('На сайт: карточек ' + moved.length + ' → ' + CPDisk.showPath(cpSiteShootDir(moved[0].to, shoot.name))
-        + (queued.length ? '. Не перенеслись сразу: ' + queued.length + ' — переношу повторно (плашка сверху)' : ''));
-    } else if (queued.length) cbToast('Не перенеслось сразу: ' + queued.length + ' — переношу повторно, не закрывайте страницу (плашка сверху)');
+    if (copied.length) {
+      var mids = copied.map(function (t) { return t.id; });
+      cpEvent('rt_approve', [], { card: copied.map(function (t) { return t.card ? t.card.title : t.id; }).join(', '), via: cpRvViaKeys(via, mids),
+        note: 'на сайт: ' + CPDisk.showPath(cpSiteShootDir(copied[0].to, shoot.name)) + cpRvViaNote(via, mids) });
+      cbToast('На сайт: карточек ' + copied.length + ' → ' + CPDisk.showPath(cpSiteShootDir(copied[0].to, shoot.name))
+        + (queued.length ? '. Не скопировались сразу: ' + queued.length + ' — копирую повторно (плашка сверху)' : ''));
+    } else if (queued.length) cbToast('Не скопировалось сразу: ' + queued.length + ' — копирую повторно, не закрывайте страницу (плашка сверху)');
     cbRenderCards();
     cbRenderOutline();
-    if (!moved.length) return;
+    if (!copied.length) return;
     /* в «Сайте» новое: съёмка сразу в его фильтре, у папки даты — снова «не скачано» */
     var siteDirs = [], days = [];
-    moved.forEach(function (t) {
+    copied.forEach(function (t) {
       var d = cpSiteShootDir(t.to, shoot.name);
       if (siteDirs.indexOf(d) === -1) siteDirs.push(d);
       if (days.indexOf(t.dayDir) === -1) days.push(t.dayDir);
@@ -615,7 +659,7 @@ cpRvApprove = function (ids, via) {
     /* дроп мог лечь в папку прошлого дня — отметка на папке дня, чтобы её перечитали и на других компьютерах */
     days.forEach(function (d) { CPDisk.proxyProps(d, { cp_touch: String(Date.now()) }).catch(function () { }); });
     if (typeof cpMirrorAfterDelivery === 'function') cpMirrorAfterDelivery();
-    return Promise.all([cpOutputAppend(rows)].concat(moved.map(function (t) { return cpTrashEmptyUp(cpParentDir(t.from), cpParentDir(base)); })));
+    return cpOutputAppend(rows);
   }).catch(function (e) {
     cbBusyHide();
     cbRenderCards();
@@ -641,8 +685,7 @@ function cpRvApplyApproved(m, id, from, to, who, ts, date, via) {
   if (!last) return;
   if (via) last.via = via;
   delete last.ready;
-  (last.files || []).forEach(function (f) { if (f.path.indexOf(from + '/') === 0) f.path = to + f.path.slice(from.length); });
-  last.dir = to;
+  last.dir = from;
   last.status = 'approved'; last.rby = who; last.rts = ts; last.site = CPDisk.showPath(to);
   var rec = { files: (last.files || []).length, letter: last.letter, date: date, at: CPDisk.showPath(to), out: last.letter + '_' + last.n, ts: ts };
   m.delivered = m.delivered || {};
@@ -657,7 +700,6 @@ CPQ.after['rv-approve'] = function (op, m, shoot) {
   cpRvApplyApproved(m, a.id, a.from, a.to, a.who, new Date().toISOString(), a.date, a.via);
   var last = cpLastRv((m.rv || {})[a.id]), card = CP.shoot && CP.shoot.path === shoot.path ? cbCardById(a.id) : null;
   if (last) cpOutputAppend([cpOutputRow(last, shoot.name, card || { title: a.id }, 'принято', a.via)]);
-  if (a.base) cpTrashEmptyUp(cpParentDir(a.from), cpParentDir(a.base));
   if (CP.shoot && CP.shoot.path === shoot.path) {
     if (typeof cpSiteMarkNew === 'function') cpSiteMarkNew([cpSiteShootDir(a.to, shoot.name)]);
     if (typeof cpMirrorAfterDelivery === 'function') cpMirrorAfterDelivery();
@@ -731,9 +773,8 @@ cbRenderCards = (function (orig) {
    Маша, 08.11: «отобрала тестовую съёмку, отправила на согласование — в папке
    „Отбор“ ничего не появилось». Шаг 2 отражения сервера: статус «на согласовании»
    — это копия кадра в папке согласования (02_ОТБОР), структура как в исходниках,
-   кадр карточки артикула — в папке артикула. Сняли статус (руками, убрали кадр
-   из карточки, отправили на ретушь) — копия из 02 уходит в Корзину; на ретушь
-   кадр копируется из исходников в 03, так что 02 → 03 получается переносом.
+   кадр карточки артикула — в папке артикула. При переходе на другой этап
+   копия в 02 остаётся. Очистка 02 применяется только при снятии статуса.
    Сверка идёт после каждой правки отбора: какие кадры на согласовании и какие
    копии лежат в 02 (meta.cp.ap2: кадр → путь копии). */
 
@@ -761,7 +802,7 @@ function cpApprovalSync() {
     var card = m.status[pid].card ? cbCardById(m.status[pid].card) : null;
     return { pid: pid, from: p.disk, path: base + '/' + cpRetouchRel(p, card, shootPath) };
   }).filter(Boolean);
-  var drop = Object.keys(ap2).filter(function (pid) { return !(m.status[pid] && m.status[pid].s === 'approval'); });
+  var drop = Object.keys(ap2).filter(function (pid) { return !m.status[pid]; });
   if (!copy.length && !drop.length) return Promise.resolve();
   _cpApBusy = true;
   var label = cpFolderBase(root), path = CP.shoot.path, msgs = [];
@@ -786,7 +827,7 @@ function cpApprovalSync() {
     return CPDisk.trash(paths).then(function (res) {
       var ok = res.filter(function (x) { return x.status === 'done' || x.status === 'gone'; }).map(function (x) { return x.path; });
       var bad = res.filter(function (x) { return x.status !== 'done' && x.status !== 'gone'; }).map(function (x) { return x.path; });
-      if (bad.length) CPQ.add(CP.shoot, { kind: 'trash', label: 'Снять с согласования (в Корзину): ' + bad.length, paths: bad, after: { type: 'ap2-drop', paths: bad } });
+      if (bad.length) CPQ.add(CP.shoot, { kind: 'trash', label: 'Снять с согласования (в Корзину): ' + bad.length, paths: bad, after: { type: 'ap2-drop', paths: bad, cleared: true } });
       if (CP.shoot && CP.shoot.path === path) drop.forEach(function (pid) { if (ok.indexOf(ap2[pid]) !== -1) delete cpMeta().ap2[pid]; });
       msgs.push('из ' + label + ' в Корзину: ' + ok.length);
       /* опустевшие папки в 02 — тоже в Корзину (до папки 02 включительно не трогаем) */
@@ -829,9 +870,14 @@ function cpApprovalSend(groups, opts) {
       seen[pid] = true;
       cardOf[pid] = g.cardId || null;
       /* копия уже в 02 и статус стоит — второй раз не копируем */
-      if (m.status[pid] && m.status[pid].s === 'approval' && (m.ap2 || {})[pid]) { already.push(pid); return; }
+      var full = !opts.quiet && card && card.cpArticleDir && cpCardPids(card).every(function (id) {
+        var source = cbPhotoById(id);
+        return g.pids.indexOf(id) !== -1 && source && source.disk && !source.missing && !going[source.disk];
+      });
+      if (!full && m.status[pid] && m.status[pid].s === 'approval' && (m.ap2 || {})[pid]) { already.push(pid); return; }
       if (going[p.disk]) { wait++; return; }
-      items.push({ pid: pid, from: p.disk, path: base + '/' + cpRetouchRel(p, card, shootPath) });
+      var target = base + '/' + cpRetouchRel(p, card, shootPath);
+      items.push({ pid: pid, from: p.disk, path: target, articleRoot: full ? cpStageArticleRoot(base, target, card) : '' });
     });
   });
   var label = cpFolderBase(root);
@@ -861,7 +907,7 @@ function cpApprovalSend(groups, opts) {
     return a;
   };
   var queue = function (list, err) {
-    CPQ.add(shoot, { kind: 'copy', label: 'На согласование: ' + list.length + ' кадр(ов)', items: list.map(function (x) { return { from: x.from, path: x.path }; }), dirs: [base], after: after(list), err: err || '' });
+    CPQ.add(shoot, { kind: 'copy', label: 'На согласование: ' + list.length + ' кадр(ов)', items: list.map(cpStageCopyItem), dirs: [base], after: after(list), err: err || '' });
   };
   var done = function (okItems, queued) {
     var same = CP.shoot && CP.shoot.path === shoot.path;
@@ -880,7 +926,7 @@ function cpApprovalSend(groups, opts) {
   };
   if (!items.length) { done([], 0); return; }
   _cpApBusy = true;
-  cpCopyOnDisk(items.map(function (x) { return { from: x.from, path: x.path }; }), [base], 'Копирую на согласование').then(function (r) {
+  cpCopyOnDisk(items.map(cpStageCopyItem), [base], 'Копирую на согласование').then(function (r) {
     cbBusyHide();
     _cpApBusy = false;
     var bad = {};
@@ -1129,13 +1175,12 @@ cpSelectShoot = (function (orig) {
     var paths = key && typeof CP_STAGE_SETTING !== 'undefined' && CP_STAGE_SETTING[key] && CP.stagePaths && CP.stagePaths[key]
       ? CP.stagePaths[key][String(name).toLowerCase()] : null;
     if (!paths || !paths.length) return orig.apply(this, arguments);
-    /* охват скачивания (Маша, 09.11): в 02 — «отбор» или «все файлы съёмки»; в 04 — «сдано (с ретушью)»,
-       «не сдано (без ретуши — кадры из 03)» или всё */
+    /* Панель и архив скачивания используют только папки выбранного этапа. */
     CP.sel = { path: path, name: name, modified: modified, stage: key, stagePaths: paths.slice(), loading: true, open: {}, folders: {}, files: [], dirs: [],
-      scope: key === 'review' ? 'done' : 'stage', media: '', brak: '' };
+      media: '', brak: '' };
     cpMarkSelected();
     cpRenderPanel();
-    var sel = CP.sel, low = String(name).toLowerCase();
+    var sel = CP.sel;
     sel.stageTags = {};
     var repaint = false;
     sel.stageFolderPreview = [];
@@ -1155,18 +1200,15 @@ cpSelectShoot = (function (orig) {
       return CPDisk.walkPhotos(p, false, 4, true, null, onDirs).then(function (files) { return { root: p, files: files, dirs: files.dirs || [] }; },
         function (e) { return { root: p, files: [], dirs: preview.dirs, error: e }; });
     };
-    var rtPaths = key === 'review' && CP.stagePaths.retouch ? (CP.stagePaths.retouch[low] || []) : [];
     Promise.all([
       Promise.all(sel.stagePaths.map(walk)),
       /* отбор съёмки — чьи это карточки (теги ретушёров и прочие) */
       CPDisk.readState(path).then(function (st) { return st.data; }, function () { return null; }),
-      cpLoadDict().catch(function () { return null; }),
-      Promise.all(rtPaths.map(walk))
+      cpLoadDict().catch(function () { return null; })
     ]).then(function (r) {
       if (CP.sel !== sel) return;
       sel.stageFiles = r[0];
       sel.data = r[1];
-      sel.rtFiles = r[3];
       sel.loading = false;
       cpStageTagIndex(sel);
       cpRenderPanel();
@@ -1262,7 +1304,11 @@ function cpStageTagIndex(sel) {
     }
     return false;
   };
-  var index = function (x, own) {
+  var later = CP.stageArtsFor === CP.archive ? CP.stageArts : {};
+  var hasStageCode = function (stage, code) {
+    return !!code && (((later[stage] || {})[low] || {})[code] !== undefined);
+  };
+  var index = function (x) {
     x.files.forEach(function (f) {
       var rel = f.path.indexOf(x.root + '/') === 0 ? f.path.slice(x.root.length + 1) : f.name;
       var k = cpStageKey(rel, letters), name = k.name, tags = {};
@@ -1273,7 +1319,7 @@ function cpStageTagIndex(sel) {
       /* папка ретуши: запись «скачано» из отбора; буква в имени папки — забрали руками на Диске */
       f.cpKey = k.key;
       f.cpTook = null;
-      if (rtdl && own) {
+      if (rtdl) {
         var rec = rtdl[k.key], rid = cpRidShort(f);
         if (rec && rec.rid && rid && rec.rid !== rid) rec = null;   /* на этом месте лежит уже другая копия */
         f.cpTook = rec || (k.letter ? { l: k.letter, folder: true } : null);
@@ -1285,12 +1331,25 @@ function cpStageTagIndex(sel) {
       f.cpTags = Object.keys(tags);
       f.cpPid = pid || '';
       f.cpCards = pid ? cardOf[pid] || [] : [];
+      var code = '';
+      for (var i = k.segs.length - 1; i >= 0 && !code; i--) code = cpArtCode(stype, k.segs[i]);
+      if (!code) code = cpArtCode(stype, name);
+      f.cpStageStatus = '';
+      if (sel.stage !== 'site' && (hasStageCode('site', code) || f.cpCards.some(function (id) { return delivered[id]; }))) f.cpStageStatus = 'На сайте';
+      else if (sel.stage === 'retouch' && f.cpDone) f.cpStageStatus = 'Отретушировано';
+      else if (sel.stage === 'approval' && (hasStageCode('review', code) || cpStageHasRv(sel, f.cpCards))) f.cpStageStatus = 'Отретушировано';
+      else if (sel.stage === 'approval' && (hasStageCode('retouch', code) || f.cpCards.some(function (id) { return cst[id] && cst[id].s === 'retouch'; }))) f.cpStageStatus = 'На ретуши';
       f.cpBrak = !!(pid && ((status[pid] && status[pid].s === 'reshoot') || f.cpCards.some(function (c) { return cst[c] && cst[c].s === 'reshoot'; })));
+      if (f.cpBrak) {
+        f.cpStageStatus = 'В браке';
+        if (rtdl) {
+          f.cpDone = true;
+          if (!f.cpTook) f.cpTook = { l: '', done: true };
+        }
+      }
     });
   };
-  (sel.stageFiles || []).forEach(function (x) { index(x, true); });
-  (sel.rtFiles || []).forEach(function (x) { index(x, false); });
-  (sel.srcFiles || []).forEach(function (x) { index(x, false); });
+  (sel.stageFiles || []).forEach(index);
 }
 
 /** Файл этапа проходит отмеченные теги (отмечено несколько — подходит любой). */
@@ -1325,26 +1384,16 @@ function cpStageHasRv(sel, cards) {
   return (cards || []).some(function (c) { return rv[c] && rv[c].length; });
 }
 
-/** Что можно скачать при текущем охвате: [{f, name}] (до фильтров тегов, видео, брака). */
-function cpStagePool(sel, scope) {
-  var out = [], sc = scope || sel.scope || 'stage';
-  var add = function (groups, prefix, keep) {
-    (groups || []).forEach(function (x) {
-      var pre = cpStagePre(sel, groups, x);
-      x.files.forEach(function (f) {
-        if (f.name === CPDisk.STATE_FILE || (keep && !keep(f)) || !cpStageShown(sel, f)) return;
-        out.push({ f: f, name: prefix + pre + (f.path.indexOf(x.root + '/') === 0 ? f.path.slice(x.root.length + 1) : f.name) });
-      });
+/* Файлы для скачивания всегда берутся из открытой папки этапа. */
+function cpStagePool(sel) {
+  var out = [], groups = sel.stageFiles || [];
+  groups.forEach(function (x) {
+    var pre = cpStagePre(sel, groups, x);
+    x.files.forEach(function (f) {
+      if (f.name === CPDisk.STATE_FILE || !cpStageShown(sel, f)) return;
+      out.push({ f: f, name: pre + (f.path.indexOf(x.root + '/') === 0 ? f.path.slice(x.root.length + 1) : f.name) });
     });
-  };
-  if (sel.stage === 'review') {
-    var todo = function (f) { return !cpStageHasRv(sel, f.cpCards); };
-    if (sc === 'done' || sc === 'both') add(sel.stageFiles, sc === 'both' ? 'с ретушью/' : '');
-    if (sc === 'todo' || sc === 'both') add(sel.rtFiles, sc === 'both' ? 'без ретуши/' : '', todo);
-    return out;
-  }
-  if (sc === 'all') { add(sel.srcFiles, ''); return out; }
-  add(sel.stageFiles, '');
+  });
   return out;
 }
 
@@ -1391,21 +1440,10 @@ function cpStageScopeChips(sel) {
   var chip = function (attr, key, on, label, n) {
     return '<button class="cp-fchip' + (on ? ' cp-on' : '') + '" ' + attr + '="' + key + '">' + label + (n === undefined ? '' : ' <small>' + n + '</small>') + '</button>';
   };
-  var cnt = function (sc) { return cpStagePool(sel, sc).length; };
   var h = '';
-  if (sel.stage === 'review') {
-    h += '<div class="cp-fchips"><span class="cp-fchips-l">Что скачать:</span>'
-      + chip('data-cp-scope', 'done', sel.scope === 'done', 'Сдано — с ретушью', cnt('done'))
-      + chip('data-cp-scope', 'todo', sel.scope === 'todo', 'Не сдано — без ретуши', cnt('todo'))
-      + chip('data-cp-scope', 'both', sel.scope === 'both', 'Всё', cnt('both')) + '</div>';
-  } else if (sel.stage === 'approval') {
-    h += '<div class="cp-fchips"><span class="cp-fchips-l">Что скачать:</span>'
-      + chip('data-cp-scope', 'stage', sel.scope === 'stage', 'Только отбор', cnt('stage'))
-      + chip('data-cp-scope', 'all', sel.scope === 'all', 'Все файлы съёмки', sel.srcFiles ? cnt('all') : (sel.srcLoading ? '…' : undefined)) + '</div>';
-  }
   var pool = cpStagePool(sel), nv = 0, nb = 0;
   pool.forEach(function (x) { if (typeof cpIsVideo === 'function' && cpIsVideo(x.f.name)) nv++; if (x.f.cpBrak) nb++; });
-  if (nv || sel.media || sel.scope === 'all') {
+  if (nv || sel.media) {
     h += '<div class="cp-fchips"><span class="cp-fchips-l">' + (sel.media ? 'Скачать:' : 'Скачается всё. Или отметьте:') + '</span>'
       + chip('data-cp-smedia', 'video', sel.media === 'video', 'только видео', nv)
       + chip('data-cp-smedia', 'novideo', sel.media === 'novideo', 'без видео', pool.length - nv) + '</div>';
@@ -1422,28 +1460,15 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
   var sel = CP.sel;
   if (!sel || !sel.stage) return;
   var b = e.target.closest('[data-cp-stag]'), r = e.target.closest('[data-cp-stag-reset]');
-  var sc = e.target.closest('[data-cp-scope]'), md = e.target.closest('[data-cp-smedia]'), bk = e.target.closest('[data-cp-sbrak]');
+  var md = e.target.closest('[data-cp-smedia]'), bk = e.target.closest('[data-cp-sbrak]');
   var wh = e.target.closest('[data-cp-swho]');
-  if (!b && !r && !sc && !md && !bk && !wh) return;
+  if (!b && !r && !md && !bk && !wh) return;
   e.preventDefault();
   if (wh) { var w = wh.getAttribute('data-cp-swho'); sel.who = sel.who === w ? '' : w; }
   else if (r) sel.stageTags = {};
   else if (b) { var t = b.getAttribute('data-cp-stag'); sel.stageTags[t] = !sel.stageTags[t]; }
   else if (md) { var k = md.getAttribute('data-cp-smedia'); sel.media = sel.media === k ? '' : k; }
   else if (bk) { var k2 = bk.getAttribute('data-cp-sbrak'); sel.brak = sel.brak === k2 ? '' : k2; }
-  else if (sc) {
-    sel.scope = sc.getAttribute('data-cp-scope');
-    /* «все файлы съёмки» — читаем исходники, когда попросили */
-    if (sel.scope === 'all' && !sel.srcFiles && !sel.srcLoading) {
-      sel.srcLoading = true;
-      CPDisk.walkPhotos(sel.path, false, 4, true).then(function (files) { return [{ root: sel.path.replace(/\/+$/, ''), files: files, dirs: files.dirs || [] }]; },
-        function (err) { return [{ root: sel.path, files: [], dirs: [], error: err }]; }).then(function (g) {
-        sel.srcFiles = g; sel.srcLoading = false;
-        cpStageTagIndex(sel);
-        if (CP.sel === sel) cpRenderPanel();
-      });
-    }
-  }
   cpRenderPanel();
 });
 
@@ -1531,7 +1556,10 @@ function cpStageTree(sel) {
         if (hide) { a.hid = (a.hid || 0) + 1; continue; }
         a.n++; a.bytes += f.size || 0;
         /* запись «скачано» из отбора: кто (буква) и когда — в отметку у папки */
-        if (f.cpDone) a.done = (a.done || 0) + 1;
+        if (f.cpStageStatus) {
+          var byStage = a.byStage = a.byStage || {};
+          byStage[f.cpStageStatus] = (byStage[f.cpStageStatus] || 0) + 1;
+        }
         if (tk && !tk.folder && !tk.done) {
           a.dl = (a.dl || 0) + 1;
           a.dlBy = a.dlBy || {};
@@ -1571,7 +1599,7 @@ cpRenderPanel = (function (orig) {
     }
     var t = cpStageTree(sel);
     var picked = 0, pickedBytes = 0, anyTag = Object.keys(sel.stageTags || {}).some(function (k) { return sel.stageTags[k]; });
-    var narrowed = anyTag || sel.media || sel.brak || (sel.scope && sel.scope !== 'stage' && sel.scope !== 'done');
+    var narrowed = anyTag || sel.media || sel.brak;
     cpStagePool(sel).forEach(function (x) { if (cpStageOk(sel, x.f)) { picked++; pickedBytes += x.f.size || 0; } });
     var rt = sel.stage === 'retouch', rtLetters = rt && typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
     if (rt && sel.who && rtLetters.indexOf(sel.who) === -1) sel.who = '';
@@ -1595,7 +1623,9 @@ cpRenderPanel = (function (orig) {
           + (a.dl >= a.n ? 'скачано' : 'скачано ' + a.dl + ' из ' + a.n) + ': ' + cbEsc(Object.keys(a.dlBy || {}).join(', '))
           + (a.dlTs ? ' · ' + cbEsc(cpFmtDate(a.dlTs).slice(0, 5)) : '') + '</span>';
       }
-      if (rt && a.done) marks += '<span class="cp-state cp-state-dl" title="Ретушь по этому артикулу уже сдана (лежит в отретушированном или на сайте)">' + (a.done >= a.n ? 'сдано' : 'сдано ' + a.done + ' из ' + a.n) + '</span>';
+      Object.keys(a.byStage || {}).forEach(function (stage) {
+        marks += '<span class="cp-state cp-state-dl">' + cbEsc(stage) + (a.byStage[stage] === a.n ? '' : ' · ' + a.byStage[stage] + ' из ' + a.n) + '</span>';
+      });
       if (rt && a.hid) marks += '<span class="cp-state" title="В этой папке есть файлы, которые уже скачали или сдали, — они скрыты">уже скачано или сдано: ' + a.hid + '</span>';
       body += '<div class="cp-fold' + (depth ? ' cp-fold-sub' : '') + '" style="padding-left:' + (depth * 18) + 'px"><span>' + cbEsc(nm)
         + ' <small>· ' + a.n + (a.bytes ? ' · ' + cpMb(a.bytes) : '') + '</small></span>'
@@ -1615,9 +1645,7 @@ cpRenderPanel = (function (orig) {
     var again = rt && t.taken ? '<label class="cp-stg-ck cp-stg-again" title="Без галки уже скачанное в архив не попадёт — чтобы не взять в работу второй раз. '
       + 'С галкой — попадёт (и сданное тоже); скачали с другой буквой — артикул переходит к ней"><input type="checkbox" data-cp-sagain="1"' + (sel.againTaken ? ' checked' : '') + '> и уже скачанные <small>' + t.taken + '</small></label>' : '';
     var btn = needWho ? 'Отметьте свою букву — без неё не скачать'
-      : (sel.scope === 'all' ? 'Скачать файлы съёмки'
-        : sel.scope === 'todo' ? 'Скачать без ретуши' : sel.scope === 'both' ? 'Скачать всё: с ретушью и без'
-        : rt && sel.who ? (anyTag ? 'Скачать по тегам как ' : 'Скачать как ') + cbEsc(sel.who)
+      : (rt && sel.who ? (anyTag ? 'Скачать по тегам как ' : 'Скачать как ') + cbEsc(sel.who)
         : anyTag ? 'Скачать по тегам' : 'Скачать всё из ' + cbEsc(label)) + ' · ' + picked;
     panel.innerHTML = head + '<div class="cp-panel-body">' + body + '</div><div class="cp-panel-actions"><div class="cp-sum">' + sum + '</div>'
       + acts + again + '<button class="cb-primary" data-cp-stdl="1"' + (picked && !needWho ? '' : ' disabled') + '>' + btn + '</button></div>';
@@ -1635,7 +1663,7 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
   if (!entries.length) { cbToast('Нечего скачивать'); return; }
   var on = Object.keys(sel.stageTags || {}).filter(function (k) { return sel.stageTags[k] && k !== who; }).map(function (t) { return t === CP_NO_RT ? 'без ретушёра' : t; });
   if (who) on.unshift(who);
-  var extra = { all: 'все файлы', todo: 'без ретуши', both: 'с ретушью и без' }[sel.scope] || '';
+  var extra = '';
   if (sel.media) extra += (extra ? '+' : '') + (sel.media === 'video' ? 'видео' : 'без видео');
   if (sel.brak) extra += (extra ? '+' : '') + (sel.brak === 'only' ? 'брак' : 'без брака');
   var name = CPDisk.safeName(sel.name) + '_' + CPDisk.safeName(cpStageLabel(sel.stage)) + (extra ? '_' + CPDisk.safeName(extra) : '')

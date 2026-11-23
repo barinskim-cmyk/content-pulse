@@ -175,9 +175,24 @@ function cpqRun(op) {
      отбрасывает. Раньше файл, о котором прослойка не ответила, считался сделанным — большая
      очередь (тысячи кадров на ретушь после сбоя сети) «заканчивалась», не докопировав хвост.
      Теперь файл без ответа остаётся в очереди. */
+  if (op.kind === 'site-copy' || (op.kind === 'move' && op.after && op.after.type === 'rv-approve')) {
+    var item = (op.items || [])[0];
+    if (!item) return Promise.resolve({ ok: false, err: 'не указана папка для сайта', stuck: true });
+    return cpCopyToSite(item.from, item.path).then(function () { return { ok: true }; }, function (e) {
+      return { ok: false, err: (e && (e.message || e.error)) || 'не скопировалось' };
+    });
+  }
   if (op.kind === 'copy') {
     var all = op.items || [], dirs = op.dirs || [], left = [], err = '', gone = 0, firstOk = false;
-    return cpqChunks(all, CPQ.copyChunk).reduce(function (p, ch, ci) {
+    var grouped = cpStageCopyGroups(all), groups = grouped.groups;
+    var replaced = Object.keys(groups).reduce(function (p, root) {
+      return p.then(function () {
+        return cpReplaceStageArticle(groups[root], root, false).catch(function (e) {
+          left = left.concat(groups[root]); err = e && e.message || 'Не удалось заменить папку артикула';
+        });
+      });
+    }, Promise.resolve());
+    return cpqChunks(grouped.loose, CPQ.copyChunk).reduce(function (p, ch, ci) {
       return p.then(function () {
         return CPDisk.proxyCopy(ch, ci === 0 ? dirs : []).then(function (out) {
           var res = (out && out.results) || [];
@@ -196,7 +211,7 @@ function cpqRun(op) {
           err = (e && (e.message || e.status)) || String(e);
         });
       });
-    }, Promise.resolve()).then(function () {
+    }, replaced).then(function () {
       op.items = left;
       if (firstOk) op.dirs = [];
       if (!left.length) return { ok: true };
@@ -231,8 +246,8 @@ function cpqRun(op) {
     });
   }
   if (op.kind === 'trash') {
-    if (/^Убрать сданное из ретуши:/.test(op.label || '')) {
-      op.label = 'Отменена автоматическая очистка ретуши';
+    if (/^(?:Убрать сданное из ретуши|Брак — убрать из ретуши):/.test(op.label || '') || (op.after && op.after.type === 'ap2-drop' && !op.after.cleared)) {
+      op.label = 'Отменена автоматическая очистка папки этапа';
       op.tries = 0;
       return Promise.resolve({ ok: true });
     }

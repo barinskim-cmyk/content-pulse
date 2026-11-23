@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.122';
+var CP_VERSION = '2.0.123';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1429,9 +1429,9 @@ function cpDoAction(status, pids, cardId) {
     cbToast(CP_STATUS[status].label + ': ' + pids.length + ' кадр(ов)');
     return;
   }
-  /* уже на ретуши — повторно не отправляем и не перезаписываем (Маша, 06.11.2026) */
+  /* Полная карточка отправляется повторно целиком; отдельные кадры докладываются. */
   var m0 = cpMeta();
-  var fresh = pids.filter(function (pid) { return !(m0.status[pid] && m0.status[pid].s === 'retouch'); });
+  var fresh = card && card.cpArticleDir ? pids.slice() : pids.filter(function (pid) { return !(m0.status[pid] && m0.status[pid].s === 'retouch'); });
   if (!fresh.length) { cbToast('Уже на ретуши — повторно не отправляю'); return; }
   var going = cpGoingFrom('retouch');
   fresh = fresh.filter(function (pid) { var p = cbPhotoById(pid); return !(p && p.disk && going[p.disk]); });
@@ -1539,7 +1539,9 @@ function cpRetouchCopy(pids, card, label, after) {
       }
       used[target] = p.disk;
       byFrom[p.disk] = p.id;
-      return { from: p.disk, path: target };
+      var owner = card || (after && after.cards && cbCardById(after.cards[p.id]));
+      var full = owner && owner.cpArticleDir && cpCardPids(owner).every(function (id) { return files.some(function (f) { return f.id === id; }); });
+      return { from: p.disk, path: target, articleRoot: full ? cpStageArticleRoot(folder, target, owner) : '' };
     });
     return cpCopyOnDisk(items, [folder], label);
   }).then(function (r) {
@@ -1593,7 +1595,7 @@ function cpRetouchResync(all) {
   var pids = all
     ? Object.keys(m).filter(function (pid) { return m[pid].s === 'retouch'; })
     : Object.keys(CP.retouchMissing || {});
-  /* сданное на сайт в ретушь не возвращаем — его копии оттуда ушли в Корзину */
+  /* При фоновой сверке сданное на сайт повторно в ретушь не отправляем. */
   if (typeof cpDonePids === 'function') { var done = cpDonePids(); pids = pids.filter(function (pid) { return !done[pid]; }); }
   if (!pids.length) { cbToast(all ? 'В этой съёмке нет кадров на ретуши' : 'Всё скопировано'); return; }
   cpRetouchCopy(pids, null, all ? 'Сверяю папку ретуши' : 'Докопирую на ретушь').then(function (r) {
@@ -1609,12 +1611,42 @@ function cpRetouchBase(shootPath, shootName) {
   return root ? root + '/' + shootName : shootPath + '/' + CPDisk.RETOUCH_DIR;
 }
 
+function cpStageArticleRoot(base, path, card) {
+  var rel = path.slice(base.length + 1).split('/'), expected = card.cpArticleDir.split('/');
+  if (rel.length <= expected.length) return '';
+  var actual = rel.slice(0, expected.length);
+  var leaf = actual[actual.length - 1], letter = cpLetterSplit(leaf, cpRetoucherTags());
+  if (letter) actual[actual.length - 1] = letter.rest;
+  return actual.join('/') === expected.join('/') ? base + '/' + rel.slice(0, expected.length).join('/') : '';
+}
+
+function cpStageCopyItem(x) { return { from: x.from, path: x.path, articleRoot: x.articleRoot || '' }; }
+
+function cpStageCopyGroups(items) {
+  var groups = Object.create(null), loose = [];
+  items.forEach(function (it) {
+    if (!it.articleRoot) { loose.push(it); return; }
+    (groups[it.articleRoot] = groups[it.articleRoot] || []).push(it);
+  });
+  return { groups: groups, loose: loose };
+}
+
 /**
  * Скопировать файлы на Диске (через прослойку, пачками по 50 — у функции
  * ограничено время). Возвращает {done, exists, failed:[...]}.
  */
 function cpCopyOnDisk(items, dirs, label) {
   var res = { done: 0, exists: 0, failed: [] };
+  var grouped = cpStageCopyGroups(items), groups = grouped.groups;
+  var replaced = Object.keys(groups).reduce(function (p, root) {
+    return p.then(function () {
+      return cpReplaceStageArticle(groups[root], root, false).then(function () { res.done += groups[root].length; }, function (e) {
+        res.failed.push(e && e.message || 'Не удалось заменить папку артикула');
+        res.failedFrom = (res.failedFrom || []).concat(groups[root].map(function (x) { return x.from; }));
+      });
+    });
+  }, Promise.resolve());
+  items = grouped.loose;
   var chunks = [];
   var CH = 50;
   for (var i = 0; i < items.length; i += CH) chunks.push(items.slice(i, i + CH));
@@ -1630,7 +1662,7 @@ function cpCopyOnDisk(items, dirs, label) {
         cbBusyShow(label + ': ' + Math.min(items.length, (ci + 1) * CH) + ' / ' + items.length, (ci + 1) / chunks.length);
       });
     });
-  }, Promise.resolve()).then(function () { return res; });
+  }, replaced).then(function () { return res; });
 }
 
 function cpAfterStatus() {
