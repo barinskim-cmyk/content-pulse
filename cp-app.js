@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.127';
+var CP_VERSION = '2.0.128';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -2038,19 +2038,6 @@ CP.zipTarget = 100 * 1024 * 1024;        /* первая часть; дальш�
 
 function cpExportsDir() { return CP_CONFIG.serviceDir.replace(/\/+$/, '') + '/' + CP_EXPORTS; }
 
-/** Следующее имя выгрузки <base>_<N>: N считаем по журналу съёмки
-    (архивы теперь живут в облаке, на Диске их нет). */
-function cpNextExportName(base, events) {
-  var max = 0;
-  (events || []).forEach(function (ev) {
-    var x = ev && ev.export;
-    if (!x || x.indexOf(base + '_') !== 0) return;
-    var n = parseInt(x.slice(base.length + 1), 10);
-    if (!isNaN(n) && n > max) max = n;
-  });
-  return Promise.resolve(base + '_' + (max + 1));
-}
-
 function cpMb(b) { return b >= 1024 * 1024 * 1024 ? (b / 1073741824).toFixed(1) + ' ГБ' : Math.max(1, Math.round(b / 1048576)) + ' МБ'; }
 
 /** Ссылка на готовый файл: сразу после загрузки Диск может ещё дообрабатывать его. */
@@ -2079,19 +2066,19 @@ function cpHrefWhenReady(path) {
  */
 CP.zipPartMin = 6 * 1024 * 1024;   /* кусок загрузки в облако, кроме последнего, — не меньше 5 МБ */
 
-function cpZipExport(name, entries, note) {
+function cpZipExport(name, entries, note, dir) {
   entries = entries.filter(function (e) { return e.size > 0; });
   var total = entries.reduce(function (a, e) { return a + e.size; }, 0);
   /* один архив любого размера: больше 4 ГБ прослойка пишет ZIP64 (Маша, 08.11: «скачать всё — пилит
      на 30 частей, а нужно одним архивом на пачку») */
   if (CPDisk.hasProxy() && entries.length < 60000) {
-    if (total > CP.zipSplitAt) return cpZipSplit(name, entries, note);
-    return cpZipOne(name, entries, note).catch(function (e) {
-      if (e && e.status === 501) return cpZipParts(name, entries, note);   /* облако не настроено */
+    if (total > CP.zipSplitAt) return cpZipSplit(name, entries, note, dir);
+    return cpZipOne(name, entries, note, { dir: dir }).catch(function (e) {
+      if (e && e.status === 501) return cpZipParts(name, entries, note, dir);   /* облако не настроено */
       throw e;
     });
   }
-  return cpZipParts(name, entries, note);
+  return cpZipParts(name, entries, note, dir);
 }
 
 /** Один архив, собранный за несколько вызовов прослойки. */
@@ -2167,14 +2154,14 @@ function cpZipGroups(entries, limit) {
   return parts;
 }
 
-function cpZipSplit(name, entries, note) {
+function cpZipSplit(name, entries, note, dir) {
   var groups = cpZipGroups(entries, CP.zipPartSize);
-  if (groups.length < 2) return cpZipOne(name, entries, note);
+  if (groups.length < 2) return cpZipOne(name, entries, note, { dir: dir });
   var all = { parts: [], files: 0, bytes: 0, skipped: [] };
   var head = (note ? note + ' ' : '') + 'Выборка большая — ' + groups.length + ' архива(ов) по папкам целиком; распакуйте их рядом — сложатся в одну папку.';
   return groups.reduce(function (chain, g, k) {
     return chain.then(function () {
-      return cpZipOne(name + '_ч' + (k + 1), g, head, { root: name, prev: all.parts, multi: true, label: 'Часть ' + (k + 1) + ' из ' + groups.length });
+      return cpZipOne(name + '_ч' + (k + 1), g, head, { root: name, dir: dir, prev: all.parts, multi: true, label: 'Часть ' + (k + 1) + ' из ' + groups.length });
     }).then(function (r) {
       all.parts = all.parts.concat(r.parts);
       all.files += r.files; all.bytes += r.bytes;
@@ -2190,12 +2177,12 @@ function cpZipSplit(name, entries, note) {
   });
 }
 
-/** Один архив, собранный за несколько вызовов прослойки. opts: {root, prev, multi, label} — для частей. */
+/** Один архив, собранный за несколько вызовов прослойки. opts: {root, dir, prev, multi, label} — для частей. */
 function cpZipOne(name, entries, note, opts) {
   opts = opts || {};
   var root = opts.root || name, prevParts = opts.prev || [];
   var total = entries.reduce(function (a, e) { return a + e.size; }, 0);
-  var target = cpExportsDir() + '/' + name + '.zip';
+  var target = (opts.dir || cpExportsDir()) + '/' + name + '.zip';
   var res = { parts: [], files: 0, bytes: 0 };
   var up = null, parts = [], done = [], offset = 0, n = 0, pi = 0, ts = Date.now(), skipped = [];
   /* куски: файл целиком или кусок большого файла */
@@ -2345,11 +2332,10 @@ function cpZipOne(name, entries, note, opts) {
 }
 
 /** Запасной путь: несколько архивов (больше 4 ГБ или без облака). */
-function cpZipParts(name, entries, note) {
+function cpZipParts(name, entries, note, dir) {
   var total = entries.reduce(function (a, e) { return a + e.size; }, 0);
   var single = total <= CP.zipTarget;
   if (total >= CP_ZIP_FILE_MAX) note = (note ? note + ' ' : '') + 'Больше 4 ГБ — несколько архивов, распакуйте их в одну папку.';
-  var dir = cpExportsDir();
   var res = { parts: [], files: 0, bytes: 0 };
   var i = 0, k = 0;
   cpDlCard(name, note, [], 'Собираю архив...');
@@ -2456,6 +2442,17 @@ function cpFillSizes(entries) {
 }
 
 function cpExportBundle(name, entries, note) {
+  var members = new Map(), duplicate = '';
+  entries = entries.filter(function (entry) {
+    var key = entry.name.normalize('NFC').toLowerCase();
+    if (members.has(key)) {
+      if (members.get(key) !== entry.from) duplicate = entry.name;
+      return false;
+    }
+    members.set(key, entry.from);
+    return true;
+  });
+  if (duplicate) return Promise.reject({ plain: true, message: 'В выборке два разных файла с одним путём: ' + duplicate });
   return cpFillSizes(entries).then(function (fs) {
     var lostNote = fs.lost.length ? ' Не попало (нет на Диске или пустой файл): ' + fs.lost.map(function (e) { return e.name.split('/').pop(); }).slice(0, 10).join(', ') + (fs.lost.length > 10 ? '…' : '') + '.' : '';
     return cpExportBundleSized(name, fs.entries, (note || '') + lostNote);
@@ -2467,7 +2464,10 @@ function cpExportBundleSized(name, entries, note) {
   var isBig = function (e) { return e.size > CP.directMin && CP_VIDEO_RE.test(e.name); };
   var small = entries.filter(function (e) { return !isBig(e); });
   var big = entries.filter(isBig);
-  var zipP = small.length ? cpZipExport(name, small, note) : Promise.resolve({ parts: [], files: 0, bytes: 0 });
+  /* У разных скачиваний одно видимое имя. Отдельный путь нужен запасному
+     ZIP на Диске, чтобы новое скачивание не перезаписывало предыдущую ссылку. */
+  var dir = cpExportsDir() + '/_' + cpqId();
+  var zipP = small.length ? cpZipExport(name, small, note, dir) : Promise.resolve({ parts: [], files: 0, bytes: 0 });
   return zipP.then(function (res) {
     var chain = Promise.resolve(res);
     big.forEach(function (e, bi) {
@@ -2591,12 +2591,14 @@ function cpDownloadAll(withAll) {
   var list = withAll ? (cbBusyShow('Считаю все файлы съёмки...', 0.05), cpWalkAll(shoot.path)) : Promise.resolve(files);
   list.then(function (all) {
     /* крупные файлы (видео) уйдут отдельными ссылками — без ограничения по размеру */
-    var entries = all.map(function (f) { return { from: f.path, name: cpRelInShoot(f.path), size: f.size }; });
+    var root = shoot.path.replace(/\/+$/, '') + '/';
+    var entries = all.map(function (f) { return { from: f.path, name: f.path.indexOf(root) === 0 ? f.path.slice(root.length) : f.name, size: f.size }; });
     var photos = entries.filter(function (e) { return CPDisk.isPhoto(e.name); }).length;
-    return cpNextExportName(CPDisk.safeName(shoot.name) + '_вся съёмка', cpMeta().events).then(function (name) {
-      return cpExportBundle(name, entries, 'Вся съёмка: ' + photos + ' кадр(ов)' + (entries.length > photos ? ' и других файлов: ' + (entries.length - photos) : '') + '.')
-        .then(function (r) { cpEvent('download_shoot', [], { count: r.files, export: name, parts: r.parts.length, all: withAll || undefined }); });
-    });
+    var name = CPDisk.safeName(shoot.name);
+    return cpExportBundle(name, entries, 'Вся съёмка: ' + photos + ' кадр(ов)' + (entries.length > photos ? ' и других файлов: ' + (entries.length - photos) : '') + '.')
+      .then(function (r) {
+        if (CP.shoot === shoot) cpEvent('download_shoot', [], { count: r.files, export: name, parts: r.parts.length, all: withAll || undefined });
+      });
   }).catch(function (e) { cpHandleError(e, 'Скачивание съёмки'); });
 }
 
@@ -2612,6 +2614,20 @@ function cpCardExportFolder(card, index) {
   return card.cpArticle ? CPDisk.safeName(title) : cpPad(index + 1) + ' ' + title;
 }
 
+/* Артикул: имя и вложенность как на Диске, при отмеченном ретушёре — его буква перед кодом. */
+function cpArticleExportDir(rel, path, shootPath, letter) {
+  var dir = rel.split('/');
+  var prefix = shootPath.replace(/\/+$/, '') + '/' + rel + '/';
+  if (letter) {
+    var leaf = dir.length - 1, tag = cpLetterSplit(dir[leaf], cpRetoucherTags());
+    dir[leaf] = letter + '_' + (tag ? tag.rest : dir[leaf]);
+  }
+  if (path.indexOf(prefix) === 0) {
+    dir = dir.concat(path.slice(prefix.length).split('/').slice(0, -1));
+  }
+  return dir;
+}
+
 function cpSelectionJobs(onlyIds) {
   var jobs = [];
   var stype = typeof cpShootType === 'function' && CP.shoot ? cpShootType(CP.shoot.name) : null;
@@ -2620,16 +2636,22 @@ function cpSelectionJobs(onlyIds) {
   var used = {};
   App.cards.forEach(function (card, ci) {
     if (onlyIds && !onlyIds[card.id]) return;
-    var name = cpCardExportFolder(card, ci), base = name, k = 2;
-    while (used[name]) name = base + ' (' + (k++) + ')';
-    used[name] = true;
-    var folder = [name];
+    var article = card.cpArticleDir, folder = null;
+    if (!article) {
+      var base = cpCardExportFolder(card, ci), name = base, k = 2;
+      while (used[name]) name = base + ' (' + (k++) + ')';
+      used[name] = true;
+      folder = [name];
+    }
+    var letter = article && onlyIds ? cpCardLetter(card) : '';
     var order = 0;
     function add(pid) {
       var p = pid ? cbPhotoById(pid) : null;
       if (!p || !p.disk || p.missing) return;
       order++;
-      jobs.push({ disk: p.disk, size: p.size, dir: folder, file: numbered ? cpPad(order) + '_' + p.name : p.name });   /* порядок слотов = номер */
+      var dir = article ? cpArticleExportDir(article, p.disk, CP.shoot.path, letter) : folder;
+      var number = numbered && (!article || (stype && stype.exportNames === 'numbered'));
+      jobs.push({ disk: p.disk, size: p.size, article: !!article, dir: dir, file: number ? cpPad(order) + '_' + p.name : p.name });
     }
     if (card.mode === 'auto') (card.pids || []).forEach(add);
     else (card.slots || []).forEach(function (s) { add(s.pid); });
@@ -2646,6 +2668,20 @@ function cpSelectionJobs(onlyIds) {
   return jobs;
 }
 
+function cpSelectionEntries(jobs, asFolders) {
+  var seen = new Set();
+  return jobs.map(function (job) {
+    var name = asFolders && !job.article ? cpRelInShoot(job.disk)
+      : (job.dir.length ? job.dir.map(CPDisk.safeName).join('/') + '/' : '') + CPDisk.safeName(job.file);
+    return { from: job.disk, size: job.size, name: name };
+  }).filter(function (entry) {
+    var key = entry.from + '\u0000' + entry.name;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function cpDownloadSelection() {
   cbCloseAllPops();
   if (!CP.shoot) { cbToast('Сначала откройте съёмку'); return; }
@@ -2654,17 +2690,10 @@ function cpDownloadSelection() {
   var shoot = CP.shoot;
   /* правило из структура.txt: выгрузка «как в папках» — исходные папки и имена */
   var stype = typeof cpShootType === 'function' ? cpShootType(shoot.name) : null;
-  var seen = {};
-  var entries = (stype && stype.exportMode === 'folders')
-    ? jobs.filter(function (j) { if (seen[j.disk]) return false; seen[j.disk] = true; return true; })
-      .map(function (j) { return { from: j.disk, size: j.size, name: cpRelInShoot(j.disk) }; })
-    : jobs.map(function (j) {
-      return { from: j.disk, size: j.size, name: (j.dir.length ? j.dir.map(CPDisk.safeName).join('/') + '/' : '') + CPDisk.safeName(j.file) };
-    });
-  cpNextExportName(CPDisk.safeName(shoot.name) + '_отбор', cpMeta().events).then(function (name) {
-    return cpExportBundle(name, entries, 'Отбор по карточкам: ' + entries.length + ' кадр(ов).').then(function (r) {
-      cpEvent('download_selection', [], { count: r.files, note: 'карточек: ' + App.cards.length, export: name, parts: r.parts.length });
-    });
+  var entries = cpSelectionEntries(jobs, stype && stype.exportMode === 'folders');
+  var name = CPDisk.safeName(shoot.name);
+  cpExportBundle(name, entries, 'Отбор по карточкам: ' + entries.length + ' кадр(ов).').then(function (r) {
+    if (CP.shoot === shoot) cpEvent('download_selection', [], { count: r.files, note: 'карточек: ' + App.cards.length, export: name, parts: r.parts.length });
   }).catch(function (e) { cpHandleError(e, 'Скачивание отбора'); });
 }
 

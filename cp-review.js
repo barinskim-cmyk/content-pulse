@@ -1690,13 +1690,7 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
     got.push(x.f);
   });
   if (!entries.length) { cbToast('Нечего скачивать'); return; }
-  var on = Object.keys(sel.stageTags || {}).filter(function (k) { return sel.stageTags[k] && k !== who; }).map(function (t) { return t === CP_NO_RT ? 'без ретушёра' : t; });
-  if (who) on.unshift(who);
-  var extra = '';
-  if (sel.media) extra += (extra ? '+' : '') + (sel.media === 'video' ? 'видео' : 'без видео');
-  if (sel.brak) extra += (extra ? '+' : '') + (sel.brak === 'only' ? 'брак' : 'без брака');
-  var name = CPDisk.safeName(sel.name) + '_' + CPDisk.safeName(cpStageLabel(sel.stage)) + (extra ? '_' + CPDisk.safeName(extra) : '')
-    + (on.length ? '_' + CPDisk.safeName(on.join('+')) : '') + '_' + cpToday();
+  var name = CPDisk.safeName(sel.name);
   cpExportBundle(name, entries, cpStageLabel(sel.stage) + ': файлов ' + entries.length + '.' + (rt ? ' После скачивания файлы отмечаются как скачанные' + (who ? ' (' + who + ')' : '') + '.' : ''))
     .then(function (r) { return rt ? cpStageMarkTaken(sel, got, who, name, r) : null; })
     .catch(function (err) { cpHandleError(err, 'Скачивание'); });

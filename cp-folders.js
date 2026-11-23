@@ -94,7 +94,7 @@ function cpArticleMediaOp(from, to, digest, moving) {
     if (target && moving && check && target.md5 === check) {
       return CPDisk.trash([from]).then(function (out) {
         if (out && out[0] && /^(done|gone)$/.test(out[0].status)) return to;
-        throw { message: 'Не удалось убрать повторный экземпляр; кадр уже есть в «Лишних кадрах»' };
+        throw { message: 'Не удалось убрать повторный экземпляр; тот же кадр уже есть в целевой папке' };
       });
     }
     if (target) {
@@ -169,15 +169,21 @@ function cpArticleUpdateStages(op, shoot, source) {
   });
 }
 
+/* В модельной структуре лук — непосредственная родительская папка артикула. */
+function cpModelArticleLook(shootName, relative) {
+  var type = cpShootType(shootName);
+  return type && type.roles.indexOf('лук') !== -1 && relative.indexOf('/') !== -1 ? cpParentDir(relative) : '';
+}
+
 function cpRunArticleEdit(op, shoot) {
   var target = op.root + '/' + op.article + '/' + op.name;
   if (op.undoPrevious) return Promise.resolve({ ok: false, err: 'Не подтверждён предыдущий перенос этого кадра', stuck: true });
-  var archive = op.root + '/' + CP_EXTRA_FRAMES + '/' + op.article;
+  var removalDir = op.root + '/' + (op.look || CP_EXTRA_FRAMES + '/' + op.article);
   var articlePath = op.root + '/' + op.article;
-  var relative = op.source.indexOf(articlePath + '/') === 0 ? op.source.slice(articlePath.length) : '/' + op.name;
+  var relative = !op.look && op.source.indexOf(articlePath + '/') === 0 ? op.source.slice(articlePath.length) : '/' + op.name;
   var work = op.resultPath || op.fromDisk ? Promise.resolve(op.resultPath || op.source)
     : op.direction === 'add' ? cpArticleMediaOp(op.source, target, op.digest, false)
-      : cpArticleMediaOp(op.source, archive + relative, op.digest, true);
+      : cpArticleMediaOp(op.source, removalDir + relative, op.digest, true);
   return work.then(function (path) {
     op.resultPath = path;
     return cpArticleUpdateStages(op, shoot, path);

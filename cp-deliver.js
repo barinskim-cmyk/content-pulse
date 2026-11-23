@@ -302,7 +302,7 @@ function cpSetLetter(tag) {
   cbRenderOutline();
 }
 
-/** Скачать отмеченные карточки: папки карточек, архив «<съёмка>_<буква>_<N>». */
+/** Скачать отмеченные карточки: папки карточек, архив под именем съёмки. */
 function cpDownloadChecked() {
   var cards = cpCheckedCards();
   if (!cards.length) { cbToast('Отметьте карточки галочками в списке справа'); return; }
@@ -312,32 +312,25 @@ function cpDownloadChecked() {
   if (!jobs.length) { cbToast('В отмеченных карточках нет кадров с Диска'); return; }
   var shoot = CP.shoot;
   var stype = typeof cpShootType === 'function' ? cpShootType(shoot.name) : null;
-  var seen = {};
-  var entries = (stype && stype.exportMode === 'folders')
-    ? jobs.filter(function (j) { if (seen[j.disk]) return false; seen[j.disk] = true; return true; })
-      .map(function (j) { return { from: j.disk, size: j.size, name: cpRelInShoot(j.disk) }; })
-    : jobs.map(function (j) { return { from: j.disk, size: j.size, name: j.dir.map(CPDisk.safeName).join('/') + '/' + CPDisk.safeName(j.file) }; });
-  var letters = cards.map(cpCardLetter).filter(function (x, i, a) { return x && a.indexOf(x) === i; });
-  var base = CPDisk.safeName(shoot.name) + (letters.length === 1 ? '_' + letters[0] : '');
+  var entries = cpSelectionEntries(jobs, stype && stype.exportMode === 'folders');
+  var name = CPDisk.safeName(shoot.name);
   var pids = jobs.map(function (j) {
     var p = App.photos.filter(function (x) { return x.disk === j.disk; })[0];
     return p && p.id;
   }).filter(Boolean);
-  cpNextExportName(base, cpMeta().events).then(function (name) {
-    return cpExportBundle(name, entries, 'Карточек: ' + cards.length + ', кадров: ' + entries.length + '.').then(function (r) {
-      if (!CP.shoot || CP.shoot.path !== shoot.path) return;
-      var m = cpMeta(), now = new Date().toISOString(), who = cpActor();
-      pids.forEach(function (pid) {
-        var cur = m.downloads[pid];
-        var stamp = { by: who, ts: now, export: name };
-        m.downloads[pid] = { n: (cur ? cur.n : 0) + 1, first: cur ? cur.first : stamp, last: stamp };
-      });
-      cpEvent('download_cards', cpPhotoNames(pids), { export: name, count: r.files, parts: r.parts.length,
-        card: cards.map(function (c) { return c.title + (cpCardLetter(c) ? ' (' + cpCardLetter(c) + ')' : ''); }).join(', ') });
-      cbMarkDirty();
-      cbRenderCards();
-      cbRenderOutline();
+  cpExportBundle(name, entries, 'Карточек: ' + cards.length + ', кадров: ' + entries.length + '.').then(function (r) {
+    if (!CP.shoot || CP.shoot.path !== shoot.path) return;
+    var m = cpMeta(), now = new Date().toISOString(), who = cpActor();
+    pids.forEach(function (pid) {
+      var cur = m.downloads[pid];
+      var stamp = { by: who, ts: now, export: name };
+      m.downloads[pid] = { n: (cur ? cur.n : 0) + 1, first: cur ? cur.first : stamp, last: stamp };
     });
+    cpEvent('download_cards', cpPhotoNames(pids), { export: name, count: r.files, parts: r.parts.length,
+      card: cards.map(function (c) { return c.title + (cpCardLetter(c) ? ' (' + cpCardLetter(c) + ')' : ''); }).join(', ') });
+    cbMarkDirty();
+    cbRenderCards();
+    cbRenderOutline();
   }).catch(function (e) { cpHandleError(e, 'Скачивание отмеченных карточек'); });
 }
 

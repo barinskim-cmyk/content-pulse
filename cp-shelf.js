@@ -841,16 +841,6 @@ function cpRemoveTag(tag, folder) {
 
 /* ---------- скачивание отфильтрованного ---------- */
 
-function cpExportName(sel) {
-  var parts = [CPDisk.safeName(sel.name)];
-  var tgs = cpOn(sel.tags), sts = cpOn(sel.statuses);
-  if (tgs.length === 1) parts.push(CPDisk.safeName(tgs[0]));
-  else if (sts.length === 1 && sts[0] !== 'none' && CP_STATUS[sts[0]]) parts.push(CP_STATUS[sts[0]].label);
-  else if (sel.inCards && !tgs.length && !sts.length) parts.push('карточки');
-  var events = (sel.data && sel.data.meta && sel.data.meta.cp && sel.data.meta.cp.events) || [];
-  return cpNextExportName(parts.join('_'), events);
-}
-
 function cpShelfDownload() {
   var sel = CP.sel;
   /* «все файлы» выбраны, а список видео ещё считается — дождаться, иначе архив уйдёт без них */
@@ -869,7 +859,7 @@ function cpShelfDownload() {
   if (!items.length) { cbToast('Под фильтры не попало ни одного кадра'); return; }
   var data = sel.data || {};
   var cards = data.cards || [];
-  var name;
+  var name = CPDisk.safeName(sel.name);
   var used = {};
   /* Раскладка внутри архива — структура съёмки как на Диске (Маша, 08.11: «когда скачиваю
      всё, нужно, чтобы структура сохранялась; фотография, которая переехала в карточку, —
@@ -885,7 +875,7 @@ function cpShelfDownload() {
   var entries = items.map(function (x) {
     var parts;
     var art = x.cards.map(function (i) { return cards[i]; }).filter(function (c) { return c && c.cpArticleDir; })[0];
-    if (art) parts = art.cpArticleDir.split('/');
+    if (art) parts = cpArticleExportDir(art.cpArticleDir, x.file.path, sel.path);
     else if (x.cards.length && !asFolders) {
       var c = cards[x.cards[0]];
       /* карточка артикула — исходная папка артикула (с луком), иначе «NN название» */
@@ -914,11 +904,8 @@ function cpShelfDownload() {
   });
   if (!entries.length) { cbToast('Нечего скачивать'); return; }
   cbBusyShow('Готовлю архив: ' + entries.length + ' файл(ов)...', 0.02);
-  cpExportName(sel).then(function (n) {
-    name = n;
-    return cpExportBundle(name, entries, items.length + ' кадр(ов)' + (others.length ? ' и других файлов: ' + (entries.length - items.length) : '')
-      + '. После скачивания кадры отмечаются как скачанные.');
-  }).then(function (r) {
+  cpExportBundle(name, entries, items.length + ' кадр(ов)' + (others.length ? ' и других файлов: ' + (entries.length - items.length) : '')
+    + '. После скачивания кадры отмечаются как скачанные.').then(function (r) {
     /* отметка «скачано» — статус не меняем */
     var stamp = { by: cpActor(), ts: new Date().toISOString(), export: name };
     var filters = { tags: cpOn(sel.tags).length ? cpOn(sel.tags) : undefined, statuses: cpOn(sel.statuses).length ? cpOn(sel.statuses) : undefined,

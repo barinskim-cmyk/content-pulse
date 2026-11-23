@@ -49,6 +49,8 @@ const log = [];
 const DOWNLOADS = [];
 const DOWNLOADS_REFERER = [];
 const ZIPS = new Map();
+const zipVersions = (name) => [...ZIPS.entries()].filter(([p]) => p.endsWith('/' + name + '.zip'));
+const latestZip = (name) => zipVersions(name).at(-1)?.[1] || [];
 const SPEED_PUTS = [], SPEED_GETS = [], SPEED_OBJ = new Map();
 /* загрузка через Облако: части многочастной загрузки, операции Диска «забрать по ссылке» */
 const CLOUD_PARTS = new Map(), OPS = new Map(), CLOUD_FETCH = [], CLOUD_FETCH_FAIL = new Set(), REMOVED = [];
@@ -592,6 +594,78 @@ async function articleFolderChecks(ctx, base) {
     const id = Object.keys(CPQ.ops).find(key => CPQ.ops[key].op.stuck);
     cpqDrop(id);
   });
+
+  const zipFile = retouch + '/архив/особый.jpg';
+  DIRS.add(retouch + '/архив');
+  FILES.set(zipFile, Buffer.from('export frame with nested folders'));
+  const bundles = await page.evaluate(async ({ name, zipFile, retouchRoot, size }) => {
+    const stageFile = { path: zipFile, size: size, name: 'особый.jpg' };
+    const group = [{ root: retouchRoot + '/' + name }];
+    const entry = { f: stageFile, name: zipFile.slice(group[0].root.length + 1) };
+    const relative = cpStageZipName(group, entry, 'U', ['Y', 'U'], null);
+    const files = [{ from: stageFile.path, size: stageFile.size, name: relative }];
+    const first = await cpExportBundle(name, files, 'Первая выгрузка');
+    const original = CPDisk.proxyMpu;
+    CPDisk.proxyMpu = function (r) {
+      return r.op === 'start' ? Promise.reject({ status: 501 }) : original(r);
+    };
+    try {
+      const second = await cpExportBundle(name, files, 'Запасная выгрузка');
+      return [first.parts[0].path, second.parts[0].path, first.parts[0].href, second.parts[0].href];
+    } finally { CPDisk.proxyMpu = original; }
+  }, { name, zipFile, retouchRoot, size: FILES.get(zipFile).length });
+  check('обычный и запасной ZIP имеют чистое имя съёмки, разные ссылки, папку бренда, букву и вложенный путь',
+    bundles[0] !== bundles[1] && bundles.slice(0, 2).every(key => key.endsWith('/' + name + '.zip'))
+    && bundles.slice(2, 4).every(href => new URL(href).searchParams.get('name') === name + '.zip')
+    && bundles.slice(0, 2).every(key => (ZIPS.get(key) || []).join() === name + '/Бренд/U_074478_оптика/архив/особый.jpg'), JSON.stringify(bundles));
+  const named = await page.evaluate(() => {
+    CP.dict = cpParseDict('[Ретушёры: один]\nY\nU');
+    const input = rel => ({ file: new File(['retouch'], 'IMG.jpg'), rel });
+    const data = { name: '2026-11-23_СК_СЪЁМКА_Y_1', cards: [{ id: 'card', title: '074478', cpArticle: '074478' }] };
+    const plain = cpPlanUpload([input(data.name + '/Бренд/074478_оптика/IMG.jpg')], data);
+    const tagged = cpPlanUpload([input(data.name + '/Бренд/U_074478_оптика_SO/IMG.jpg')], data);
+    return [plain.letter, plain.n, tagged.letter, tagged.n, Object.keys(tagged.groups).join()];
+  });
+  check('часть настоящего имени съёмки не становится буквой и номером; буква читается из папки артикула',
+    JSON.stringify(named) === '["","","U","","card"]', JSON.stringify(named));
+
+  const modelName = '2026-11-23_СК_МОДЕЛЬ', model = sourceRoot + '/' + modelName;
+  const modelRel = '40/002222_модель';
+  const look = model + '/40', articleModel = model + '/' + modelRel;
+  const modelApproval = approvalRoot + '/' + modelName + '/' + modelRel;
+  const modelRetouch = retouchRoot + '/' + modelName + '/' + modelRel;
+  for (const target of [articleModel, modelApproval, modelRetouch]) {
+    const parts = target.split('/');
+    for (let i = 2; i <= parts.length; i++) DIRS.add(parts.slice(0, i).join('/'));
+    FILES.set(target + '/заменить.jpg', Buffer.from('old frame in model card'));
+  }
+  FILES.set(look + '/новый.jpg', Buffer.from('new frame from look'));
+  FILES.set(look + '/общий.jpg', Buffer.from('stay in look'));
+  await page.evaluate(async ({ model, modelName }) => {
+    await cpFlushSave();
+    cpOpenShootNow(model, modelName);
+  }, { model, modelName });
+  await page.waitForFunction(() => App.cards.some(c => c.cpArticle === '002222' && cpCardPids(c).length === 1));
+  await page.evaluate(() => {
+    const card = App.cards.find(c => c.cpArticle === '002222');
+    cpSetActiveCard(card.id);
+    card.pids = [App.photos.find(p => p.name === 'новый.jpg').id];
+    cbRenderCards();
+    cpDoAction('retouch', cpCardPids(card), card.id);
+  });
+  await page.waitForFunction(() => !cpqCount());
+  await page.evaluate(() => cpSyncPhotos(false));
+  check('замена в модельной карточке: снятый кадр возвращён непосредственно в лук 40, на ретушь идёт только новый',
+    FILES.has(look + '/заменить.jpg') && FILES.has(look + '/новый.jpg')
+    && FILES.has(articleModel + '/новый.jpg') && !FILES.has(articleModel + '/заменить.jpg')
+    && FILES.has(modelApproval + '/новый.jpg') && !FILES.has(modelApproval + '/заменить.jpg')
+    && FILES.has(modelRetouch + '/новый.jpg') && !FILES.has(modelRetouch + '/заменить.jpg') && !FILES.has(modelRetouch + '/общий.jpg')
+    && !DIRS.has(model + '/Лишние кадры'));
+  check('номер или имя лука не ограничивают возврат; для оптики он не применяется', await page.evaluate(() =>
+    cpModelArticleLook('2026-11-23_СК_МОДЕЛЬ', '30/002222_модель') === '30'
+    && cpModelArticleLook('2026-11-23_СК_МОДЕЛЬ', '40/002222_модель') === '40'
+    && cpModelArticleLook('2026-11-23_СК_ОПТИКА', '40/002222_оптика') === ''));
+
   check('папки и вкладки без ошибок страницы', !errors.length, errors.join(' | '));
   await page.close();
 }
@@ -746,9 +820,9 @@ async function articleFolderChecks(ctx, base) {
   await page.evaluate(() => { App.photos.find(p => /\/a\.jpg$/.test(p.disk || '')).size = undefined; document.getElementById('cpMenuDlSel').click(); });
   await page.waitForFunction(() => App.projectMeta.cp.events.some(e => e.action === 'download_selection'), null, { timeout: 10000 });
   await page.waitForTimeout(500);
-  const zSel = ZIPS.get('disk:/_ContentPulse/выгрузки/LM-1043_отбор_1.zip') || [];
-  check('архив отбора собран прослойкой: папки карточек и порядок', zSel.some(n => /^LM-1043_отбор_1\/01 Лук 1[^/]*\/01_a\.jpg$/.test(n)) && zSel.some(n => /\/02_b\.jpg$/.test(n)), zSel.join(' | '));
-  check('архив отбора скачивается обычной загрузкой браузера', DOWNLOADS.some(p => /выгрузки\/LM-1043_отбор_1\.zip$/.test(p)), DOWNLOADS.join(' | '));
+  const zSel = latestZip('LM-1043');
+  check('архив отбора собран прослойкой: папки карточек и порядок', zSel.some(n => /^LM-1043\/01 Лук 1[^/]*\/01_a\.jpg$/.test(n)) && zSel.some(n => /\/02_b\.jpg$/.test(n)), zSel.join(' | '));
+  check('архив отбора скачивается обычной загрузкой браузера', DOWNLOADS.some(p => /выгрузки\/[^/]+\/LM-1043\.zip$/.test(p)), DOWNLOADS.join(' | '));
   check('ссылку на папку у Яндекса не просим (папки он не отдаёт)', !log.some(l => /resources\/download disk:\/_ContentPulse\/выгрузки\/[^.]*$/.test(l)));
 
   /* вся съёмка большая: собирается за несколько вызовов, но архив — ОДИН (Маша, 06.11: «разбил на два куска»);
@@ -757,19 +831,20 @@ async function articleFolderChecks(ctx, base) {
   const callsBefore = ZIPPART_CALLS.length;
   await page.evaluate(() => { CP.zipTarget = 250; CP.zipPartMin = 100; CP.directMin = 150; document.getElementById('cpMenuDlAll').click(); });
   await page.waitForFunction(() => App.projectMeta.cp.events.some(e => e.action === 'download_shoot'), null, { timeout: 10000 });
-  const zParts = [...ZIPS.keys()].filter(k => /LM-1043_вся съёмка_1_ч\d+\.zip$/.test(k));
-  const allNames = ZIPS.get('disk:/_ContentPulse/выгрузки/LM-1043_вся съёмка_1.zip') || [];
+  const zParts = [...ZIPS.keys()].filter(k => /LM-1043_ч\d+\.zip$/.test(k));
+  const allNames = latestZip('LM-1043');
   check('вся съёмка — один архив, собран за несколько вызовов; кадры крупнее порога видео — тоже в архиве', !zParts.length && ZIPPART_CALLS.length - callsBefore >= 2
-    && allNames.length === 4 && allNames.some(n => n === 'LM-1043_вся съёмка_1/part2/c.jpg'), JSON.stringify([ZIPPART_CALLS.slice(callsBefore), allNames, zParts]));
+    && allNames.length === 4 && allNames.some(n => n === 'LM-1043/part2/c.jpg'), JSON.stringify([ZIPPART_CALLS.slice(callsBefore), allNames, zParts]));
   check('карточка: одна кнопка «Скачать ZIP»', await page.evaluate(() => document.querySelectorAll('#cpDlCard a.cp-dlcard-btn').length === 1 && /Скачать ZIP/.test(document.getElementById('cpDlCard').textContent)));
-  check('один архив скачивается', DOWNLOADS.some(p => /выгрузки\/LM-1043_вся съёмка_1\.zip$/.test(p)), DOWNLOADS.join(' | '));
+  check('один архив скачивается', DOWNLOADS.some(p => /выгрузки\/[^/]+\/LM-1043\.zip$/.test(p)), DOWNLOADS.join(' | '));
   check('кусок архива оборвался — повторён, архив всё равно собран целиком', ZIPPART_FAIL_ONCE.done && allNames.length === 4);
   ZIPPART_FAIL_ONCE = null;
   /* Яндекс не отдаёт один файл (HTTP 500) — архив собирается без него, в карточке сказано, какой */
   ZIPPART_BAD = 'disk:/Архив/LM-1043/part2/c.jpg';
+  const beforeBad = zipVersions('LM-1043').length;
   await page.evaluate(() => { CP.zipTarget = 250; CP.zipPartMin = 100; document.getElementById('cpMenuDlAll').click(); });
-  for (let i = 0; i < 80 && !ZIPS.has('disk:/_ContentPulse/выгрузки/LM-1043_вся съёмка_2.zip'); i++) await page.waitForTimeout(100);
-  const zBad = ZIPS.get('disk:/_ContentPulse/выгрузки/LM-1043_вся съёмка_2.zip') || [];
+  for (let i = 0; i < 80 && zipVersions('LM-1043').length === beforeBad; i++) await page.waitForTimeout(100);
+  const zBad = latestZip('LM-1043');
   await page.waitForFunction(() => /Не попали/.test((document.getElementById('cpDlCard') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => {});
   check('файл, который Яндекс не отдаёт, — архив без него, в карточке «Не попали: c.jpg»', zBad.length === 3 && !zBad.some(n => /c\.jpg$/.test(n))
     && /Не попали[^.]*c\.jpg/.test(await page.textContent('#cpDlCard')), JSON.stringify(zBad) + ' ' + await page.textContent('#cpDlCard'));
@@ -779,11 +854,11 @@ async function articleFolderChecks(ctx, base) {
   const dlBefore = DOWNLOADS.length;
   await page.evaluate(() => { CP.zipTarget = 250; CP.zipPartMin = 100; CP.zipSplitAt = 400; CP.zipPartSize = 360; document.getElementById('cpMenuDlAll').click(); });
   await page.waitForFunction(() => /Часть 2 из/.test((document.getElementById('cpDlCard') || {}).textContent || '') && !/Собираю/.test(document.getElementById('cpDlCard').textContent), null, { timeout: 15000 }).catch(() => {});
-  const spl = [...ZIPS.entries()].filter(([k]) => /LM-1043_вся съёмка_3_ч\d+\.zip$/.test(k));
+  const spl = [...ZIPS.entries()].filter(([k]) => /LM-1043_ч\d+\.zip$/.test(k));
   const splAll = spl.flatMap(([, v]) => v);
   const withA = (spl.find(([, v]) => v.some(n => /\/a\.jpg$/.test(n))) || [, []])[1];
   check('большая выборка: несколько архивов _ч1, _ч2…, папки целиком, одна корневая папка внутри',
-    spl.length >= 2 && splAll.length === 4 && splAll.every(n => n.indexOf('LM-1043_вся съёмка_3/') === 0)
+    spl.length >= 2 && splAll.length === 4 && splAll.every(n => n.indexOf('LM-1043/') === 0)
     && !withA.some(n => /part2\//.test(n)), JSON.stringify(spl));
   check('карточка: кнопки «Часть 1 из N», каждая часть скачивается', await page.evaluate(() => document.querySelectorAll('#cpDlCard a.cp-dlcard-btn').length >= 2
     && /Часть 1 из/.test(document.getElementById('cpDlCard').textContent)) && DOWNLOADS.length - dlBefore === spl.length, DOWNLOADS.slice(dlBefore).join(' | '));
@@ -846,21 +921,22 @@ async function articleFolderChecks(ctx, base) {
   check('без галочек — «Скачать всё из Архив» и число', /Скачать всё из Архив · \d+/.test(await page.textContent('[data-cp-p="download"]')), await page.textContent('[data-cp-p="download"]'));
   await page.evaluate(() => { CP.sel.tags = {}; CP.sel.statuses = { retouch: true }; cpRenderPanel(); });
   check('отбор по статусу «на ретуши» (внутренний)', await page.evaluate(() => cpFiltered(CP.sel).length === 2));
+  const beforeFilteredZips = zipVersions('LM-1043').length;
   await page.click('[data-cp-p="download"]');
   await page.waitForFunction(() => CP.sel && CP.sel.data && Object.keys(CP.sel.data.meta.cp.downloads).length === 2, null, { timeout: 10000 });
-  const ex1 = ZIPS.get('disk:/_ContentPulse/выгрузки/LM-1043_Ретушь_1.zip') || [];
-  check('выгрузка: LM-1043_Ретушь_1.zip, папка карточки, исходные имена файлов', ex1.some(n => /^LM-1043_Ретушь_1\/01 Лук 1[^/]*\/a\.jpg$/.test(n)), [...ZIPS.keys()].join(' | '));
-  check('архив выгрузки скачивается обычной загрузкой', DOWNLOADS.some(p => /выгрузки\/LM-1043_Ретушь_1\.zip$/.test(p)));
+  const ex1 = latestZip('LM-1043');
+  check('выгрузка: LM-1043.zip, папка карточки, исходные имена файлов', ex1.some(n => /^LM-1043\/01 Лук 1[^/]*\/a\.jpg$/.test(n)), [...ZIPS.keys()].join(' | '));
+  check('архив выгрузки скачивается обычной загрузкой', DOWNLOADS.some(p => /выгрузки\/[^/]+\/LM-1043\.zip$/.test(p)));
   check('карточка «Архив готов» с кнопкой «Скачать ZIP»', await page.evaluate(() => {
     const b = document.querySelector('#cpDlCard a.cp-dlcard-btn');
-    return !!b && getComputedStyle(document.getElementById('cpDlCard')).display !== 'none' && /LM-1043_%D0%A0|LM-1043_Ретушь_1/.test(decodeURIComponent(b.href)) && b.target === '_blank';
+    return !!b && getComputedStyle(document.getElementById('cpDlCard')).display !== 'none' && new URL(b.href).searchParams.get('name') === 'LM-1043.zip' && b.target === '_blank';
   }));
   check('после скачивания — отметка «скачано», статус не поменялся', await page.evaluate(() => {
     const m = CP.sel.data.meta.cp; return Object.values(m.downloads).every(d => d.n === 1) && Object.values(m.status).every(s => s.s === 'retouch'); }));
   check('«скачано» временно нигде не показывается: нет фильтра, чипа и значка', !(await page.$('#cpFDl')) && !(await page.$('.cp-state-dl')) && !(await page.$('.cp-badge.cp-dl')));
   await page.click('[data-cp-p="download"]');
   await page.waitForFunction(() => Object.values(CP.sel.data.meta.cp.downloads).every(d => d.n === 2), null, { timeout: 10000 });
-  check('повторное скачивание разрешено: _2 и счётчик ×2', ZIPS.has('disk:/_ContentPulse/выгрузки/LM-1043_Ретушь_2.zip'));
+  check('повторное скачивание имеет то же имя, отдельную ссылку и счётчик ×2', zipVersions('LM-1043').length === beforeFilteredZips + 2 && new Set(DOWNLOADS.filter(p => p.endsWith('/LM-1043.zip'))).size >= beforeFilteredZips + 2);
   await page.evaluate(() => { CP.sel.statuses = {}; cpRenderPanel(); });
   await page.check('[data-cp-fold="part2"]');
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-panel.png') });
@@ -1074,7 +1150,7 @@ async function articleFolderChecks(ctx, base) {
   check('«Сверить папку ретуши»: недостающее докопировано, остальное — «уже было»', FILES.has(RT + '1/74595_модель/manekin.jpg'),
     JSON.stringify(await page.evaluate(() => App.projectMeta.cp.events.filter(e => e.action === 'retouch_sync').map(e => e.note))));
 
-  /* галочки в списке карточек: буква ретушёра отмеченным, «Скачать отмеченные» — архив <съёмка>_<буква>_<N> */
+  /* галочки в списке карточек: буква ретушёра отмеченным, «Скачать отмеченные» — архив по имени съёмки */
   await page.evaluate(() => { CP.dict = cpParseDict('[Ретушёры: один]\nY\nU'); cbRenderOutline(); });
   const ck = await page.evaluate(() => [App.cards.find(c => c.title === '74595').id, App.cards.find(c => c.title === '74596').id]);
   await page.check('[data-cp-ck="' + ck[0] + '"]');
@@ -1084,15 +1160,17 @@ async function articleFolderChecks(ctx, base) {
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-outline.png') });
   check('буква Y поставлена обеим отмеченным', await page.evaluate(ids => ids.every(id => (cbCardById(id).tags || []).indexOf('Y') !== -1), ck));
   await page.click('[data-cp-o="download"]');
-  for (let i = 0; i < 40 && ![...ZIPS.keys()].some(k => /МОДЕЛЬ_МУЖ_TEST_Y_1\.zip$/.test(k)); i++) await page.waitForTimeout(100);
+  for (let i = 0; i < 40 && ![...ZIPS.keys()].some(k => /МОДЕЛЬ_МУЖ_TEST\.zip$/.test(k)); i++) await page.waitForTimeout(100);
   {
-    const z = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST_Y_1\.zip$/.test(k)).flatMap(([, v]) => v);
-    check('«Скачать отмеченные»: архив <съёмка>_Y_1, папки карточек 74595 и 74596', z.length === 2 && z.some(n => /_Y_1\/74595\/(\d+_)?manekin\.jpg$/.test(n)) && z.some(n => /_Y_1\/74596\/(\d+_)?manekin2\.jpg$/.test(n)), [...ZIPS.keys()].join(' | ') + ' :: ' + z.join(' | '));
+    const z = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST\.zip$/.test(k)).flatMap(([, v]) => v);
+    check('«Скачать отмеченные»: имя съёмки в корне, буква и исходное имя — у папок артикулов', z.length === 2
+      && z.includes('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/Y_74595_модель/manekin.jpg')
+      && z.includes('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST/1/Y_74596_модель/manekin2.jpg'), z.join(' | '));
   }
   await page.waitForFunction(() => cpMeta().events.some(e => e.action === 'download_cards'), null, { timeout: 5000 }).catch(() => {});
   check('скачанное отмечено (кто, архив), в журнале', await page.evaluate(() => {
     var p = App.photos.find(x => /manekin2/.test(x.disk));
-    return cpMeta().downloads[p.id] && cpMeta().downloads[p.id].last.export === '2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST_Y_1' && cpMeta().events.some(e => e.action === 'download_cards');
+    return cpMeta().downloads[p.id] && cpMeta().downloads[p.id].last.export === '2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST' && cpMeta().events.some(e => e.action === 'download_cards');
   }));
   /* сдача: Сайт / дата / буква_номер / съёмка / артикулы */
   ['disk:/Сайт', 'disk:/Сайт/06.11.2026', 'disk:/Сайт/06.11.2026/Y_1', 'disk:/Сайт/06.11.2026/Y_1/2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST',
@@ -1748,7 +1826,7 @@ async function articleFolderChecks(ctx, base) {
   check('крупное видео — отдельной ссылкой, перенесено частями и скачивается', MPU_PARTS.length === 3 && DOWNLOADS.some(p => /видео\/clip\.mp4$/.test(p)), MPU_PARTS.join(',') + ' :: ' + DOWNLOADS.slice(-3).join(' | '));
   await page.evaluate(() => { CP.directMin = 3.9 * 1024 * 1024 * 1024; CP.directPart = 256 * 1024 * 1024; });
   /* видео — в том же архиве, кусками (Маша, 08.11: «на 5 ГБ 15 архивов»): clip.mp4 (500 байт) — «большой», куски по 200 */
-  const zVid = [...ZIPS.entries()].filter(([k]) => /МОДЕЛЬ_МУЖ_TEST_1\.zip$/.test(k)).flatMap(([, v]) => v);
+  const zVid = latestZip('2026-10-27_SV_МОДЕЛЬ_МУЖ_TEST');
   {
     /* новый архив — новый ключ или тот же ключ с новым содержимым (номер скачивания мог не успеть вырасти) */
     const crcBefore = CRC_CALLS.length, slBefore = ZIP_SLICES.length, zBefore = new Map(ZIPS);
@@ -1766,7 +1844,7 @@ async function articleFolderChecks(ctx, base) {
     await page.evaluate(() => { CP.zipBigMin = 64 * 1024 * 1024; CP.zipSlice = 256 * 1024 * 1024; CP.zipTarget = 400 * 1024 * 1024; CP.zipPartMin = 6 * 1024 * 1024; });
   }
   check('«скачать всё» из исходников: структура как на Диске, кадр карточки артикула — в папке артикула (и кадр лука, попавший в карточку)',
-    zVid.some(n => /_1\/1\/74595_модель\/IMG_0101\.jpg$/.test(n)) && zVid.some(n => /_1\/1\/74595_модель\/manekin\.jpg$/.test(n)) && !zVid.some(n => /_1\/74595\//.test(n)), zVid.join(' | '));
+    zVid.some(n => /_TEST\/1\/74595_модель\/IMG_0101\.jpg$/.test(n)) && zVid.some(n => /_TEST\/1\/74595_модель\/manekin\.jpg$/.test(n)) && !zVid.some(n => /_TEST\/74595\//.test(n)), zVid.join(' | '));
   check('«Все файлы»: кадры в архиве, видео в архив не попало', !zVid.some(n => /clip\.mp4$/.test(n)) && zVid.filter(n => /\.jpg$/.test(n)).length === 3, zVid.join(' | '));
 
   /* дерево папок на панели: раскрыть до последнего уровня, отметить одну вложенную, статусы вложенных */
@@ -1788,7 +1866,7 @@ async function articleFolderChecks(ctx, base) {
   await page.click('[data-cp-p="download"]');
   for (let i = 0; i < 60 && ![...ZIPS.keys()].some(k => !zipsBefore.has(k)); i++) await page.waitForTimeout(100);
   const zSub = [...ZIPS.entries()].filter(([k]) => !zipsBefore.has(k)).flatMap(([, v]) => v);
-  check('«Скачать отмеченные» по вложенной папке: в архиве только её кадры', zSub.length === 2 && zSub.every(n => /_\d+\/1\/74595_модель\//.test(n)), zSub.join(' | '));
+  check('«Скачать отмеченные» по вложенной папке: в архиве только её кадры', zSub.length === 2 && zSub.every(n => /_TEST\/1\/74595_модель\//.test(n)), zSub.join(' | '));
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-tree-open.png') });
   await page.click('[data-cp-p="expall"]');
   check('«свернуть все» сворачивает дерево', await page.evaluate(() => !document.querySelector('[data-cp-fold="1/74595_модель"]')));
@@ -1830,8 +1908,8 @@ async function articleFolderChecks(ctx, base) {
   check('оптика: тип и «выгрузка как в папках» на панели', /Оптика, выгрузка как в папках/.test(await page.textContent('#cpPanel .cp-panel-head small')));
   await page.click('[data-cp-p="download"]');
   await page.waitForFunction(() => [...document.querySelectorAll('#cpDlCard a.cp-dlcard-btn')].some(a => /ОПТИКА/.test(decodeURIComponent(a.href))), null, { timeout: 10000 });
-  const zOpt = ZIPS.get('disk:/_ContentPulse/выгрузки/2026-09-21_SV_ОПТИКА_N_1.zip') || [];
-  check('оптика: в архиве исходные папки бренда и артикула', zOpt.includes('2026-09-21_SV_ОПТИКА_N_1/maxmara_оптика/75327_оптика_N/s1.jpg'), [...ZIPS.keys()].join(' | ') + ' :: ' + zOpt.join(' | '));
+  const zOpt = latestZip('2026-09-21_SV_ОПТИКА_N');
+  check('оптика: в архиве исходные папки бренда и артикула', zOpt.includes('2026-09-21_SV_ОПТИКА_N/maxmara_оптика/75327_оптика_N/s1.jpg'), [...ZIPS.keys()].join(' | ') + ' :: ' + zOpt.join(' | '));
   await page.fill('#cpShelfSearch', '1043');
 
   /* ---------- отбор после ретуши и скачивания ---------- */
@@ -2197,11 +2275,11 @@ async function articleFolderChecks(ctx, base) {
     await page.click('[data-cp-stdl]');
     await page.waitForFunction(() => /Архив готов/.test((document.getElementById('cpDlCard') || {}).textContent || ''), null, { timeout: 10000 }).catch(() => {});
     for (let i = 0; i < 60 && !(kState().meta.cp.rtdl || {})['74001_модель/k1.jpg']; i++) await page.waitForTimeout(100);
-    const zY = [...ZIPS.entries()].filter(([k]) => /2026-11-06_SV_КАТ_03_РЕТУШЬ_U\+Y_/.test(k)).flatMap(([, v]) => v);
-    check('скачалось только из выбранной папки Y, а в архиве папка артикула подписана U', zY.length === 1 && /U_74001_модель\/k1\.jpg$/.test(zY[0]), JSON.stringify([...ZIPS.keys()].slice(-2)) + ' ' + zY.join(' | '));
+    const zY = latestZip('2026-11-06_SV_КАТ');
+    check('скачалось только из выбранной папки Y, а в архиве папка артикула подписана U', zY.length === 1 && zY[0] === '2026-11-06_SV_КАТ/U_74001_модель/k1.jpg', JSON.stringify([...ZIPS.keys()].slice(-2)) + ' ' + zY.join(' | '));
     let ks = kState(), rec = (ks.meta.cp.rtdl || {})['74001_модель/k1.jpg'] || {};
     const evDl = (ks.meta.cp.events || []).filter(e => e.action === 'download_retouch').pop() || {};
-    check('скачали — в отборе съёмки запись: кто (буква U), когда, какой архив; в журнале — событие', rec.l === 'U' && rec.n === 1 && !!rec.ts && /03_РЕТУШЬ_U\+Y_/.test(rec.export || '') && !!rec.rid
+    check('скачали — в отборе съёмки запись: кто (буква U), когда, какой архив; в журнале — событие', rec.l === 'U' && rec.n === 1 && !!rec.ts && rec.export === '2026-11-06_SV_КАТ' && !!rec.rid
       && evDl.letter === 'U' && evDl.count === 1 && /74001/.test(evDl.card || ''), JSON.stringify([rec, evDl]));
     check('забрал другой ретушёр — буква карточки сменилась: была Y, стала U (в журнале — «сменили ретушёра»)', JSON.stringify(ks.cards[0].tags) === '["U"]' && /сменили ретушёра: 74001 \(Y → U\)/.test(evDl.note || ''), JSON.stringify([ks.cards[0].tags, evDl.note]));
     for (let i = 0; i < 40 && !DIRS.has(KRT + '/U_74001_модель'); i++) await page.waitForTimeout(50);

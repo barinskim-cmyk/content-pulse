@@ -114,6 +114,7 @@ function cpCommitArticleDraft(cardId) {
     return false;
   }
   var edits = [], stages = cpStageRootsForEdit(shoot), known = cpArticlePendingEdits(shoot.path, cardId);
+  var look = cpModelArticleLook(shoot.name, art.dir);
   var copies = (cpMeta().articleCopies || {})[cardId] || {};
   var add = function (id, direction) {
     var p = draft.frames[id];
@@ -123,7 +124,7 @@ function cpCommitArticleDraft(cardId) {
     if (direction === 'remove' && !previous && source.indexOf(prefix) !== 0) return;
     edits.push({
       card: cardId, pid: id, direction: direction, source: source, name: p.name, digest: p.md5,
-      root: root, article: art.dir, code: art.code, stageRoots: stages
+      root: root, article: art.dir, look: look, code: art.code, stageRoots: stages
     });
   };
   draft.before.filter(function (id) { return draft.after.indexOf(id) === -1; }).forEach(function (id) { add(id, 'remove'); });
@@ -182,9 +183,15 @@ function cpResolveArticleEdit(edit, shoot) {
     }
     if (edit.resultPath || (meta && (edit.direction === 'add' || edit.source.indexOf(root) === 0))) return cpRunArticleEdit(edit, shoot);
     /* Если предыдущая очередь сделала копию или переместила кадр, находим его по содержимому. */
-    var search = edit.direction === 'remove' ? root.slice(0, -1) : edit.root + '/' + CP_EXTRA_FRAMES + '/' + edit.article;
+    var lookingInParent = edit.direction === 'add' && !!edit.look;
+    var search = edit.direction === 'remove' ? root.slice(0, -1)
+      : edit.root + '/' + (edit.look || CP_EXTRA_FRAMES + '/' + edit.article);
     return cpArticleMeta(search).then(function (dir) {
-      return dir ? CPDisk.walkPhotos(search, false, 2, true) : [];
+      if (!dir) return [];
+      if (lookingInParent) return CPDisk.listDir(search).then(function (items) {
+        return items.filter(function (item) { return item.type === 'file'; });
+      });
+      return CPDisk.walkPhotos(search, false, 2, true);
     }).then(function (files) {
       var same = files.filter(function (f) { return edit.digest && f.md5 === edit.digest; });
       var named = same.filter(function (f) { return f.name === edit.name; });

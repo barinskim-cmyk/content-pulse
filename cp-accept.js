@@ -177,14 +177,15 @@ function cpPlanUpload(files, data) {
   var rtLetters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
   var prefix = cpLetterSplit(top, rtLetters);
   var topArticle = cpArtCode(null, prefix ? prefix.rest : top);
-  var lm = !topArticle && /_([A-Za-zА-Яа-яЁё]{1,3})_(\d+)$/.exec(top) || [];
+  var isShoot = top && data.name && top.normalize('NFC').toLowerCase() === String(data.name).normalize('NFC').toLowerCase();
+  var lm = !isShoot && !topArticle && /_([A-Za-zА-Яа-яЁё]{1,3})_(\d+)$/.exec(top) || [];
   /* Буква ретушёра известна по именам папок — тогда выбирать её не нужно (Маша, 10.11.2026:
      «сдаёт папку, в которой уже есть буква его имени, — сразу подставляем»): архив из папки
      ретуши «…_03_РЕТУШЬ_Y_2026-11-10» и папки артикулов «Y_74595_…». Разные буквы — не знаем. */
   if (!lm[1] && rtLetters.length) {
     var am = /_([A-Za-zА-Яа-яЁё]{1,3})(?:\+[^_]*)?_\d{4}-\d{2}-\d{2}$/.exec(top);
     var seen = {};
-    if (am && rtLetters.indexOf(am[1]) !== -1) seen[am[1]] = true;
+    if (!isShoot && am && rtLetters.indexOf(am[1]) !== -1) seen[am[1]] = true;
     else segs.forEach(function (sg) {
       sg.slice(0, -1).forEach(function (part) {
         var pm = /^([A-Za-zА-Яа-яЁё]{1,3})_./.exec(part);
