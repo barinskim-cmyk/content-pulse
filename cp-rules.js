@@ -167,6 +167,8 @@ var CP_DATE_DIR = /^(19|20)\d{2}[-._](0?[1-9]|1[0-2])[-._](0?[1-9]|[12]\d|3[01])
 function cpArtCode(type, name) {
   name = String(name || '');
   if (CP_DATE_DIR.test(name)) return '';
+  var six = typeof cpSixCode === 'function' && cpSixCode(name);
+  if (six) return six;
   var m = ((type && type.codeRe) || /^(\d{4,7})(?!\d)/).exec(name);
   return m ? (m[1] || m[0]) : '';
 }
@@ -356,11 +358,18 @@ function cpArtCardId(dir) {
  * -> {created, added, manual, arts, late} или null (не собирали).
  */
 function cpCollectCards() {
-  if (!CP.shoot || CP.readOnly || !CP.rules) return null;
+  if (!CP.shoot || CP.readOnly) return null;
   /* папки этой съёмки ещё не прочитаны (у прочитанного обхода есть список папок) */
   if (!CP.files || !CP.files.dirs) return null;
-  if (!cpCollectAvailable()) return null;
-  var type = cpShootType(CP.shoot.name);
+  var type = cpShootType(CP.shoot.name), legacy = cpCollectAvailable();
+  var fresh = CP.articleDiskSnapshot !== CP.files;
+  CP.articleDiskSnapshot = CP.files;
+  var findArticle = function (dir) {
+    if (dir === CP_EXTRA_FRAMES || dir.indexOf(CP_EXTRA_FRAMES + '/') === 0) return {};
+    var six = typeof cpSourceArticle === 'function' && cpSourceArticle(dir);
+    if (six) return { code: six.code, articlePath: six.dir };
+    return legacy ? cpFacets(type, (dir ? dir + '/' : '') + 'x') : {};
+  };
   var root = CP.shoot.path.replace(/\/+$/, '') + '/';
   var rel = function (p) { return p.indexOf(root) === 0 ? p.slice(root.length) : ''; };
   /* папки артикулов: и с файлами, и пустые */
@@ -368,22 +377,32 @@ function cpCollectCards() {
   CP.files.dirs.forEach(function (d) {
     var r = rel(d);
     if (!r) return;
-    var f = cpFacets(type, r + '/x');
+    var f = findArticle(r);
     if (f.code && f.articlePath === r) arts[r] = f.code;
   });
   CP.files.forEach(function (f) {
-    var x = cpFacets(type, rel(f.path));
+    var relative = rel(f.path);
+    var x = findArticle(relative.indexOf('/') === -1 ? '' : cpParentDir(relative));
     if (x.code && x.articlePath) arts[x.articlePath] = x.code;
   });
   var dirs = Object.keys(arts).sort(function (a, b) { return a.localeCompare(b, undefined, { numeric: true }); });
   var res = { created: 0, added: 0, manual: 0, arts: dirs.length, late: [] };
-  if (!dirs.length) return res;
+  if (!dirs.length && !App.cards.some(function (c) { return typeof cpLinkedArticle === 'function' && cpLinkedArticle(c); })) return res;
   var tpl = typeof cpAutoTemplate === 'function' ? cpAutoTemplate() : null;
   if (!tpl) { if (window.console) console.warn('[CP] карточки по папкам: нет шаблона автоленты'); return null; }
   var m = cpMeta();
   var seenDirs = m.artSeen = m.artSeen || {};   /* папка артикула -> 1: карточка по ней уже заводилась */
   var byDir = {};
-  App.cards.forEach(function (c) { if (c.cpArticleDir && !byDir[c.cpArticleDir]) byDir[c.cpArticleDir] = c; });
+  App.cards.forEach(function (c) {
+    if (!c.cpArticleDir && typeof cpSixCode === 'function' && cpSixCode(c.cpArticle || c.title)) {
+      var code = cpSixCode(c.cpArticle || c.title);
+      var matches = dirs.filter(function (d) { return arts[d] === code; });
+      if (matches.length === 1 && !App.cards.some(function (saved) { return saved.cpArticleDir === matches[0]; })) {
+        c.cpArticleDir = matches[0]; c.cpArticle = code;
+      }
+    }
+    if (c.cpArticleDir && !byDir[c.cpArticleDir]) byDir[c.cpArticleDir] = c;
+  });
   /* кадры по папкам артикулов — один проход по галерее (папка кадра и её родители) */
   var inDir = {};
   App.photos.forEach(function (p) {
@@ -394,11 +413,22 @@ function cpCollectCards() {
       if (arts[d]) { (inDir[d] = inDir[d] || []).push(p); break; }
     }
   });
-  var stamp = new Date().toISOString();
+  var stamp = new Date().toISOString(), membershipChanged = false;
   dirs.forEach(function (d) {
-    var card = byDir[d];
+    var card = byDir[d], createdHere = false, renamed = false;
+    if (fresh && !card && cpSourceArticle(d)) {
+      var counterpart = cpArticleIsBrak(d) ? cpArticleWithoutBrak(d) : d + '_брак';
+      var saved = Object.keys(byDir).filter(function (key) { return key.toLowerCase() === counterpart.toLowerCase() && !arts[key]; });
+      if (saved.length === 1) {
+        card = byDir[saved[0]];
+        delete byDir[saved[0]];
+        byDir[d] = card;
+        card.cpArticleDir = d;
+        renamed = membershipChanged = true;
+      }
+    }
     if (!card) {
-      if (seenDirs[d]) return;                 /* карточку этой папки удалили — второй раз не заводим */
+      if (seenDirs[d] && !(typeof cpSourceArticle === 'function' && cpSourceArticle(d))) return;
       card = cpMakeCard(tpl, arts[d]);
       var id = cpArtCardId(d);
       if (!cbCardById(id)) card.id = id;
@@ -407,9 +437,25 @@ function cpCollectCards() {
       card.cpArtTitled = true;
       card.cpAuto = true;
       card.cpAutoSeen = [];
+      if (typeof cpLinkedArticle === 'function' && cpLinkedArticle(card)) card.cpFolderLinked = true;
       App.cards.push(card);
       byDir[d] = card;
       res.created++;
+      createdHere = true;
+    }
+    if (typeof cpLinkedArticle === 'function' && cpLinkedArticle(card)) {
+      if (card.cpFolderMissing) membershipChanged = true;
+      card.cpFolderMissing = false;
+      var initialized = !!card.cpFolderLinked;
+      var outcome = cpReconcileArticleCard(card, inDir[d] || [], fresh && initialized && !createdHere, renamed);
+      membershipChanged = membershipChanged || outcome.changed || !initialized;
+      res.added += outcome.added;
+      if (fresh) {
+        var marked = (m.articleBrak || {})[card.id];
+        if (cpArticleIsBrak(d) && !marked) cpQueueArticleBrak(card, true);
+        if (!cpArticleIsBrak(d) && marked) cpQueueArticleBrak(card, false);
+      }
+      return;
     }
     if (!card.cpAuto) { res.manual++; return; }    /* карточку собрали руками — её состав не трогаем */
     seenDirs[d] = 1;
@@ -435,7 +481,16 @@ function cpCollectCards() {
       card.cpChangedAfterDl = { by: 'новые файлы в папке артикула', ts: stamp };
     }
   });
-  if (!res.created && !res.added) return res;
+  if (fresh && typeof cpLinkedArticle === 'function') App.cards.forEach(function (card) {
+    if (!cpLinkedArticle(card) || arts[card.cpArticleDir] || cpArticleJobs(CP.shoot.path, card.id).length) return;
+    if (!card.cpFolderMissing) membershipChanged = true;
+    card.cpFolderMissing = true;
+    if (card.cpFolderLinked) {
+      var outcome = cpReconcileArticleCard(card, [], true);
+      membershipChanged = membershipChanged || outcome.changed;
+    }
+  });
+  if (!res.created && !res.added && !membershipChanged) return res;
   var note = 'новых карточек: ' + res.created + ', добавлено кадров: ' + res.added;
   if (res.late.length) note += '; новые кадры в карточках в работе (' + res.late.join(', ') + ') — без статуса';
   cpEvent('auto_cards', [], { note: note }, true);

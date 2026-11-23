@@ -379,6 +379,160 @@ async function route(r) {
 let FAIL_COPY = null;   /* копирование этих путей «падает» — проверка очереди переносов */
 let FAIL_MOVE = null;   /* перенос этих путей «падает» */
 
+async function articleFolderChecks(ctx, base) {
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  const cat = 'disk:/Синхронизация', name = '2026-11-23_СК_ТЕСТ', code = '074478';
+  const sourceRoot = cat + '/01_ИСХОДНИКИ', approvalRoot = cat + '/02_ОТБОР', retouchRoot = cat + '/03_РЕТУШЬ';
+  const reviewRoot = cat + '/04_ОТРЕТУШИРОВАНО', siteRoot = cat + '/05_САЙТ', archive = cat + '/00_АРХИВ';
+  const source = sourceRoot + '/' + name, rel = 'Бренд/' + code + '_оптика', article = source + '/' + rel;
+  const approval = approvalRoot + '/' + name + '/' + rel;
+  const retouch = retouchRoot + '/' + name + '/Бренд/Y_' + code + '_оптика';
+  const review = reviewRoot + '/' + name + '/' + rel, site = siteRoot + '/' + name + '/' + rel;
+  for (const target of [article, source + '/012345_пустая', approval, retouch, review, site, archive, retouch + '/ГОТОВО']) {
+    const parts = target.split('/');
+    for (let i = 2; i <= parts.length; i++) DIRS.add(parts.slice(0, i).join('/'));
+  }
+  for (const target of [article, approval, retouch]) FILES.set(target + '/основной.jpg', Buffer.from('first article frame'));
+  FILES.set(source + '/запасной.jpg', Buffer.from('unselected frame'));
+  FILES.set(review + '/сдано.jpg', Buffer.from('approved immutable'));
+  FILES.set(site + '/на-сайте.jpg', Buffer.from('website immutable'));
+  FILES.set(retouch + '/ГОТОВО/готово.jpg', Buffer.from('skip this folder'));
+  await page.goto(base + '#access_token=TESTTOKEN&token_type=bearer');
+  await page.waitForFunction(() => window.CP && CP.booted, null, { timeout: 10000 });
+  await page.evaluate(async ({ cat, source, name, archive, approvalRoot, retouchRoot, reviewRoot, siteRoot }) => {
+    await cpEnsureSettings();
+    await cpDictReady();
+    CP.dict = cpParseDict('[Ретушёры: один]\nY');
+    CP.archive = cat;
+    cpSet('cp_catalog', cat);
+    CP.catalogList = [archive, approvalRoot, retouchRoot, reviewRoot, siteRoot].map(path => ({ path, name: cpFolderBase(path) }));
+    Object.assign(CP.settings, { archive, approve: approvalRoot, retouch: retouchRoot, retouched: reviewRoot, site: siteRoot });
+    cpOpenShootNow(source, name);
+  }, { cat, source, name, archive, approvalRoot, retouchRoot, reviewRoot, siteRoot });
+  await page.waitForFunction(() => App.cards.some(c => c.cpArticle === '074478' && cpCardPids(c).length === 1));
+  const summary = await page.evaluate(() => App.cards.map(c => [c.cpArticle, cpCardPids(c).length]));
+  check('шесть цифр с ведущим нулём распознаются без правил типа съёмки, пустая папка тоже создаёт карточку', JSON.stringify(summary) === '[["012345",0],["074478",1]]', JSON.stringify(summary));
+  const cardId = await page.evaluate(() => App.cards.find(c => c.cpArticle === '074478').id);
+  const old = source + '/раньше-был-в-отборе.jpg';
+  FILES.set(old, Buffer.from('a previously selected frame'));
+  await page.evaluate(async id => {
+    await cpSyncPhotos(false);
+    const card = cbCardById(id);
+    card.cpFolderLinked = false;
+    card.pids = [App.photos.find(p => p.name === 'раньше-был-в-отборе.jpg').id];
+    CP.cardSnap = cpSnapNow();
+    cpCollectCards();
+  }, cardId);
+  await page.waitForFunction(() => !cpqCount());
+  await page.evaluate(() => cpSyncPhotos(false));
+  check('первый перенос объединяет прежний отбор с папкой и сохраняет исходники и версии этапов',
+    FILES.has(old) && FILES.has(article + '/раньше-был-в-отборе.jpg') && FILES.has(article + '/основной.jpg')
+    && !FILES.has(approval + '/раньше-был-в-отборе.jpg') && !FILES.has(retouch + '/раньше-был-в-отборе.jpg')
+    && await page.evaluate(id => cpCardPids(cbCardById(id)).length === 2, cardId));
+  await page.evaluate(id => {
+    cpSetActiveCard(id);
+    cbCardById(id).pids.push(App.photos.find(p => p.name === 'запасной.jpg').id);
+    cbRenderCards();
+  }, cardId);
+  check('правка состава ждёт смены карточки, закрытие страницы вызывает предупреждение', !FILES.has(article + '/запасной.jpg') && await page.evaluate(() => {
+    const e = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented && Object.values(CPQ.ops).some(x => x.op.held);
+  }));
+  await page.evaluate(() => cpSetActiveCard(App.cards.find(c => c.cpArticle === '012345').id));
+  await page.waitForFunction(() => !cpqCount());
+  await page.evaluate(() => cpSyncPhotos(false));
+  check('добавленный кадр скопирован в папку артикула и существующие 02 и 03, оригинал сохранился',
+    [source, article, approval, retouch].every(target => FILES.has(target + '/запасной.jpg')) &&
+    !FILES.has(review + '/запасной.jpg') && !FILES.has(site + '/запасной.jpg'));
+  await page.evaluate(id => {
+    cpSetActiveCard(id);
+    const card = cbCardById(id);
+    card.pids = cpCardPids(card).filter(pid => cbPhotoById(pid).name !== 'основной.jpg');
+    cbRenderCards();
+    cpSetActiveCard(App.cards.find(c => c.cpArticle === '012345').id);
+  }, cardId);
+  await page.waitForFunction(() => !cpqCount());
+  await page.evaluate(() => cpSyncPhotos(false));
+  check('убранный кадр остаётся в «Лишние кадры» исходников и исчезает из карточек 02 и 03',
+    FILES.has(source + '/Лишние кадры/' + rel + '/основной.jpg') && [article, approval, retouch].every(target => !FILES.has(target + '/основной.jpg'))
+    && await page.evaluate(id => cpCardPids(cbCardById(id)).every(pid => cbPhotoById(pid).name !== 'основной.jpg'), cardId));
+  FILES.set(article + '/руками.jpg', Buffer.from('added by hand'));
+  await page.evaluate(() => cpSyncPhotos(false));
+  await page.waitForFunction(() => !cpqCount());
+  check('ручное добавление на Диске меняет карточку и копии до ретуши', [approval, retouch].every(target => FILES.has(target + '/руками.jpg'))
+    && await page.evaluate(id => cpCardPids(cbCardById(id)).some(pid => cbPhotoById(pid).name === 'руками.jpg'), cardId));
+  await page.evaluate(() => cpFlushSave());
+  await page.evaluate(id => { cpSetActiveCard(id); cpShowShootStage('retouch'); }, cardId);
+  await page.waitForFunction(() => CP_SHOOT_VIEW.key === 'retouch' && !CP_SHOOT_VIEW.loading);
+  check('вкладка «Ретушь» открывает тот же артикул, берёт только файлы этапа и пропускает «ГОТОВО»',
+    await page.evaluate(() => CP_SHOOT_VIEW.chosen === '074478' && CP_SHOOT_VIEW.files.map(x => x.file.name).sort().join() === 'запасной.jpg,руками.jpg'));
+  await page.evaluate(() => cpShowShootStage('review'));
+  await page.waitForFunction(() => CP_SHOOT_VIEW.key === 'review' && !CP_SHOOT_VIEW.loading);
+  check('вкладка «Отретушировано» показывает только сданное', await page.evaluate(() => CP_SHOOT_VIEW.files.map(x => x.file.name).join() === 'сдано.jpg'));
+  FILES.delete(review + '/сдано.jpg');
+  await page.evaluate(() => cpShowShootStage('review', true));
+  await page.waitForFunction(() => !CP_SHOOT_VIEW.loading);
+  check('ручное удаление в 04 видит только 04, исходники и копия сайта остаются', await page.evaluate(() => !CP_SHOOT_VIEW.files.length)
+    && FILES.has(article + '/руками.jpg') && FILES.has(site + '/на-сайте.jpg'));
+  FILES.set(review + '/убрать.jpg', Buffer.from('one copy to remove'));
+  FILES.set(site + '/убрать.jpg', Buffer.from('one copy to remove'));
+  await page.evaluate(() => cpShowShootStage('review', true));
+  await page.waitForFunction(() => !CP_SHOOT_VIEW.loading && CP_SHOOT_VIEW.files.length === 1);
+  await page.click('[data-cp-stage-preview="0"]');
+  page.once('dialog', dialog => dialog.accept());
+  await page.click('[data-cp-stage-trash="0"]');
+  await page.waitForFunction(() => !cpqCount() && !CP_SHOOT_VIEW.loading && !CP_SHOOT_VIEW.files.length);
+  check('удаление в программе кладёт в Корзину только выбранную копию этапа', TRASHED.includes(review + '/убрать.jpg')
+    && !FILES.has(review + '/убрать.jpg') && FILES.has(site + '/убрать.jpg'));
+  await page.evaluate(id => {
+    cpShowShootStage('source');
+    CP.brakAuto = { kind: 'photo', note: 'Тестовая причина' };
+    cpDoAction('reshoot', cpCardPids(cbCardById(id)), id);
+  }, cardId);
+  await page.waitForFunction(id => !!((cpMeta().articleBrak || {})[id] || {}).path && !cpqCount(), cardId);
+  const snapshot = await page.evaluate(id => cpMeta().articleBrak[id].path, cardId);
+  await page.evaluate(() => cpSyncPhotos(false));
+  check('брак переименовывает артикул на месте и сохраняет полную копию в отдельном архиве',
+    snapshot.startsWith(archive + '/_БРАК/' + name + '/_Версии/') && snapshot.endsWith('/' + rel + '_брак')
+    && !DIRS.has(article) && DIRS.has(article + '_брак') && FILES.has(snapshot + '/руками.jpg')
+    && FILES.has(retouch + '/руками.jpg') && await page.evaluate(id => cbCardById(id).cpArticleDir.endsWith('_брак')
+      && cpMeta().cardStatus[id].note === 'Тестовая причина', cardId));
+  await page.evaluate(id => { cpDoAction('', cpCardPids(cbCardById(id)), id); }, cardId);
+  await page.waitForFunction(id => !cpqCount() && !cpMeta().cardStatus[id], cardId);
+  await page.evaluate(() => cpSyncPhotos(false));
+  check('снять брак возвращает имя артикула и сохраняет архивную копию',
+    DIRS.has(article) && !DIRS.has(article + '_брак') && FILES.has(snapshot + '/руками.jpg')
+    && await page.evaluate(id => !cbCardById(id).cpArticleDir.endsWith('_брак'), cardId));
+  const routed = await page.evaluate(() => {
+    const cards = [{ id: 'first', title: '074478', cpArticle: '074478', cpArticleDir: 'Первый/074478_оптика' },
+      { id: 'second', title: '074478', cpArticle: '074478', cpArticleDir: 'Второй/074478_оптика' }];
+    const file = new File(['frame'], 'новое-имя.jpg', { type: 'image/jpeg' });
+    const grouped = cpPlanUpload([{ file, rel: 'вся съёмка/Второй/Y_074478_оптика/новое-имя.jpg' }], { cards });
+    const ambiguous = cpPlanUpload([{ file, rel: '074478_оптика/новое-имя.jpg' }], { cards });
+    return [Object.keys(grouped.groups).join(), ambiguous.unmatched.length, Object.keys(ambiguous.groups).length];
+  });
+  check('сдача с повторяющимся артикулом определяется путём бренда; без него приложение просит уточнения', JSON.stringify(routed) === '["second",1,0]', JSON.stringify(routed));
+  await page.evaluate(async ({ article }) => {
+    await CPDisk.proxyMove([{ from: article, path: article + '_брак' }]);
+    await cpSyncPhotos(false);
+  }, { article });
+  await page.waitForFunction(id => (cpMeta().articleBrak || {})[id] && !cpqCount(), cardId);
+  const second = await page.evaluate(id => cpMeta().articleBrak[id].path, cardId);
+  await page.evaluate(async ({ article }) => {
+    await CPDisk.proxyMove([{ from: article + '_брак', path: article }]);
+    await cpSyncPhotos(false);
+  }, { article });
+  await page.waitForFunction(id => !cpqCount() && !cpMeta().cardStatus[id], cardId);
+  check('суффикс, добавленный и снятый прямо на Диске, меняет ту же карточку; обе копии остаются в архиве',
+    snapshot !== second && [snapshot, second].every(path => FILES.has(path + '/руками.jpg')) && DIRS.has(article)
+    && await page.evaluate(id => cbCardById(id).cpArticleDir === 'Бренд/074478_оптика', cardId));
+  check('папки и вкладки без ошибок страницы', !errors.length, errors.join(' | '));
+  await page.close();
+}
+
 (async () => {
   const srv = http.createServer((req, res) => {
     const f = path.join(ROOT, decodeURIComponent(req.url.split('?')[0]).replace(/^\/content-pulse\/?/, '/') || '/');
@@ -392,6 +546,11 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
   await ctx.route(/yandex\.(ru|net)|yandexcloud\.net/, route);
   /* фоновое зеркало всех съёмок (2.0.119) пишет в отборы и выработку само — в тестах включаем только там, где проверяем его */
   await ctx.addInitScript(() => { window.cpNoMirrorAll = true; });
+  if (process.env.CP_ARTICLE_ONLY) {
+    await articleFolderChecks(ctx, base);
+    await browser.close(); srv.close();
+    process.exit(results.some(r => !r[1]) ? 1 : 0);
+  }
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
@@ -724,7 +883,9 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
   await page.evaluate(() => cpSyncPhotos(false));
   check('«Обновить съёмку» — повторная сборка: дублей нет, убранный руками кадр не возвращается', await page.evaluate(() =>
     App.cards.filter(c => c.cpAuto).length === 3 && App.cards.find(x => x.title === '74596').pids.length === 0));
-  /* галерея следует за карточкой: только её лук; галочка «по карточке» — выключить */
+  /* «По карточке» включается вручную, затем галерея следует за карточкой. */
+  check('фильтр «по карточке» выключен по умолчанию', !(await page.isChecked('#cpFollowCard')));
+  await page.check('#cpFollowCard');
   await page.evaluate(() => { document.querySelector('#cbCards .cb-card[data-cid="' + App.cards.find(c => c.title === '74598').id + '"]').click(); });
   await page.waitForFunction(() => CP.folder === '1' && CP.folderByCard, null, { timeout: 3000 }).catch(() => {});
   check('нажал на карточку — в галерее только её лук, карточка выделена', await page.evaluate(() =>
@@ -3669,6 +3830,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     await old.close();
   }
 
+  await articleFolderChecks(ctx, base);
   await browser.close(); srv.close();
   const failed = results.filter(r => !r[1]);
   console.log('\n' + (results.length - failed.length) + '/' + results.length + ' PASS');

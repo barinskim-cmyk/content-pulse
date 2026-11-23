@@ -96,6 +96,7 @@ cbRenderOutline = (function (orig) {
 })(cbRenderOutline);
 
 function cpCardMatchesFolders(card) {
+  if (card.cpFolderMissing) return false;
   if (!CP.cardFolders || !CP.cardFolders.length) return true;
   var dirs = [];
   if (card.cpArticleDir) dirs.push(card.cpArticleDir);

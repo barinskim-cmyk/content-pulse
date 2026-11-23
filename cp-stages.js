@@ -47,17 +47,22 @@ CP.stageFilter = cpGet('cp_stage', '') || '';
 function cpArticleCodes(shootPath, shootName, files) {
   var codes = {};
   var type = typeof cpShootType === 'function' ? cpShootType(shootName) : null;
-  if (!type || !files || type.roles.indexOf('артикул') === -1) return codes;
+  if (!files) return codes;
+  var legacy = type && type.roles.indexOf('артикул') !== -1;
   var root = shootPath.replace(/\/+$/, '') + '/';
   var rel = function (p) { return p.indexOf(root) === 0 ? p.slice(root.length) : ''; };
   (files.dirs || []).forEach(function (d) {
     var r = rel(d);
-    if (!r) return;
-    var f = cpFacets(type, r + '/x');
+    if (!r || r === CP_EXTRA_FRAMES || r.indexOf(CP_EXTRA_FRAMES + '/') === 0) return;
+    var six = typeof cpSourceArticle === 'function' && cpSourceArticle(r);
+    var f = six ? { code: six.code, articlePath: six.dir } : legacy ? cpFacets(type, r + '/x') : {};
     if (f.code && f.articlePath === r) codes[f.code] = true;
   });
   files.forEach(function (f) {
-    var x = cpFacets(type, rel(f.path));
+    var relative = rel(f.path);
+    if (relative.indexOf(CP_EXTRA_FRAMES + '/') === 0) return;
+    var six = typeof cpSourceArticle === 'function' && relative.indexOf('/') !== -1 && cpSourceArticle(cpParentDir(relative));
+    var x = six ? { code: six.code, articlePath: six.dir } : legacy ? cpFacets(type, rel(f.path)) : {};
     if (x.code && x.articlePath) codes[x.code] = true;
   });
   return codes;

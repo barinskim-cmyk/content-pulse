@@ -88,6 +88,11 @@ function cpGuardCheck() {
     if (!removed.length && !added.length) return;
     var card = cbCardById(cid);
     var cst = m.cardStatus[cid];
+    if (typeof cpLinkedArticle === 'function' && cpLinkedArticle(card)) {
+      removed.forEach(function (pid) { cpQueueArticleEdit(card, pid, 'remove', false); });
+      added.forEach(function (pid) { cpQueueArticleEdit(card, pid, 'add', false); });
+      return;
+    }
     /* из карточки уже скачивали — предупреждаем и помечаем карточку */
     var wasDl = a.filter(function (p) { return m.downloads[p] && m.downloads[p].n; });
     if (wasDl.length) {
@@ -238,9 +243,15 @@ function cpCardFolder(card) {
   return common.slice(0, depth).join('/');
 }
 
-function cpFollowOn() { return cpGet('cp_follow_card', '1') !== '0'; }
+function cpFollowOn() { return cpGet('cp_follow_card', '0') === '1'; }
 
 function cpSetActiveCard(id) {
+  if (CP.shoot && CP.activeCard !== id && typeof cpReleaseArticleJobs === 'function') {
+    var path = CP.shoot.path;
+    cpArticleJobs(path).forEach(function (entry) {
+      if (entry.op.held && entry.op.card !== id) cpReleaseArticleJobs(path, entry.op.card);
+    });
+  }
   CP.activeCard = id || null;
   Array.prototype.forEach.call(document.querySelectorAll('#cbCards .cb-card'), function (el) {
     el.classList.toggle('cp-card-active', !!CP.activeCard && el.getAttribute('data-cid') === CP.activeCard);
@@ -293,7 +304,7 @@ function cpAddAutoCard(pid) {
   if (!t) { cbToast('Нет шаблона автоленты — создайте карточку из галереи шаблонов'); return; }
   cbAddCardFromTpl(t.id);
   var card = App.cards[App.cards.length - 1];
-  if (card) CP.activeCard = card.id;
+  if (card) cpSetActiveCard(card.id);
   if (pid && card && card.mode === 'auto') {
     card.pids.push(pid);
     cbMarkDirty();

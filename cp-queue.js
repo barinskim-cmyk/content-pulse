@@ -87,7 +87,11 @@ CPQ.adopt = function () {
   if (!CP.shoot) return;
   var q = (cpMeta().q) || {};
   Object.keys(q).forEach(function (id) {
-    if (!CPQ.ops[id]) CPQ.ops[id] = { shoot: { path: CP.shoot.path, name: CP.shoot.name }, op: q[id] };
+    if (!CPQ.ops[id]) {
+      var op = q[id];
+      if (op.kind === 'article-edit' && op.held) op.held = false;
+      CPQ.ops[id] = { shoot: { path: CP.shoot.path, name: CP.shoot.name }, op: op };
+    }
   });
   cpqRender();
   cpqKick();
@@ -139,7 +143,7 @@ function cpqTick() {
   var now = Date.now(), ids = Object.keys(CPQ.ops), pick = null, soonest = Infinity;
   ids.forEach(function (id) {
     var o = CPQ.ops[id].op;
-    if (o.stuck) return;
+    if (o.stuck || o.held || (o.waitsFor || []).some(function (id) { return CPQ.ops[id]; })) return;
     if ((o.next || 0) <= now) { if (!pick) pick = id; }
     else soonest = Math.min(soonest, o.next);
   });
@@ -149,7 +153,7 @@ function cpqTick() {
   }
   var ent = CPQ.ops[pick], op = ent.op;
   CPQ.running = true;
-  cpqRun(op).then(function (res) {
+  cpqRun(op, ent.shoot).then(function (res) {
     CPQ.running = false;
     if (res.ok) return cpqDone(ent);
     op.tries = (op.tries || 0) + 1;
@@ -170,7 +174,10 @@ function cpqTick() {
 }
 
 /** Выполнить перенос и проверить результат по Диску. -> {ok} | {ok:false, err, stuck} */
-function cpqRun(op) {
+function cpqRun(op, shoot) {
+  if (op.kind === 'article-edit') return cpRunArticleEdit(op, shoot);
+  if (op.kind === 'article-brak') return cpRunArticleBrak(op);
+  if (op.kind === 'stage-trash') return cpRunStageTrash(op);
   /* Пачками: прослойка берёт за вызов не больше 1000 копий и 200 переносов, остальное молча
      отбрасывает. Раньше файл, о котором прослойка не ответила, считался сделанным — большая
      очередь (тысячи кадров на ретушь после сбоя сети) «заканчивалась», не докопировав хвост.
@@ -277,6 +284,10 @@ function cpqDone(ent) {
     /* перерисовать только если поменялось видимое (статус ретуши на карточке); служебные отметки
        (копии в 02, в _БРАК) на экран не влияют — лишняя перерисовка сбивает работу с карточками */
     if (CP.shoot && CP.shoot.path === ent.shoot.path && op.after && CPQ.redraw[op.after.type]) cpAfterStatus();
+    if (/^article-(edit|brak)$/.test(op.kind)) cpArticleRefreshSoon(ent.shoot.path);
+    if (op.kind === 'stage-trash' && CP.shoot && CP.shoot.path === ent.shoot.path && CP_SHOOT_VIEW.key === op.stage) {
+      cpShowShootStage(op.stage, true);
+    }
     if (op.tries) cbToast('Перенеслось: ' + op.label);
   });
 }
@@ -309,7 +320,7 @@ function cpqDrop(id) {
     var b = e.target.closest('[data-cpq]');
     if (!b) return;
     var act = b.getAttribute('data-cpq');
-    if (act === 'now') { Object.keys(CPQ.ops).forEach(function (id) { CPQ.ops[id].op.next = 0; CPQ.ops[id].op.stuck = false; }); cpqKick(); }
+    if (act === 'now') { Object.keys(CPQ.ops).forEach(function (id) { CPQ.ops[id].op.next = 0; CPQ.ops[id].op.stuck = false; CPQ.ops[id].op.held = false; }); cpqKick(); }
     else if (act === 'drop') {
       var id = b.getAttribute('data-id'), ent = CPQ.ops[id];
       if (ent && confirm('Убрать из очереди «' + ent.op.label + '»?\nПеренос не будет сделан — проверьте Диск руками.')) cpqDrop(id);
@@ -331,6 +342,7 @@ function cpqRender() {
   ids.slice(0, 6).forEach(function (id) {
     var o = CPQ.ops[id].op, ent = CPQ.ops[id];
     html += '<div class="cpq-row">' + cbEsc(o.label) + ' · ' + cbEsc(ent.shoot.name)
+      + (o.held ? ' · ждёт переключения карточки' : '')
       + (o.tries ? ' · попыток ' + o.tries + (o.err ? ': ' + cbEsc(String(o.err).slice(0, 140)) : '') : '')
       + (o.stuck ? ' · <b>повтор не поможет</b><button data-cpq="drop" data-id="' + id + '">Убрать из очереди</button>' : '') + '</div>';
   });
@@ -348,6 +360,9 @@ function cpBusyNow() {
 window.addEventListener('beforeunload', function (e) {
   /* разбор 10.11: во время загрузки исходников и сборки архива страница закрывалась без вопроса */
   if (cpqCount() || cpBusyNow() || (CP.shoot && (App.dirty || CP.saving))) {
+    if (CP.shoot && !CP.readOnly && typeof cpArticleJobs === 'function' && cpArticleJobs(CP.shoot.path).length) {
+      cpBackupSave(CP.shoot.path, cbProjectData(), CP.rev);
+    }
     e.preventDefault();
     e.returnValue = 'Изменения ещё не сохранены на Диске';
     return e.returnValue;

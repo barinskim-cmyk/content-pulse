@@ -196,35 +196,54 @@ function cpPlanUpload(files, data) {
   var cards = data.cards || [];
   var photosById = {};
   (data.photos || []).forEach(function (p) { photosById[p.id] = p; });
-  var byFolder = {}, byStem = {};
+  var byFolder = Object.create(null), byStem = Object.create(null);
+  var index = function (map, key, card) {
+    var list = map[key] = map[key] || [];
+    if (list.indexOf(card) === -1) list.push(card);
+  };
   cards.forEach(function (c, i) {
-    var f = cpCardExportFolder(c, i).toLowerCase();
-    byFolder[f] = c;
+    index(byFolder, cpCardExportFolder(c, i).toLowerCase(), c);
     var pids = c.mode === 'auto' ? (c.pids || []) : (c.slots || []).map(function (s) { return s.pid; }).filter(Boolean);
     pids.forEach(function (pid) {
       var p = photosById[pid];
-      if (p && !byStem[cpStem(p.name)]) byStem[cpStem(p.name)] = c;
+      if (p) index(byStem, cpStem(p.name), c);
     });
   });
-  var cardOfFolder = function (name) {
-    var n = name.toLowerCase();
-    if (byFolder[n]) return byFolder[n];
+  var folderKey = function (name) {
     var sp = cpLetterSplit(name, rtLetters);
-    var code = cpArtCode(null, sp ? sp.rest : name.replace(/^(?:!|\d{1,2})_/, ''));
-    if (!code) return null;
-    return cards.filter(function (c) { return String(c.cpArticle || '').split(/,\s*/).indexOf(code) !== -1; })[0]
-      || cards.filter(function (c) { return cpArtCode(null, c.title) === code; })[0] || null;
+    return (sp ? sp.rest : name.replace(/^(?:!|\d{1,2})_/, '')).replace(/_(?:доработка|брак)$/i, '').normalize('NFC').toLowerCase();
+  };
+  var cardOfFolder = function (name, parent) {
+    var key = folderKey(name), exact = byFolder[name.toLowerCase()] || [];
+    var code = cpArtCode(null, key);
+    var byCode = !code ? [] : cards.filter(function (c) {
+      return String(c.cpArticle || '').split(/,\s*/).indexOf(code) !== -1;
+    });
+    var candidates = exact.length ? exact : byCode.length ? byCode : !code ? [] : cards.filter(function (c) {
+      return cpArtCode(null, c.title) === code;
+    });
+    if (candidates.length < 2) return candidates[0] || null;
+    if (!cpSixCode(key) && !candidates.some(function (c) { return cpSixCode(c.cpArticle); })) {
+      return exact.length ? exact[exact.length - 1] : candidates[0];
+    }
+    var path = parent.map(folderKey).concat(key).join('/');
+    var full = candidates.filter(function (c) {
+      var rel = String(c.cpArticleDir || '').split('/').map(folderKey).join('/');
+      return rel && rel.indexOf('/') !== -1 && (path === rel || path.slice(-rel.length - 1) === '/' + rel);
+    });
+    return full.length === 1 ? full[0] : false;
   };
   var groups = {}, unmatched = [];
   files.forEach(function (x, i) {
     var s = segs[i];
-    /* карточка — по самой глубокой папке, которая на неё похожа (лук/артикул/файл тоже подходит), иначе по имени кадра */
+    /* Ближайшая папка артикула имеет приоритет. Не подставляем случайную карточку, если код повторяется. */
     var card = null;
-    for (var k = s.length - 2; k >= 0 && !card; k--) card = cardOfFolder(s[k]);
-    card = card || byStem[cpStem(x.file.name)] || null;
-    if (!card) {
+    for (var k = s.length - 2; k >= 0 && card === null; k--) card = cardOfFolder(s[k], s.slice(0, k));
+    var names = byStem[cpStem(x.file.name)] || [];
+    if (card === null && (names.length === 1 || (names.length && !names.some(function (c) { return cpSixCode(c.cpArticle); })))) card = names[0];
+    if (card === null) {
       var code = cpFileArticleCode(x.file.name, rtLetters);
-      if (code) card = cardOfFolder(code);
+      if (code) card = cardOfFolder(code, []);
     }
     if (!card) { unmatched.push(s.join('/')); return; }
     (groups[card.id] = groups[card.id] || []).push({ file: x.file, name: x.file.name });

@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.125';
+var CP_VERSION = '2.0.126';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -501,6 +501,7 @@ function cpFlushSave() {
 }
 
 function cpOpenShoot(path, name) {
+  if (typeof cpConfirmArticleLeave === 'function' && CP.shoot && CP.shoot.path !== path && !cpConfirmArticleLeave()) return;
   /* сначала дописываем отбор открытой съёмки, потом переключаемся */
   if (CP.shoot && CP.shoot.path !== path && (App.dirty || CP.saving)) {
     cbBusyShow('Сохраняю отбор съёмки ' + CP.shoot.name + '...', 0.05);
@@ -649,7 +650,9 @@ function cpWalkAll(path, fresh) {
 }
 
 function cpSyncPhotos(initial) {
-  return cpWalk(CP.shoot.path, !initial).then(function (files) {
+  var shoot = CP.shoot;
+  return cpWalk(shoot.path, !initial).then(function (files) {
+    if (CP.shoot !== shoot) return 0;
     CP.files = files;
     var added = cpMergeFiles();
     if (added.length) {

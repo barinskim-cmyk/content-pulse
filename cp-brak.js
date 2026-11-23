@@ -1,32 +1,4 @@
-/* ============================================================
-   cp-brak.js — брак: вид, комментарий, папка _БРАК в архиве
-
-   Маша, 09.11.2026: «коллега отправила фотографии в брак — они никуда не
-   уехали; непонятно, куда уезжает брак». «В архиве — подпапка брак, в
-   которую переносится забракованная карточка, сохраняя структуру съёмки.
-   Брак бывает двух видов — по стилю и по фото (технике выполнения). Каждый
-   раз при переносе в брак — поле, как в ретуши, с комментарием, чтобы потом
-   на это опираться». «Пометка о браке должна сохраняться, чтобы легко
-   посчитать, вытащить, посмотреть».
-
-   «В брак» (кадр, карточка, пачка отмеченных, просмотр крупно):
-     1. окно: вид брака (стиль / фото — техника) и комментарий;
-     2. отметка в отборе: статус «брак» + вид + комментарий + кто + когда;
-     3. копия кадров в  КАТАЛОГ/00_АРХИВ/_БРАК/<съёмка>/<папки как в исходниках>
-        (кадр карточки артикула — в папку артикула). Исходники в 01 не трогаем;
-        без каталога — в <служебная папка>/брак/<съёмка>/;
-     4. копии этих кадров в ретуши (03) — в Корзину; на согласовании (02)
-        их убирает сверка согласования (статус больше не «согласование»);
-     5. строка в _ContentPulse/брак.csv: дата, съёмка, карточка, кадров, вид,
-        комментарий, кто — для подсчёта по всем съёмкам.
-   Всё, что двигает файлы, идёт через очередь переносов (cp-queue.js):
-   переносит, пока не перенесёт. «Снять статус» с брака — копия из _БРАК в
-   Корзину и строка «снято» в брак.csv.
-
-   Отбор хранит копии в meta.cp.brak: {кадр: путь копии в _БРАК}.
-   Префикс: cpBrak*.
-   ============================================================ */
-
+/* Брак: причина и комментарий, копия в архиве, отметка в карточке. */
 var CP_BRAK_KINDS = [['style', 'по стилю'], ['photo', 'по фото — техника выполнения']];
 var CP_BRAK_FILE = 'брак.csv';
 var CP_BRAK_HEAD = 'дата;время;съёмка;карточка;кадров;вид;комментарий;кто;событие';
@@ -77,17 +49,19 @@ function cpBrakAsk(title, cb) {
 
 /* ---------- применить ---------- */
 
-/**
- * В брак (Маша, 10.11.2026): сначала копия в _БРАК, потом статус — «статус появляется на основании
- * того, что что-то наличествует на Диске в нужном месте». groups: [{cardId, pids}], info: {kind, note}.
- * Скопировалось — кадр (и карточка) в браке, копия из 03 уходит в Корзину, строка в брак.csv.
- * Не скопировалось сразу — копия в очередь, статус появится, когда она доедет (CPQ.after['brak-st']).
- */
+/** Отдельные кадры копируются по одному, связанные карточки — папкой целиком. */
 function cpBrakSend(groups, info) {
   if (!CP.shoot) return;
   var shoot = { path: CP.shoot.path, name: CP.shoot.name }, m = cpMeta(), who = cpActor();
   var root = cpBrakRoot(shoot.name);
   if (!root) return;
+  groups = groups.filter(function (group) {
+    var card = group.cardId && cbCardById(group.cardId);
+    if (!cpWholeLinkedCard(card, group.pids)) return true;
+    cpQueueArticleBrak(card, true, info);
+    return false;
+  });
+  if (!groups.length) return;
   m.brak = m.brak || {};
   var items = [], cardOf = {}, relOf = {}, seen = {}, nofile = 0;
   groups.forEach(function (g) {
@@ -215,7 +189,11 @@ cpDoAction = (function (orig) {
       });
       return;
     }
-    /* сняли брак или поставили другой статус — копия из _БРАК больше не брак */
+    var linked = cardId && cbCardById(cardId);
+    if (!status && cpWholeLinkedCard(linked, pids) && cpArticleIsBrak(linked.cpArticleDir)) {
+      cpQueueArticleBrak(linked, false);
+      return;
+    }
     if (pids && pids.length) {
       var was = pids.filter(function (pid) { var s = cpMeta().status[pid]; return s && s.s === 'reshoot'; });
       var r = orig.apply(self, args);
@@ -240,6 +218,21 @@ cpBatchStatus = (function (orig) {
       cpBrakAsk('карточек ' + cards.length + ' · кадров ' + all.length, function (info) {
         cpBrakSend(groups, info);   /* копия в _БРАК -> статус */
       });
+      return;
+    }
+    if (!status) {
+      var checked = CP.checked;
+      CP.checked = Object.assign({}, checked);
+      cards.forEach(function (card) {
+        if (!cpLinkedArticle(card) || !cpArticleIsBrak(card.cpArticleDir)) return;
+        cpQueueArticleBrak(card, false);
+        delete CP.checked[card.id];
+      });
+      try {
+        var remaining = cpCheckedCards();
+        remaining.forEach(function (card) { cpBrakUndo(cpCardPids(card), card.id); });
+        if (remaining.length) return orig.apply(self, args);
+      } finally { CP.checked = checked; }
       return;
     }
     if (cards.length) {

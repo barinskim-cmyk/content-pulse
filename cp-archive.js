@@ -43,6 +43,7 @@ function cpArchAssess(data, codes, site, rejected) {
   (data.cards || []).forEach(function (card) {
     var pids = card.mode === 'auto' ? (card.pids || []) : (card.slots || []).map(function (slot) { return slot.pid; }).filter(Boolean);
     var status = (cardStatus[card.id] || {}).s;
+    if (card.cpFolderMissing) return;
     if (!card.cpArticle && !pids.length && status !== 'reshoot') return;
     var articles = String(card.cpArticle || '').split(',').map(function (code) { return code.trim(); }).filter(Boolean);
     var ids = articles.length ? articles.map(function (code) { return 'art:' + code; }) : ['card:' + card.id];
@@ -88,7 +89,15 @@ function cpArchVerify(d, fresh) {
       files = files.filter(function (file) { return fromSource(file.path); });
       files.dirs = (r[0].dirs || []).filter(function (p) { return fromSource(p + '/'); });
     }
-    return cpArchAssess(r[1].data, cpArticleCodes(d.path, d.name, files), site, rejected);
+    var data = r[1].data || {}, cards = data.cards || [], m = (data.meta || {}).cp || {};
+    var records = m.articleBrak || {}, codes = cpArticleCodes(d.path, d.name, files);
+    var suffixPaths = new Set((files.dirs || []).filter(cpArticleIsBrak));
+    return cpPool(cards.filter(function (card) { return records[card.id]; }), 3, function (card) {
+      return cpArticleMeta(records[card.id].path).then(function (entry) {
+        var here = suffixPaths.has(d.path.replace(/\/+$/, '') + '/' + card.cpArticleDir);
+        if ((!entry || !here) && m.cardStatus && (m.cardStatus[card.id] || {}).s === 'reshoot') delete m.cardStatus[card.id];
+      });
+    }).then(function () { return cpArchAssess(data, codes, site, rejected); });
   });
 }
 
@@ -302,7 +311,7 @@ function cpArchiveVerified(sel, root, c) {
   var base = root.replace(/\/+$/, '') + '/' + sel.name;
   var msg = 'Перенести съёмку «' + sel.name + '» в ' + cpFolderBase(root) + '?\n\n'
     + 'На сайте: ' + c.site + ' · В браке: ' + c.brak + '.\n'
-    + 'Исходники переедут в архив. Готовые файлы скопируются в «Готово», брак — в «Брак».';
+    + 'Исходники переедут в архив. Готовые файлы скопируются в «Готово». Копии забракованных артикулов хранятся в «_БРАК».';
   if (!window.confirm(msg)) return;
   var shoot = { path: sel.path, name: sel.name };
   var ready = CP.shoot && CP.shoot.path === sel.path ? cpFlushSave() : Promise.resolve();
@@ -345,10 +354,11 @@ function cpArchiveVerified(sel, root, c) {
   }).then(function () {
     /* 3. брак — внутрь съёмки */
     var brak = root.replace(/\/+$/, '') + '/_БРАК/' + CPDisk.safeName(sel.name);
-    return CPDisk.meta(brak).then(function () {
-      cbBusyShow('Переношу брак...', 0.75);
-      return cpMoveFolder(brak, moved + '/Брак').then(function () { return 1; }, function (e) { report.push('брак не перенёсся: ' + ((e && e.message) || e)); return 0; });
-    }, function () { return 0; });
+    return Promise.all([cpArticleMeta(brak), cpArticleMeta(brak + '/_Версии')]).then(function (folders) {
+      if (!folders[0] || folders[1]) return 0;
+      cbBusyShow('Переношу старый брак...', 0.75);
+      return cpMoveFolder(brak, moved + '/Брак').then(function () { return 1; });
+    }).catch(function (e) { report.push('старый брак не перенёсся: ' + ((e && e.message) || e)); return 0; });
   }).then(function () {
     cbBusyHide();
     var now = new Date().toISOString();
