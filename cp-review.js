@@ -1116,9 +1116,23 @@ cpSelectShoot = (function (orig) {
     cpRenderPanel();
     var sel = CP.sel, low = String(name).toLowerCase();
     sel.stageTags = {};
+    var repaint = false;
+    sel.stageFolderPreview = [];
     var walk = function (p) {
-      return CPDisk.walkPhotos(p, false, 4, true).then(function (files) { return { root: p, files: files, dirs: files.dirs || [] }; },
-        function (e) { return { root: p, files: [], dirs: [], error: e }; });
+      var preview = { root: p, files: [], dirs: [] };
+      var onDirs = key === 'retouch' ? function (dirs) {
+        if (CP.sel !== sel) return;
+        if (!preview.dirs.length) sel.stageFolderPreview.push(preview);
+        preview.dirs = preview.dirs.concat(dirs);
+        if (repaint) return;
+        repaint = true;
+        requestAnimationFrame(function () {
+          repaint = false;
+          if (CP.sel === sel && sel.loading) cpRenderPanel();
+        });
+      } : null;
+      return CPDisk.walkPhotos(p, false, 4, true, null, onDirs).then(function (files) { return { root: p, files: files, dirs: files.dirs || [] }; },
+        function (e) { return { root: p, files: [], dirs: preview.dirs, error: e }; });
     };
     var rtPaths = key === 'review' && CP.stagePaths.retouch ? (CP.stagePaths.retouch[low] || []) : [];
     Promise.all([
@@ -1526,7 +1540,12 @@ cpRenderPanel = (function (orig) {
       + '<span class="cp-sp"></span><button data-cp-p="close" title="Закрыть панель">×</button></div>';
     var acts = '<button data-cp-p="open">Открыть</button>' + (sel.stage === 'review' ? '<button data-cp-accept title="Загрузить готовую ретушь">Сдать</button>' : '');
     if (sel.loading) {
-      panel.innerHTML = head + '<div class="cp-panel-body"><div class="cp-note">Читаю папку ' + cbEsc(label) + '...</div></div><div class="cp-panel-actions"><div class="cp-sum"></div>' + acts + '</div>';
+      var preview = (sel.stageFolderPreview || []).map(function (x) {
+        return x.dirs.map(function (d) { return d.slice(x.root.length + 1); }).sort(function (a, b) { return a.localeCompare(b, undefined, { numeric: true }); })
+          .map(function (d) { return '<div class="cp-fold">' + cbEsc(d) + '</div>'; }).join('');
+      }).join('');
+      panel.innerHTML = head + '<div class="cp-panel-body"><div class="cp-note">Читаю папку ' + cbEsc(label) + '…</div>' + preview
+        + '</div><div class="cp-panel-actions"><div class="cp-sum"></div>' + acts + '</div>';
       return;
     }
     var t = cpStageTree(sel);
@@ -1538,7 +1557,8 @@ cpRenderPanel = (function (orig) {
     var needWho = rt && rtLetters.length > 0 && !sel.who;
     var body = cpStageWhoChips(sel, t.taken) + cpStageScopeChips(sel) + cpStageChips(sel) + '<div class="cp-fold cp-fold-all"><span class="cp-fold-name">' + cbEsc(label) + ' <small>· файлов ' + t.files + ' · ' + cpMb(t.bytes) + '</small></span></div>';
     var top = t.kids[''] || [];
-    if (!top.length) body += '<div class="cp-note">' + (t.files ? 'Вложенных папок нет — файлы лежат прямо в папке съёмки.'
+    var errs = sel.stageFiles.filter(function (x) { return x.error; });
+    if (!top.length && !errs.length) body += '<div class="cp-note">' + (t.files ? 'Вложенных папок нет — файлы лежат прямо в папке съёмки.'
       : rt && t.taken ? 'Забирать нечего: всё, что здесь лежит, уже скачано или сдано. Посмотреть — «показать скачанное и сданное» вверху.' : 'Папка пустая.') + '</div>';
     var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
     if (top.length === 1 && sel.open[top[0]] === undefined) sel.open[top[0]] = true;   /* одна папка — сразу раскрыта */
@@ -1563,7 +1583,6 @@ cpRenderPanel = (function (orig) {
       if (open) ch.forEach(function (c) { row(c, depth + 1); });
     };
     top.forEach(function (fp) { row(fp, 0); });
-    var errs = sel.stageFiles.filter(function (x) { return x.error; });
     if (errs.length) body += '<div class="cp-note cp-warn">Не прочиталось: ' + errs.map(function (x) { return cbEsc(CPDisk.showPath(x.root)); }).join(', ') + '</div>';
     body += '<div class="cp-note">' + sel.stagePaths.map(function (p) { return cbEsc(CPDisk.showPath(p)); }).join('<br>') + '</div>';
     panel.setAttribute('data-path', sel.path);

@@ -279,147 +279,179 @@ function cpStageRecentApply() {
   });
 }
 
-function cpScanStages() {
-  var s = CP.settings || {}, archive = CP.archive;
+function cpReadStage(key, archive, s, preview) {
+  var root = s[CP_STAGE_SETTING[key]];
+  if (!root) return Promise.resolve([key, null]);
   var known = {};
   (CP.shoots || []).forEach(function (d) { known[d.name.toLowerCase()] = true; });
   var shootLike = /^\d{4}-\d{2}-\d{2}_./;
-  var readKey = function (key) {
-    var root = s[CP_STAGE_SETTING[key]];
-    if (!root) return Promise.resolve([key, null]);
-    var names = {}, where = {}, info = {};
-    /* «Сайт» читаем в том виде, как туда сдают сейчас (Маша, 10.11.2026: «структура шибанутая — дата /
-       буква / номер / съёмка / партия; на время тестирования её сохраняем, программа должна уметь
-       читать и её, и ту, которую хотим»): папка съёмки ищется на любом уровне до пятого. */
-    var maxDepth = key === 'site' ? 6 : 3;   /* с запасом: «готово» / дата / буква / номер / съёмка (Маша, 10.11: «ещё папки с датами в папке готово») */
-    var oldDates = [];
-    var level = function (paths, depth, into, inOld) {
-      if (!paths.length || depth > maxDepth) return Promise.resolve();
-      return cpPool(paths, 4, function (p) { return cpListDirs(p, key === 'site' ? 2 : 0); }).then(function (lists) {
-        var next = [];
-        lists.forEach(function (ds) {
-          /* «Сайт»: среди соседних папок-дат каждый раз читаем только две самых свежих; остальные — из
-             запомненного, перечитываем, только если папка даты изменилась (Маша, 11.11.2026: «очень долго
-             сверяет сайт — хранить прошлые даты, считывать только последние две, не добавили ли новое») */
-          var fresh = {};
-          if (key === 'site' && !inOld && typeof cpSiteDateName === 'function') {
-            (ds || []).map(function (x) { return { x: x, d: cpSiteDateName(x.name) }; }).filter(function (o) { return o.d; })
-              .sort(function (a, b) { return a.d < b.d ? 1 : a.d > b.d ? -1 : 0; })
-              .slice(0, CP.siteFreshDates).forEach(function (o) { fresh[o.x.path] = true; });
+  var names = {}, where = {}, info = {};
+  /* «Сайт» читаем в том виде, как туда сдают сейчас (Маша, 10.11.2026: «структура шибанутая — дата /
+     буква / номер / съёмка / партия; на время тестирования её сохраняем, программа должна уметь
+     читать и её, и ту, которую хотим»): папка съёмки ищется на любом уровне до пятого. */
+  var maxDepth = key === 'site' ? 6 : 3;   /* с запасом: «готово» / дата / буква / номер / съёмка (Маша, 10.11: «ещё папки с датами в папке готово») */
+  var oldDates = [];
+  var level = function (paths, depth, into, inOld) {
+    if (!paths.length || depth > maxDepth) return Promise.resolve();
+    return cpPool(paths, 4, function (p) {
+      var prio = key === 'retouch' ? 0 : key === 'site' ? 2 : 1;
+      /* 404 на корне этапа — ошибка доступа или путь исчез, а не пустой список. */
+      return depth === 1 && key === 'retouch' ? CPDisk.listDir(p, null, prio).then(function (items) {
+        return items.filter(function (x) { return x.type === 'dir'; });
+      }) : cpListDirs(p, prio);
+    }).then(function (lists) {
+      var next = [];
+      lists.forEach(function (ds) {
+        /* «Сайт»: среди соседних папок-дат каждый раз читаем только две самых свежих; остальные — из
+           запомненного, перечитываем, только если папка даты изменилась (Маша, 11.11.2026: «очень долго
+           сверяет сайт — хранить прошлые даты, считывать только последние две, не добавили ли новое») */
+        var fresh = {};
+        if (key === 'site' && !inOld && typeof cpSiteDateName === 'function') {
+          (ds || []).map(function (x) { return { x: x, d: cpSiteDateName(x.name) }; }).filter(function (o) { return o.d; })
+            .sort(function (a, b) { return a.d < b.d ? 1 : a.d > b.d ? -1 : 0; })
+            .slice(0, CP.siteFreshDates).forEach(function (o) { fresh[o.x.path] = true; });
+        }
+        (ds || []).forEach(function (x) {
+          /* «!_» или «1_» спереди — очерёдность; « +» в конце — пометка, которую ставят руками на Диске
+             (скриншот Маши 10.11.2026: «2026-10-14_SV_МОДЕЛЬ_ЖЕН_Andamane +») — это та же съёмка */
+          var bare = x.name.replace(/^(!|\d{1,2})_/, '').replace(/\s*\+\s*$/, '');
+          if (known[bare.toLowerCase()] || shootLike.test(bare)) {
+            into.names[bare.toLowerCase()] = true;
+            (into.where[bare.toLowerCase()] = into.where[bare.toLowerCase()] || []).push(x.path);
+            into.info[x.path] = { props: x.custom_properties || {}, modified: x.modified || '' };   /* метки папки (скачано из «Сайта» и т. п.) */
           }
-          (ds || []).forEach(function (x) {
-            /* «!_» или «1_» спереди — очерёдность; « +» в конце — пометка, которую ставят руками на Диске
-               (скриншот Маши 10.11.2026: «2026-10-14_SV_МОДЕЛЬ_ЖЕН_Andamane +») — это та же съёмка */
-            var bare = x.name.replace(/^(!|\d{1,2})_/, '').replace(/\s*\+\s*$/, '');
-            if (known[bare.toLowerCase()] || shootLike.test(bare)) {
-              into.names[bare.toLowerCase()] = true;
-              (into.where[bare.toLowerCase()] = into.where[bare.toLowerCase()] || []).push(x.path);
-              into.info[x.path] = { props: x.custom_properties || {}, modified: x.modified || '' };   /* метки папки (скачано из «Сайта» и т. п.) */
-            }
-            else if (x.name.charAt(0) !== '_') {
-              /* «Сайт»: папки дат старше 7 дней каждый раз не перечитываем (Маша, 10.11) — берём запомненное, см. ниже */
-              if (key === 'site' && !inOld && cpSiteDateName(x.name) && !fresh[x.path]) { oldDates.push({ x: x, depth: depth }); return; }
-              next.push(x.path);
-            }
-          });
+          else if (x.name.charAt(0) !== '_') {
+            /* «Сайт»: папки дат старше 7 дней каждый раз не перечитываем (Маша, 10.11) — берём запомненное, см. ниже */
+            if (key === 'site' && !inOld && cpSiteDateName(x.name) && !fresh[x.path]) { oldDates.push({ x: x, depth: depth }); return; }
+            next.push(x.path);
+          }
         });
-        return level(next, depth + 1, into, inOld);
       });
-    };
-    var cur = { names: names, where: where, info: info };
-    /* Старые даты «Сайта»: что там лежит, нужно знать (сдано ли всё — можно ли съёмку в архив), но
-       перечитывать их каждые 40 секунд незачем. Читаем один раз и запоминаем в браузере; папка даты
-       изменилась (или нажали «Обновить») — читаем её заново. */
-    var readOld = function () {
-      if (key !== 'site' || !oldDates.length) return;
-      var cache = cpSiteOldCache(archive), dirty = false;
-      /* папка дня изменилась — или в неё положили дроп (отметка cp_touch: дата папки на Диске от вложенных
-         папок не меняется, а дроп, принятый позже, ложится в папку своего дня) — перечитать */
-      var sig = function (x) { return (x.modified || '') + ((x.custom_properties || {}).cp_touch ? '|' + x.custom_properties.cp_touch : ''); };
-      var todo = oldDates.filter(function (o) { var c = cache[o.x.path]; return !(c && c.mod === sig(o.x)); });
-      return cpPool(todo, 2, function (o) {
-        var part = { names: {}, where: {}, info: {} };
-        return level([o.x.path], o.depth + 1, part, true).then(function () {
-          cache[o.x.path] = { mod: sig(o.x), where: part.where, info: part.info };
-          dirty = true;
-        }, function () { });
-      }).then(function () {
-        var alive = {};
-        oldDates.forEach(function (o) { alive[o.x.path] = true; });
-        Object.keys(cache).forEach(function (k) { if (!alive[k]) { delete cache[k]; dirty = true; } });
-        var of = {};
-        oldDates.forEach(function (o) {
-          var c = cache[o.x.path];
-          if (!c) return;
-          Object.keys(c.where || {}).forEach(function (low) {
-            names[low] = true;
-            c.where[low].forEach(function (pth) { if ((where[low] = where[low] || []).indexOf(pth) === -1) where[low].push(pth); of[pth] = o.x.path; });
-          });
-          Object.keys(c.info || {}).forEach(function (pth) { info[pth] = c.info[pth]; });
-        });
-        CP.siteOld = cache;        /* дата -> что в ней; cp-catalog.js дописывает сюда артикулы */
-        CP.siteOldOf = of;         /* папка съёмки в старой дате -> папка даты */
-        CP.siteOldFor = archive;
-        if (dirty) cpSiteOldSave(archive, cache);
-      });
-    };
-    /* «Сайт» может быть не один: вторая папка с готовым («ГОТОВО» рядом с «05_САЙТ») читается так же */
-    var roots = [root].concat(key === 'site' ? (s.siteMore || []) : []);
-    return level(roots, 1, cur, false).then(readOld).then(function () { return [key, names, where, info]; }, function (e) { return [key, 'fail', e]; });
-  };
-  /* По этапам, а не всё разом (Маша, 17.11.2026: «исходники появляются моментально, а ретушь по несколько
-     минут»): сначала 02, 03, 04 — их папки неглубокие, ретушь показывается, как только они прочитаны;
-     затем одновременно счёт артикулов на них и чтение «Сайта» (до шести уровней вглубь), потом счёт на «Сайте»;
-     архив — после всего.
-     Папка этапа не прочиталась (сеть, Диск ответил ошибкой или «слишком много запросов») — это не
-     «в папке пусто»: остаётся прежнее (Маша, 10.11.2026: «сначала показала, что есть в ретуши, потом перестала»). */
-  var failed = [];
-  var applyWave = function (pairs) {
-    if (CP.archive !== archive) return false;
-    var same = CP.stageFor === archive;
-    var P = same ? Object.assign({}, CP.stagePresence || {}) : {}, W = same ? Object.assign({}, CP.stagePaths || {}) : {}, I = same ? Object.assign({}, CP.stageInfo || {}) : {};
-    CP.stageReadFor = CP.stageReadFor || {};
-    pairs.forEach(function (kv) {
-      var k = kv[0];
-      CP.stageReadFor[k] = archive;   /* этот этап этой витрины уже читали (для «Читаю папку…») */
-      if (kv[1] === 'fail') {
-        failed.push(k);
-        if (window.console) console.warn('[CP] папка этапа не прочиталась: ' + k, kv[2] && (kv[2].status || kv[2].message || kv[2]));
-        return;
-      }
-      if (kv[1]) { P[k] = kv[1]; W[k] = kv[2]; I[k] = kv[3] || {}; }
-      else { delete P[k]; delete W[k]; delete I[k]; }
+      if (preview && next.length) preview(into);
+    return level(next, depth + 1, into, inOld);
     });
-    if (CP.stageFor && CP.stageFor !== archive) CP.stageRecent = {};   /* открыли другую папку — свежие отметки прежней к ней не относятся */
-    CP.stagePresence = P;
-    CP.stagePaths = W;
-    CP.stageInfo = I;
-    CP.stageFor = archive;
-    cpStageRecentApply();
-    cpRenderShoots();
-    return true;
   };
+  var cur = { names: names, where: where, info: info };
+  /* Старые даты «Сайта»: что там лежит, нужно знать (сдано ли всё — можно ли съёмку в архив), но
+     перечитывать их каждые 40 секунд незачем. Читаем один раз и запоминаем в браузере; папка даты
+     изменилась (или нажали «Обновить») — читаем её заново. */
+  var readOld = function () {
+    if (key !== 'site' || !oldDates.length) return;
+    var cache = cpSiteOldCache(archive), dirty = false;
+    /* папка дня изменилась — или в неё положили дроп (отметка cp_touch: дата папки на Диске от вложенных
+       папок не меняется, а дроп, принятый позже, ложится в папку своего дня) — перечитать */
+    var sig = function (x) { return (x.modified || '') + ((x.custom_properties || {}).cp_touch ? '|' + x.custom_properties.cp_touch : ''); };
+    var todo = oldDates.filter(function (o) { var c = cache[o.x.path]; return !(c && c.mod === sig(o.x)); });
+    return cpPool(todo, 2, function (o) {
+      var part = { names: {}, where: {}, info: {} };
+      return level([o.x.path], o.depth + 1, part, true).then(function () {
+        cache[o.x.path] = { mod: sig(o.x), where: part.where, info: part.info };
+        dirty = true;
+      }, function () { });
+    }).then(function () {
+      var alive = {};
+      oldDates.forEach(function (o) { alive[o.x.path] = true; });
+      Object.keys(cache).forEach(function (k) { if (!alive[k]) { delete cache[k]; dirty = true; } });
+      var of = {};
+      oldDates.forEach(function (o) {
+        var c = cache[o.x.path];
+        if (!c) return;
+        Object.keys(c.where || {}).forEach(function (low) {
+          names[low] = true;
+          c.where[low].forEach(function (pth) { if ((where[low] = where[low] || []).indexOf(pth) === -1) where[low].push(pth); of[pth] = o.x.path; });
+        });
+        Object.keys(c.info || {}).forEach(function (pth) { info[pth] = c.info[pth]; });
+      });
+      CP.siteOld = cache;        /* дата -> что в ней; cp-catalog.js дописывает сюда артикулы */
+      CP.siteOldOf = of;         /* папка съёмки в старой дате -> папка даты */
+      CP.siteOldFor = archive;
+      if (dirty) cpSiteOldSave(archive, cache);
+    });
+  };
+  /* «Сайт» может быть не один: вторая папка с готовым («ГОТОВО» рядом с «05_САЙТ») читается так же */
+  var roots = [root].concat(key === 'site' ? (s.siteMore || []) : []);
+  return level(roots, 1, cur, false).then(readOld).then(function () { return [key, names, where, info]; }, function (e) { return [key, 'fail', e]; });
+}
+
+/* Папки, уже найденные в 03, можно показать, пока читаются вложенные группы.
+   До успешного конца обхода оставляем и папки из прошлой сверки. */
+function cpPreviewRetouch(archive, root, partial) {
+  if (CP.archive !== archive || (CP.settings || {}).retouch !== root) return;
+  var same = CP.stageFor === archive, changed = false;
+  var where = Object.assign({}, same && (CP.stagePaths || {}).retouch);
+  Object.keys(partial.where).forEach(function (low) {
+    var previous = where[low] || [];
+    var additions = partial.where[low].filter(function (path) { return previous.indexOf(path) === -1; });
+    if (additions.length) {
+      changed = true;
+      where[low] = previous.concat(additions);
+    }
+  });
+  if (!changed) return;
+  cpApplyStage(archive, ['retouch', Object.assign({}, same && CP.stagePresence.retouch, partial.names),
+    where, Object.assign({}, same && (CP.stageInfo || {}).retouch, partial.info)], true);
+}
+
+function cpApplyStage(archive, result, partial) {
+  if (CP.archive !== archive) return;
+  if (CP.stageFor !== archive) {
+    CP.stagePresence = {}; CP.stagePaths = {}; CP.stageInfo = {}; CP.stageReadFor = {}; CP.stageFailed = [];
+    if (CP.stageFor) CP.stageRecent = {};
+    CP.stageFor = archive;
+  }
+  var k = result[0], value = result[1];
+  CP.stageFailed = CP.stageFailed || [];
+  if (value === 'fail') {
+    if (CP.stageFailed.indexOf(k) === -1) {
+      CP.stageFailed.push(k);
+      cbToast('Не прочиталась папка этапа: ' + cpStageLabel(k) + ' — показываю, что было, и попробую ещё раз');
+    }
+    if (window.console) console.warn('[CP] папка этапа не прочиталась: ' + k, result[2] && (result[2].status || result[2].message || result[2]));
+  } else {
+    if (!partial) {
+      CP.stageFailed = CP.stageFailed.filter(function (failed) { return failed !== k; });
+      (CP.stageReadFor = CP.stageReadFor || {})[k] = archive;
+    }
+    if (value) { CP.stagePresence[k] = value; CP.stagePaths[k] = result[2]; CP.stageInfo[k] = result[3] || {}; }
+    else { delete CP.stagePresence[k]; delete CP.stagePaths[k]; delete CP.stageInfo[k]; }
+  }
+  cpStageRecentApply();
+  cpRenderShoots();
+}
+
+/* Список 03 обновляется своей очередью: текущий обход «Сайта» не задерживает новую папку ретуши. */
+var _cpRetouchRead = null, _cpRetouchReadAt = 0;
+function cpScanRetouch(archive, settings) {
+  var root = settings.retouch;
+  if (_cpRetouchRead && _cpRetouchRead.archive === archive && _cpRetouchRead.root === root) return _cpRetouchRead.promise;
+  var read = { archive: archive, root: root };
+  _cpRetouchRead = read;
+  _cpRetouchReadAt = Date.now();
+  read.promise = cpReadStage('retouch', archive, settings, function (partial) {
+    if (_cpRetouchRead === read) cpPreviewRetouch(archive, root, partial);
+  }).then(function (result) {
+    if (_cpRetouchRead !== read) return;
+    _cpRetouchRead = null;
+    if ((CP.settings || {}).retouch === root) cpApplyStage(archive, result);
+  });
+  return read.promise;
+}
+
+function cpScanStages() {
+  var settings = Object.assign({}, CP.settings), archive = CP.archive;
   var count = function (keys) {
     return typeof cpCountStageArts === 'function' ? Promise.resolve(cpCountStageArts(keys)).catch(function (e) { if (window.console) console.warn('[CP] счёт артикулов', e); }) : Promise.resolve();
   };
-  var all = Object.keys(CP_STAGE_SETTING), first = all.filter(function (k) { return k !== 'site'; }), last = all.filter(function (k) { return k === 'site'; });
-  return Promise.all(first.map(readKey)).then(function (pairs) {
-    if (!applyWave(pairs)) return;
-    /* счёт на 02/03/04 и чтение «Сайта» идут одновременно; «Сайт» начинает читаться, когда 02/03/04 уже на витрине */
-    var siteDone = Promise.all(last.map(readKey)).then(function (pairs2) {
-      if (!applyWave(pairs2)) return;
-      return count(last);
+  var first = ['retouch', 'approval', 'review'];
+  var other = function (key) {
+    return cpReadStage(key, archive, settings).then(function (result) {
+      if ((CP.settings || {})[CP_STAGE_SETTING[key]] === settings[CP_STAGE_SETTING[key]]) cpApplyStage(archive, result);
     });
-    return Promise.all([count(first), siteDone]).then(function () {
-      if (CP.archive !== archive) return;
-      /* сказать один раз, а не каждые 45 секунд */
-      var sig = failed.join(',');
-      if (sig && sig !== CP.stageFailedSig) {
-        cbToast('Не прочиталась папка этапа: ' + failed.map(function (k) { return cpStageLabel(k); }).join(', ') + ' — показываю, что было, и попробую ещё раз');
-      }
-      CP.stageFailedSig = sig;
-      CP.stageFailed = failed;
-    });
+  };
+  return Promise.all([cpScanRetouch(archive, settings), other('approval'), other('review')]).then(function () {
+    if (CP.archive !== archive) return;
+    var siteDone = other('site').then(function () { if (CP.archive === archive) return count(['site']); });
+    return Promise.all([count(first), siteDone]);
   }).then(cpAfterStagesFlush, function (e) { if (window.console) console.warn('[CP] этапы', e); cpAfterStagesFlush(); });
 }
 
@@ -479,6 +511,7 @@ function cpStageList() {
     CP.stageFilter = b.getAttribute('data-cp-stage');
     cpSet('cp_stage', CP.stageFilter);
     cpRenderShoots();
+    if (CP.stageFilter === 'retouch' && (CP.settings || {}).retouch && Date.now() - _cpRetouchReadAt > 5000) cpScanRetouch(CP.archive, CP.settings);
   });
 })();
 
@@ -533,8 +566,10 @@ cpRenderShoots = (function (orig) {
       /* папки этапов этой витрины ещё не дочитаны — не «пусто», а «читаю» (Маша, 17.11.2026: «после
          обновления страницы ретушь не показывает» — показывала через минуту) */
       var reading = typeof CP_STAGE_SETTING !== 'undefined' && CP_STAGE_SETTING[f] && (CP.stageReadFor || {})[f] !== CP.archive;
-      document.getElementById('cpShelfList').innerHTML = '<div class="cp-empty">' + (reading ? 'Читаю папку ' + cbEsc(cpStageLabel(f)) + ' с Диска… Первый раз после обновления страницы это до минуты.'
-        : pend ? 'Считаю, что нужно сделать со съёмками…' : 'Таких съёмок нет') + '</div>';
+      var failed = CP.stageFor === CP.archive && (CP.stageFailed || []).indexOf(f) !== -1;
+      document.getElementById('cpShelfList').innerHTML = '<div class="cp-empty">' + (failed ? 'Не удалось прочитать папку ' + cbEsc(cpStageLabel(f)) + ' с Диска. Попробую ещё раз.'
+        : reading ? 'Читаю папку ' + cbEsc(cpStageLabel(f)) + ' с Диска…'
+        : pend && !(CP.settings || {})[CP_STAGE_SETTING[f]] ? 'Считаю, что нужно сделать со съёмками…' : 'Таких съёмок нет') + '</div>';
     }
     /* под названием съёмки — что в ней ждёт */
     var byPath = {};

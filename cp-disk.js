@@ -246,7 +246,7 @@ var CPDisk = (function () {
   var JUNK_RE = /^(\.DS_Store|\._.*|Thumbs\.db|desktop\.ini|\.localized)$/i;
 
   /* allFiles — все файлы (видео и прочее), кроме системного мусора */
-  function walkPhotos(root, previewSize, parallel, allFiles, prio) {
+  function walkPhotos(root, previewSize, parallel, allFiles, prio, onDirs) {
     var out = [], queue = [root], active = 0, limit = parallel || 4, failed = null;
     out.dirs = [];   /* все папки съёмки (и пустые) — для карточек по папкам артикулов */
     out.dirProps = {};   /* метки папок (custom_properties) — «скачано» в «Сайте» и т. п. */
@@ -264,6 +264,8 @@ var CPDisk = (function () {
           var path = queue.shift();
           active++;
           listDir(path, ps, prio).then(function (items) {
+            if (failed) return;
+            var prevDirs = out.dirs.length;
             items.forEach(function (r) {
               if (r.type === 'dir') {
                 if (r.name.charAt(0) === '_' || r.name === RETOUCH_DIR) return;
@@ -274,6 +276,7 @@ var CPDisk = (function () {
                 out.push(r);
               }
             });
+            if (onDirs && out.dirs.length > prevDirs) onDirs(out.dirs.slice(prevDirs));
             active--;
             pump();
           }, function (e) { failed = e; reject(e); });

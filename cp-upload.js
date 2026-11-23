@@ -194,7 +194,7 @@ function cpSrcRender() {
   if (!st.busy && !st.done) {
     h += '<div class="cp-acc-drop">' + (st.target
       ? 'Перетащите сюда папку (например, «видео») или файлы — лягут в эту съёмку. Папка с именем съёмки (или «…_1», «…_2») — по её структуре.'
-      : 'Перетащите сюда папку съёмки — как на Диск. Можно несколько. Папка с именем съёмки, которая уже есть, или с «_1», «_2» на конце — это её часть: файлы добавятся в неё по её папкам.')
+      : 'Перетащите одну или несколько папок съёмок. Папки с суффиксами «_1», «_2» добавятся к существующей съёмке.')
       + '<br><label class="cp-acc-pick">выбрать папку<input type="file" data-cp-su-pick webkitdirectory multiple hidden></label>'
       + (st.target ? ' · <label class="cp-acc-pick">выбрать файлы<input type="file" data-cp-su-pick multiple hidden></label>' : '') + '</div>';
   }
@@ -625,8 +625,8 @@ cpRenderShoots = (function (orig) {
       }
     });
     if (!list || CP.stageFilter || !CP.shoots || document.getElementById('cpSrcDrop')) return r;
-    list.insertAdjacentHTML('afterbegin', '<div class="cp-src-drop" id="cpSrcDrop"><b>Загрузить съёмку</b> — перетащите папку сюда или '
-      + '<a href="#" data-cp-src-open="1">выберите</a>. Папка с именем съёмки, которая уже есть (или «…_1», «…_2»), — догрузится в неё.</div>');
+    list.insertAdjacentHTML('afterbegin', '<div class="cp-src-drop" id="cpSrcDrop"><button class="cb-primary" data-cp-src-open="1">Загрузить съёмку</button>'
+      + ' <span>или перетащите папку сюда</span></div>');
     return r;
   };
 })(cpRenderShoots);

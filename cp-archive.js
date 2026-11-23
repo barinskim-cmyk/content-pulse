@@ -6,19 +6,17 @@
    завершён цикл: все артикулы попали в папку сайт либо в брак. Брак
    должен сохраняться, чтобы потом посчитать, вытащить, посмотреть».
 
-   - Под съёмкой в исходниках — «готова к архиву», когда у неё есть
-     артикулы и все они на сайте или в браке (по сводке съёмки).
+   - Под съёмкой в исходниках — «Можно в архив», когда каждый артикул
+     или карточка съёмки подтверждены на сайте или в браке.
    - В панели съёмки — «В архив»: папка съёмки переезжает целиком
      01_ИСХОДНИКИ/<съёмка> → 00_АРХИВ/<съёмка>. Отбор (_contentpulse.json:
      карточки, статусы, брак с видом и комментарием) едет вместе с ней.
      Перенос — через проверку по Диску; не прошёл — в очередь переносов.
-     Не готова — спрашиваем, что не так, и переносим только с согласия.
-     Пока у съёмки есть незавершённые переносы — в архив нельзя.
+     Для незавершённой съёмки перенос недоступен. Копии в ретуши
+     отправляются в Корзину отдельным действием.
    - Фильтр «00_АРХИВ» — последним в строке: при запуске не читается,
      список грузится по клику. Под каждой съёмкой — сколько на сайте и в
      браке. Брак всех съёмок — в 00_АРХИВ/_БРАК (cp-brak.js) и в брак.csv.
-   Решения по умолчанию (Маша не ответила, 09.11): переносит руководитель
-   кнопкой; архив — отдельный фильтр по клику.
    Префикс: cpArch*.
    ============================================================ */
 
@@ -27,19 +25,111 @@ CP.archRoot = '';
 
 function cpArchRoot() { return (typeof cpCatalog === 'function' && cpCatalog() && CP.settings && CP.settings.archive) || ''; }
 
-/** Сколько артикулов и где: {n, site, brak, rest} по сводке съёмки; null — сводки нет. */
 function cpArchCount(d) {
   var sum = d && cpSumOf(d);
   if (!sum || !sum.k) return null;
   var n = sum.k.reduce(function (a, b) { return a + b; }, 0);
   var site = sum.k[5] || 0, brak = sum.k[6] || 0;
-  /* Сдают на сайт пока руками, без отметок программы (Маша, 10.11.2026) — считаем и по самой папке
-     сайта: сколько артикулов съёмки там лежит (все даты; cp-catalog.js). Берём большее из двух. */
-  var phys = typeof cpCatalog === 'function' && cpCatalog() && CP.stageArtsFor === CP.archive ? (CP.stageArts.site || {})[d.name.toLowerCase()] : null;
-  if (phys) site = Math.max(site, Math.min(Math.max(0, n - brak), Object.keys(phys).length));
   return { n: n, site: site, brak: brak, rest: n - site - brak };
 }
-function cpArchReady(d) { var c = cpArchCount(d); return !!(c && c.n > 0 && c.rest === 0); }
+
+/* Учитываем только артикулы из исходников и карточек этой съёмки.
+   Для съёмки без артикулов единица закрытия — карточка с кадрами. */
+function cpArchAssess(data, codes, site, rejected) {
+  data = data || {};
+  var m = (data.meta || {}).cp || {}, units = Object.create(null);
+  var cardStatus = m.cardStatus || {}, delivered = m.delivered || {}, versions = m.rv || {};
+  Object.keys(codes).forEach(function (code) { units['art:' + code] = []; });
+  (data.cards || []).forEach(function (card) {
+    var pids = card.mode === 'auto' ? (card.pids || []) : (card.slots || []).map(function (slot) { return slot.pid; }).filter(Boolean);
+    var status = (cardStatus[card.id] || {}).s;
+    if (!card.cpArticle && !pids.length && status !== 'reshoot') return;
+    var articles = String(card.cpArticle || '').split(',').map(function (code) { return code.trim(); }).filter(Boolean);
+    var ids = articles.length ? articles.map(function (code) { return 'art:' + code; }) : ['card:' + card.id];
+    var rv = versions[card.id] || [], last = rv[rv.length - 1];
+    var state = status === 'reshoot' ? 'brak' : last && last.status === 'rework' ? 'rework' : delivered[card.id] ? 'site' : 'open';
+    ids.forEach(function (id) { (units[id] = units[id] || []).push(state); });
+  });
+  var result = { n: Object.keys(units).length, site: 0, brak: 0, rest: 0, busy: !!Object.keys(m.q || {}).length, codes: [] };
+  Object.keys(units).forEach(function (id) {
+    var statuses = units[id], code = id.indexOf('art:') === 0 ? id.slice(4) : '';
+    if (code) result.codes.push(code);
+    if (statuses.indexOf('rework') !== -1) result.rest++;
+    else if ((code && Object.hasOwn(rejected, code)) || (statuses.length && statuses.every(function (st) { return st === 'brak'; }))) result.brak++;
+    else if ((code && Object.hasOwn(site, code)) || (!code && statuses[0] === 'site')) result.site++;
+    else result.rest++;
+  });
+  return result;
+}
+
+function cpArchIsComplete(c) { return !!(c && c.n > 0 && c.rest === 0 && !c.busy); }
+function cpArchReady(d) { return !!(d && cpArchIsComplete(d.cpArchCheck)); }
+
+function cpArchVerify(d, fresh) {
+  var low = d.name.toLowerCase(), archive = CP.archive;
+  var site = CP.stageArtsFor === archive ? ((CP.stageArts.site || {})[low] || {}) : {};
+  var root = cpBrakRoot(d.name);
+  var archivedBrak = d.path.indexOf(cpArchRoot() + '/') === 0 ? d.path + '/Брак' : '';
+  var missing = function (e) { if (e && e.status === 404) return []; throw e; };
+  var read = function (path) { return CPDisk.walkPhotos(path, false, 2, true, fresh ? undefined : 3).then(function (files) { return { path: path, files: files }; }); };
+  return Promise.all([
+    cpWalk(d.path, true, fresh ? undefined : 3),
+    CPDisk.bg(fresh ? undefined : 3, function () { return CPDisk.readState(d.path); }),
+    cpDictReady(),
+    Promise.all([root, archivedBrak].filter(Boolean).map(function (p) { return read(p).catch(missing); })),
+    fresh ? cpPool(cpArchStagePaths('site', d.name), 2, read) : []
+  ]).then(function (r) {
+    var type = cpShootType(d.name), letters = cpRetoucherTags();
+    var rejected = cpMirrorArts(r[3].filter(function (x) { return x.path; }), letters, type);
+    if (fresh) site = cpMirrorArts(r[4], letters, type);
+    var files = r[0];
+    if (archivedBrak) {
+      var fromSource = function (p) { return !/^(Брак|Готово)\//.test(p.slice(d.path.length + 1)); };
+      files = files.filter(function (file) { return fromSource(file.path); });
+      files.dirs = (r[0].dirs || []).filter(function (p) { return fromSource(p + '/'); });
+    }
+    return cpArchAssess(r[1].data, cpArticleCodes(d.path, d.name, files), site, rejected);
+  });
+}
+
+/* Сводка отбирает кандидатов. Статус «Можно в архив» появляется после проверки состава. */
+function cpArchCheckCandidates() {
+  var root = cpArchRoot(), archive = CP.archive;
+  if (!root) return;
+  return cpListDirs(root + '/_БРАК', 3).catch(function () { return []; }).then(function (dirs) {
+    if (CP.archive !== archive) return;
+    var rejected = Object.create(null);
+    dirs.forEach(function (d) { rejected[d.name.toLowerCase()] = d.modified || 'есть'; });
+    var todo = [];
+    (CP.shoots || []).forEach(function (d) {
+      var low = d.name.toLowerCase(), c = cpArchCount(d), site = ((CP.stageArts.site || {})[low] || {});
+      if (!rejected[low] && (!c || !c.n || Math.max(c.site, Object.keys(site).length) + c.brak < c.n)) {
+        delete d.cpArchCheck;
+        delete d.cpArchStamp;
+        return;
+      }
+      var stamp = JSON.stringify([d.modified, c, Object.keys(site).sort(), rejected[low]]);
+      if (d.cpArchStamp === stamp) return;
+      d.cpArchStamp = stamp;
+      delete d.cpArchCheck;
+      todo.push({ shoot: d, stamp: stamp });
+    });
+    return cpPool(todo, 2, function (x) {
+      return cpArchVerify(x.shoot, false).then(function (c) {
+        if (x.shoot.cpArchStamp === x.stamp) x.shoot.cpArchCheck = c;
+      }, function () { if (x.shoot.cpArchStamp === x.stamp) delete x.shoot.cpArchStamp; });
+    }).then(function () {
+      if (CP.archive === archive) { cpRenderShoots(); if (CP.sel && !CP.sel.loading) cpRenderPanel(); }
+    });
+  });
+}
+cpScanStages = (function (orig) {
+  return function () {
+    var p = orig.apply(this, arguments);
+    p.then(cpArchCheckCandidates).catch(function (e) { if (window.console) console.warn('[CP] готовность к архиву', e); });
+    return p;
+  };
+})(cpScanStages);
 
 /* ---------- фильтр «00_АРХИВ» ---------- */
 
@@ -78,7 +168,7 @@ cpRenderShoots = (function (orig) {
         (CP.shoots || []).forEach(function (d) { byPath[d.path] = d; });
         Array.prototype.forEach.call(list.querySelectorAll('.cp-shoot'), function (b) {
           var d = byPath[b.getAttribute('data-path')], meta = b.querySelector('.cp-shoot-meta');
-          if (d && meta && cpArchReady(d) && !meta.querySelector('.cp-arch-ready')) meta.insertAdjacentHTML('beforeend', ' <span class="cp-arch-ready">готова к архиву</span>');
+          if (d && meta && cpArchReady(d) && !meta.querySelector('.cp-arch-ready')) meta.insertAdjacentHTML('beforeend', ' <span class="cp-arch-ready">Можно в архив</span>');
         });
       }
       return r;
@@ -108,11 +198,15 @@ cpRenderPanel = (function (orig) {
     var r = orig.apply(this, arguments);
     var sel = CP.sel, root = cpArchRoot();
     var acts = document.querySelector('#cpPanel .cp-panel-actions');
-    if (!sel || !root || !acts || CP.stageFilter || sel.path.indexOf(root + '/') === 0 || acts.querySelector('[data-cp-arch-go]')) return r;
-    var d = (CP.shoots || []).filter(function (x) { return x.path === sel.path; })[0];
-    var ready = d && cpArchReady(d);
-    acts.insertAdjacentHTML('beforeend', '<button data-cp-arch-go' + (ready ? ' class="cp-arch-btn-ready"' : '')
-      + ' title="Переместить съёмку целиком в ' + cbEsc(cpFolderBase(root)) + ' — с витрины она уйдёт, отбор и брак останутся с ней">В архив</button>');
+    if (!sel || !root || !acts || (CP.stageFilter && CP.stageFilter !== 'archive' && CP.stageFilter !== 'retouch')) return r;
+    var archived = sel.path.indexOf(root + '/') === 0;
+    var d = (archived ? CP.archShoots || [] : CP.shoots || []).filter(function (x) { return x.path === sel.path; })[0];
+    if (!CP.stageFilter && !archived && cpArchReady(d)) {
+      acts.insertAdjacentHTML('beforeend', '<button data-cp-arch-go class="cp-arch-btn-ready">В архив</button>');
+    }
+    if ((archived || cpArchReady(d)) && !sel.loading && cpArchStagePaths('retouch', sel.name).length) {
+      acts.insertAdjacentHTML('beforeend', '<button data-cp-rt-clean>Убрать из ретуши</button>');
+    }
     return r;
   };
 })(cpRenderPanel);
@@ -124,6 +218,38 @@ document.addEventListener('click', function (e) {
   cpArchiveShoot(CP.sel);
 });
 
+document.addEventListener('click', function (e) {
+  if (!e.target.closest || !e.target.closest('[data-cp-rt-clean]') || !CP.sel) return;
+  e.preventDefault();
+  var sel = CP.sel, root = (CP.settings || {}).retouch, archive = CP.archive;
+  if (!root || cpArchBusy(sel)) return;
+  cbBusyShow('Проверяю, что съёмка закрыта…', 0.2);
+  Promise.all([cpArchVerify(sel, true), cpScanRetouch(archive, CP.settings)]).then(function (r) {
+    cbBusyHide();
+    if (CP.sel !== sel || CP.archive !== archive) return;
+    if (!cpArchIsComplete(r[0])) { cbToast('Убрать из ретуши можно после сдачи всех артикулов на сайт или в брак.'); return; }
+    if ((CP.stageFailed || []).indexOf('retouch') !== -1) return;
+    var paths = cpArchStagePaths('retouch', sel.name).filter(function (path) { return path.indexOf(root + '/') === 0; });
+    if (!paths.length) { cbToast('Папка съёмки в ретуши не найдена.'); return; }
+    return cpPool(paths, 2, function (path) {
+      return CPDisk.walkPhotos(path, false, 2, true).then(function (files) { return { path: path, files: files }; });
+    }).then(function (folders) {
+      if (CP.sel !== sel || CP.archive !== archive || (CP.settings || {}).retouch !== root) return;
+      var codes = cpMirrorArts(folders, cpRetoucherTags(), cpShootType(sel.name));
+      var extra = Object.keys(codes).filter(function (code) { return r[0].codes.indexOf(code) === -1; });
+      if (extra.length) { cbToast('В ретуши есть артикулы вне этой съёмки: ' + extra.join(', ') + '. Проверьте папку на Диске.'); return; }
+      if (!window.confirm('Убрать копии съёмки «' + sel.name + '» из ретуши в Корзину Диска?\n\n' + paths.map(CPDisk.showPath).join('\n'))) return;
+      cbBusyShow('Убираю копии из ретуши…', 0.5);
+      return CPDisk.trash(paths).then(function (res) {
+        cbBusyHide();
+        var bad = res.filter(function (x) { return x.status === 'failed'; });
+        cbToast(bad.length ? 'Не удалось убрать папок из ретуши: ' + bad.length : 'Съёмка убрана из ретуши');
+        return cpScanRetouch(archive, CP.settings).then(function () { if (CP.sel === sel) cpRenderPanel(); });
+      });
+    });
+  }).catch(function (e) { cbBusyHide(); cpHandleError(e, 'Убрать из ретуши'); });
+});
+
 /** Есть ли у съёмки незавершённые переносы (в этом браузере или в её отборе). */
 function cpArchBusy(sel) {
   var mine = Object.keys(CPQ.ops).some(function (id) { return CPQ.ops[id].shoot.path === sel.path; });
@@ -131,17 +257,8 @@ function cpArchBusy(sel) {
   return mine || !!(q && Object.keys(q).length);
 }
 
-/* ---------- «В архив» целиком (Маша, 10.11.2026) ----------
-   «Съёмка, у которой все артикулы на сайте или в браке, переносится в архив и отовсюду удаляется,
-   кроме сайта / готово. Готовое тоже копируется в архив — в папку «Готово» внутри папки съёмки:
-   исходный и готовый материал в одной точке, легко хранить на прекрасное далёко. Внутри — «Брак»
-   (что забраковали) и «Готово» (что не забраковали)». Запуск — кнопкой с подтверждением.
-   Порядок — сначала то, что нужно сохранить, потом уборка; убираем только после проверки:
-     1. 01_ИСХОДНИКИ/<съёмка> → 00_АРХИВ/<съёмка>; ждём, пока папки в исходниках не станет;
-     2. каждая папка съёмки в «Сайте» / «Готово» копируется в 00_АРХИВ/<съёмка>/Готово/<дата_буква_номер>;
-     3. брак 00_АРХИВ/_БРАК/<съёмка> переезжает в 00_АРХИВ/<съёмка>/Брак;
-     4. только если 2 прошло целиком — копии в 02 и 03 в Корзину Диска (30 дней можно вернуть).
-   Сайт не трогаем: через неделю после архива его папки можно будет убрать — отметка archivedAt. */
+/* Исходники переезжают в архив. Готовое копируется с сайта, брак
+   переносится внутрь съёмки. Очистка ретуши запускается отдельной кнопкой. */
 
 /** Где лежит съёмка на этапе (по последней сверке витрины): [пути]. */
 function cpArchStagePaths(key, name) {
@@ -171,22 +288,21 @@ function cpArchiveShoot(sel) {
   var root = cpArchRoot();
   if (!root) { cpCatStageMissing('archive'); return; }
   if (cpArchBusy(sel)) { cbToast('У съёмки ещё идут переносы на Диске — дождитесь, потом «В архив»'); return; }
-  var d = (CP.shoots || []).filter(function (x) { return x.path === sel.path; })[0], c = cpArchCount(d);
-  var why = !c ? 'сводки по артикулам нет — не знаю, всё ли сдано'
-    : !c.n ? 'в съёмке нет артикулов'
-      : c.rest ? 'не на сайте и не в браке: ' + c.rest + ' из ' + c.n + ' артикулов' : '';
+  cbBusyShow('Проверяю, всё ли дошло до сайта или брака…', 0.2);
+  return cpArchVerify(sel, true).then(function (c) {
+    cbBusyHide();
+    if (CP.sel !== sel) return;
+    if (!cpArchIsComplete(c)) { cbToast('Съёмка ещё не готова к архиву. Проверьте сайт и брак.'); return; }
+    return cpArchiveVerified(sel, root, c);
+  }, function (e) { cbBusyHide(); cpHandleError(e, 'Проверить готовность к архиву'); });
+}
+
+function cpArchiveVerified(sel, root, c) {
   var site = cpArchStagePaths('site', sel.name);
-  var junk = cpArchStagePaths('approval', sel.name).concat(cpArchStagePaths('retouch', sel.name))
-    .filter(function (p) { return p.indexOf(root.replace(/\/+$/, '') + '/') !== 0 && p !== sel.path; });
   var base = root.replace(/\/+$/, '') + '/' + sel.name;
   var msg = 'Перенести съёмку «' + sel.name + '» в ' + cpFolderBase(root) + '?\n\n'
-    + (why ? 'Она ещё не закрыта: ' + why + '.\n\n' : 'Все артикулы на сайте (' + c.site + ') или в браке (' + c.brak + ').\n\n')
-    + '1. Исходники переедут целиком: ' + CPDisk.showPath(base) + '\n'
-    + '2. Готовое скопируется в «Готово» внутри неё: ' + (site.length ? site.length + ' папк(и) из сайта' : 'в сайте этой съёмки не найдено') + '\n'
-    + '3. Брак переедет в «Брак» внутри неё\n'
-    + '4. В Корзину Диска (30 дней можно вернуть): ' + (junk.length ? junk.map(function (p) { return CPDisk.showPath(p); }).join(', ') : 'нечего') + '\n'
-    + (junk.length && !site.length ? '   — только если готовое найдено; сейчас не найдено, поэтому копии в 02/03 останутся\n' : '')
-    + '\nСайт не трогается.';
+    + 'На сайте: ' + c.site + ' · В браке: ' + c.brak + '.\n'
+    + 'Исходники переедут в архив. Готовые файлы скопируются в «Готово», брак — в «Брак».';
   if (!window.confirm(msg)) return;
   var shoot = { path: sel.path, name: sel.name };
   var ready = CP.shoot && CP.shoot.path === sel.path ? cpFlushSave() : Promise.resolve();
@@ -226,25 +342,14 @@ function cpArchiveShoot(sel) {
         return items.length - bad.length === items.length ? items.length : -1;
       });
     }, function (e) { report.push('готовое не скопировалось: ' + ((e && e.message) || e)); return -1; });
-  }).then(function (doneCopied) {
+  }).then(function () {
     /* 3. брак — внутрь съёмки */
     var brak = root.replace(/\/+$/, '') + '/_БРАК/' + CPDisk.safeName(sel.name);
-    var stepBrak = CPDisk.meta(brak).then(function () {
+    return CPDisk.meta(brak).then(function () {
       cbBusyShow('Переношу брак...', 0.75);
       return cpMoveFolder(brak, moved + '/Брак').then(function () { return 1; }, function (e) { report.push('брак не перенёсся: ' + ((e && e.message) || e)); return 0; });
     }, function () { return 0; });
-    return stepBrak.then(function () { return doneCopied; });
-  }).then(function (doneCopied) {
-    /* 4. уборка 02/03 — только если готовое сохранено целиком */
-    if (!junk.length) return 0;
-    if (doneCopied <= 0) { report.push('копии в 02/03 оставлены: готовое ' + (doneCopied === 0 ? 'не найдено' : 'сохранилось не целиком')); return 0; }
-    cbBusyShow('Убираю копии из 02 и 03 в Корзину...', 0.9);
-    return CPDisk.trash(junk).then(function (res) {
-      var bad = res.filter(function (x) { return x.status === 'failed'; });
-      if (bad.length) report.push('в Корзину не ушло: ' + bad.map(function (x) { return CPDisk.showPath(x.path); }).join(', '));
-      return junk.length - bad.length;
-    }, function (e) { report.push('копии в 02/03 не убраны: ' + ((e && e.message) || e)); return 0; });
-  }).then(function (trashed) {
+  }).then(function () {
     cbBusyHide();
     var now = new Date().toISOString();
     cpMutateState({ path: moved, name: sel.name }, function (data) {
@@ -252,8 +357,7 @@ function cpArchiveShoot(sel) {
       m.archivedAt = now;
       m.archiveSite = site;   /* какие папки сайта скопированы — их можно будет убрать через неделю */
       m.events.push({ ts: now, action: 'to_archive', actor: cpActor(), items: [], note: 'в архив: ' + CPDisk.showPath(moved)
-        + (site.length ? '; готовое: ' + site.length : '') + (trashed ? '; из 02/03 в Корзину: ' + trashed : '')
-        + (why ? ' (не закрыта: ' + why + ')' : '') + (report.length ? '; ' + report.join('; ') : '') });
+        + (site.length ? '; готовое: ' + site.length : '') + (report.length ? '; ' + report.join('; ') : '') });
     }).catch(function () { });
     cbToast('В архиве: ' + sel.name + (report.length ? '. Не всё получилось: ' + report.join('; ') : ''));
     CP.sel = null;
