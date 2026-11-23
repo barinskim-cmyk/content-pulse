@@ -43,7 +43,7 @@ CP_SETTING_KEYS['отретушировано'] = 'retouched';
 function cpStatusRank(s) { return { approval: 1, retouch: 2 }[s] || 0; }
 
 /** Найти папки съёмки внутри этапа: на первом уровне, иначе глубже (до 3), не заходя в чужие съёмки. */
-function cpFindShootIn(root, shootName, maxDepth) {
+function cpFindShootIn(root, shootName, maxDepth, allLevels) {
   if (CPDisk.isReadyFolder(cpFolderBase(root))) return Promise.resolve([]);
   maxDepth = maxDepth || 3;
   var want = shootName.toLowerCase(), found = [];
@@ -59,7 +59,7 @@ function cpFindShootIn(root, shootName, maxDepth) {
           else if (!shootLike.test(bare) && x.name.charAt(0) !== '_') next.push(x.path);
         });
       });
-      return found.length ? null : level(next, depth + 1);
+      return found.length && !allLevels ? null : level(next, depth + 1);
     });
   }
   return level([root], 1).then(function () { return found; });
@@ -97,7 +97,7 @@ function cpMirrorSync(quiet) {
     var seen = r.stage.key === 'site' && CP.stageFor === CP.archive ? ((CP.stagePaths || {}).site || {})[shoot.name.toLowerCase()] : null;
     var dirs = r.fixed ? Promise.resolve([{ path: r.fixed, name: RETOUCH_DIR_NAME(), prio: '' }])
       : seen && seen.length ? Promise.resolve(seen.map(function (pth) { var nm = pth.split('/').pop(); return { path: pth, name: nm, prio: (CP_PRIO_RE.exec(nm) || [])[1] || '' }; }))
-        : cpFindShootIn(r.root, shoot.name, r.stage.key === 'site' ? 5 : 3);
+        : cpFindShootIn(r.root, shoot.name, r.stage.key === 'site' ? 5 : r.stage.key === 'review' ? 4 : 3, r.stage.key === 'review');
     return dirs.then(function (found) {
       return cpPool(found, 2, function (f) {
         return CPDisk.walkPhotos(f.path, false, 4, true).then(function (files) { f.files = files; return f; }, function (e) {
@@ -288,17 +288,31 @@ function cpMirrorReworkByHand(m, c, art, shootName, now, rows, rowDone) {
  */
 function cpMirrorRvFromDisk(m, c, art, shootName, letterHint, now, rows, rowDone, knownAny) {
   var dirs = art.byDir || {};
-  var newDir = Object.keys(dirs).filter(function (d) {
+  if (((m.cardStatus || {})[c.id] || {}).s === 'reshoot') return false;
+  var rv = m.rv || {}, lst = rv[c.id] || [], last = lst[lst.length - 1];
+  var current = last && last.dir, saved = current && dirs[current], replacement = false;
+  if (saved && !/_доработка$/i.test(current) && !cpMirrorBusy(saved, 'up')) {
+    var old = new Map((last.files || []).map(function (f) { return [f.path, f]; }));
+    replacement = saved.files.some(function (f) {
+      var prev = old.get(f.path);
+      if (!prev || f.size !== prev.size) return true;
+      if (f.md5 && prev.md5) return f.md5 !== prev.md5;
+      return Date.parse(f.modified || '') > Date.parse(last.ts || '') + 1000;
+    });
+  }
+  if (!replacement && last && last.status === 'review') return false;
+  var newDir = replacement ? current : Object.keys(dirs).find(function (d) {
     return !/_доработка$/i.test(d) && !cpMirrorBusy(dirs[d], 'up') && dirs[d].files.some(function (f) { return !knownAny[f.path]; });
-  })[0];
-  if (!newDir || ((m.cardStatus || {})[c.id] && m.cardStatus[c.id].s === 'reshoot')) return false;
-  var rv = m.rv = m.rv || {}, lst = rv[c.id] = rv[c.id] || [], last = lst[lst.length - 1];
-  if (last && last.status === 'review') return false;
-  var bd = dirs[newDir], day = cpIsoDayOf(bd.mod) || cpToday(), key = '04|' + newDir + '|' + day;
-  if (last && last.status === 'rework') last.status = 'replaced';   /* новая версия после доработки — сдали руками */
-  var ver = { v: lst.length + 1, batch: 'Диск', letter: bd.letter || art.letter || letterHint || '', n: '', date: day, dropDate: day, by: 'Диск', ts: now,
+  });
+  if (!newDir) return false;
+  var bd = dirs[newDir], path = cpReviewVersionPath(cpReviewRoot(), newDir) || {};
+  var day = path.date || cpIsoDayOf(bd.mod) || cpToday(), key = '04|' + newDir + '|' + day;
+  if (replacement) key += '|' + cpHash(JSON.stringify(bd.files.map(function (f) { return [f.path, f.md5 || f.modified || f.size]; }).sort()));
+  if (last && /^(review|rework)$/.test(last.status)) last.status = 'replaced';
+  var ver = { v: lst.length + 1, batch: 'Диск', letter: path.letter || bd.letter || art.letter || letterHint || '', n: path.n || '', date: day, dropDate: day, by: 'Диск', ts: now,
     files: bd.files.slice(), status: 'review', dir: newDir, byArt: true, key: key };
-  lst.push(ver);
+  m.rv = rv;
+  (rv[c.id] = lst).push(ver);
   bd.files.forEach(function (f) { knownAny[f.path] = true; });
   if (!rowDone[key]) {
     rowDone[key] = true;
@@ -360,7 +374,7 @@ function cpMirrorArts(found, letters, stype) {
       var a = out[code] = out[code] || { letter: '', byDir: {} };
       if (!a.letter && letter) a.letter = letter;
       var bd = a.byDir[artDir] = a.byDir[artDir] || cpMirrorDirEntry(f.files, artDir, letter);
-      bd.files.push({ path: file.path, name: file.name, size: file.size });
+      bd.files.push({ path: file.path, name: file.name, size: file.size, md5: file.md5, modified: file.modified });
       if ((file.modified || '') > bd.mod) bd.mod = file.modified || '';
     });
   });
@@ -542,7 +556,7 @@ function cpMirrorApply(rs, letters, idx) {
           if (!apk.letter && letter) apk.letter = letter;
           /* файлы артикула на этапе по папкам — для версии ретуши, сданной руками (имена файлов у ретушёров свои) */
           var bd = apk.byDir[artDir] = apk.byDir[artDir] || cpMirrorDirEntry(f.files, artDir, letter);
-          bd.files.push({ path: file.path, name: file.name, size: file.size });
+          bd.files.push({ path: file.path, name: file.name, size: file.size, md5: file.md5, modified: file.modified });
           if ((file.modified || '') > bd.mod) bd.mod = file.modified || '';
         }
         if (!p) { unmatched.push({ stage: r.stage.label, path: file.path }); return; }

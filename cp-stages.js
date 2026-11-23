@@ -294,7 +294,7 @@ function cpReadStage(key, archive, s, preview) {
   /* «Сайт» читаем в том виде, как туда сдают сейчас (Маша, 10.11.2026: «структура шибанутая — дата /
      буква / номер / съёмка / партия; на время тестирования её сохраняем, программа должна уметь
      читать и её, и ту, которую хотим»): папка съёмки ищется на любом уровне до пятого. */
-  var maxDepth = key === 'site' ? 6 : 3;   /* с запасом: «готово» / дата / буква / номер / съёмка (Маша, 10.11: «ещё папки с датами в папке готово») */
+  var maxDepth = key === 'site' ? 6 : key === 'review' ? 4 : 3;   /* с запасом: «готово» / дата / буква / номер / съёмка (Маша, 10.11: «ещё папки с датами в папке готово») */
   var oldDates = [];
   var level = function (paths, depth, into, inOld) {
     if (!paths.length || depth > maxDepth) return Promise.resolve();
@@ -538,6 +538,7 @@ function cpRenderStageBar() {
     return '<button data-cp-stage="' + s.key + '"' + (CP.stageFilter === s.key ? ' class="cp-on"' : '') + '>' + cbEsc(s.label)
       + ' <small>' + counts[s.key] + '</small></button>';
   }).join('') + (pending ? '<small class="cp-stages-wait" title="Съёмки без сводки: читаю их отборы">считаю ' + pending + '…</small>' : '');
+  if (typeof cpRememberShelfStages === 'function') cpRememberShelfStages();
 }
 
 var CP_ART_STAGES = [

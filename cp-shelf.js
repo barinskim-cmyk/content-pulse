@@ -1042,7 +1042,7 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
   e.preventDefault();
   var act = b.getAttribute('data-cp-p');
   if (act === 'close') { CP.sel = null; cpRenderPanel(); cpMarkSelected(); }
-  else if (act === 'open') cpOpenShoot(sel.path, sel.name);
+  else if (act === 'open') cpOpenShoot(sel.path, sel.name, sel.stage || CP.stageFilter);
   else if (act === 'download') cpShelfDownload();
   else if (act === 'foldall') {
     var top = cpFolderTree(sel)[''] || [];

@@ -383,7 +383,7 @@ setInterval(function () {
   var shelf = document.getElementById('cpShelf');
   if (!CP.shoot || document.hidden || !shelf || shelf.classList.contains('cp-open')) return;
   if (CP_SHOOT_VIEW.key === 'source') cpArticleRefresh(CP.shoot.path);
-  else if (!CP_SHOOT_VIEW.loading && !document.querySelector('#cpShootStagePreview img')) cpShowShootStage(CP_SHOOT_VIEW.key, true);
+  else if (!CP_SHOOT_VIEW.loading && !CP_SHOOT_VIEW.checking && !CP.lb) cpShowShootStage(CP_SHOOT_VIEW.key, true, false, true);
 }, CP_ARTICLE_SYNC_MS);
 
 function cpConfirmArticleLeave() {
@@ -410,45 +410,70 @@ function cpConfirmArticleLeave() {
 var CP_SHOOT_STAGE_LABELS = {
   source: 'Исходники', approval: 'Отбор', retouch: 'Ретушь', review: 'Отретушировано', site: 'Сайт'
 };
-var CP_SHOOT_VIEW = { key: 'source', request: 0, chosen: '' };
+var CP_SHOOT_STAGE_STATUS = { approval: 'В отборе', retouch: 'На ретуши', review: 'Отретушировано', site: 'На сайте' };
+var CP_STAGE_STATUS_ORDER = ['В браке', 'На сайте', 'На доработке', 'Отретушировано', 'На ретуши', 'В отборе'];
+var CP_SHOOT_VIEW = { key: 'source', chosen: '' };
+var CP_SHELF_STAGE_POSITION = null;
+
+function cpRememberShelfStages() {
+  var first = document.querySelector('#cpStages button');
+  if (!first || !first.getClientRects().length) return;
+  var rect = first.getBoundingClientRect();
+  CP_SHELF_STAGE_POSITION = { left: rect.left, top: rect.top, width: window.innerWidth };
+}
+
+function cpPlaceShootStages() {
+  var row = document.getElementById('cpShootStageRow');
+  var p = CP_SHELF_STAGE_POSITION;
+  var topbar = document.querySelector('.cb-topbar');
+  if (!row || row.hidden) return;
+  var aligned = p && p.width === window.innerWidth;
+  row.style.paddingLeft = aligned ? p.left + 'px' : '';
+  row.style.paddingTop = aligned ? Math.max(0, p.top - topbar.getBoundingClientRect().bottom) + 'px' : '';
+  document.body.style.setProperty('--cp-shoot-stage-height', row.offsetHeight + 'px');
+}
 
 (function () {
   var work = document.getElementById('cbWork'), tabs = work.querySelector('.cb-tabs');
+  var row = document.createElement('div');
+  row.id = 'cpShootStageRow';
+  row.className = 'cp-shelf-bar';
+  row.hidden = true;
   var bar = document.createElement('nav');
   bar.id = 'cpShootStageTabs';
-  bar.className = 'cp-shoot-stage-tabs';
-  bar.hidden = true;
+  bar.className = 'cp-stages';
   bar.setAttribute('aria-label', 'Этапы съёмки');
-  tabs.parentNode.insertBefore(bar, tabs);
+  row.appendChild(bar);
+  var main = document.querySelector('.cb-main');
+  main.parentNode.insertBefore(row, main);
   var view = document.createElement('section');
   view.id = 'cpShootStageView';
   view.hidden = true;
   tabs.parentNode.insertBefore(view, tabs);
   var css = document.createElement('style');
-  css.textContent = '.cp-shoot-stage-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #3a3a37}'
-    + '.cp-shoot-stage-tabs[hidden],#cpShootStageView[hidden]{display:none}'
-    + '.cp-shoot-stage-tabs button,.cp-stage-view-articles button,.cp-stage-view-refresh{padding:5px 10px;border-radius:5px}'
-    + '.cp-shoot-stage-tabs .cp-on,.cp-stage-view-articles .cp-on{background:#392b20;color:#f2dfc8;border-color:#C9956B}'
+  css.textContent = '#cpShootStageRow[hidden],#cpShootStageView[hidden]{display:none}'
+    + '#cpShootStageRow:not([hidden])+.cb-main{height:calc(100vh - 52px - var(--cp-shoot-stage-height,0px))}'
     + 'body.cp-viewing-stage .cb-tray,body.cp-viewing-stage .cb-resizer,body.cp-viewing-stage #cbOutline,body.cp-viewing-stage .cb-strip,body.cp-viewing-stage #cbWork>.cb-tabs,body.cp-viewing-stage #cbTabCards,body.cp-viewing-stage #cbTabConts,body.cp-viewing-stage #cbBtnAdd{display:none!important}'
-    + '.cp-stage-view-head,.cp-stage-view-articles{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 12px}'
-    + '.cp-stage-view-articles small{color:#dac2a9}.cp-stage-view-files{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}'
-    + '.cp-stage-view-files button{text-align:left;overflow-wrap:anywhere;padding:10px}.cp-stage-view-files small{display:block;color:#dac2a9}'
-    + '#cpShootStagePreview img{display:block;max-width:100%;max-height:65vh;margin:0 auto 16px;object-fit:contain}';
+    + '.cp-stage-view-head,.cp-stage-card small{color:#a3a09a}.cp-stage-view-head{display:flex;gap:8px;align-items:flex-start;margin-bottom:12px}'
+    + '.cp-stage-view-head details{flex:1;margin:0}.cp-stage-card .cb-card-head strong{color:#e7c9a8;font-weight:700}'
+    + '.cp-stage-card .cb-slot{border-radius:0;padding:0}.cp-stage-card button.cb-slot:hover,.cp-stage-card button.cb-slot:focus-visible{outline:2px solid #C9956B;outline-offset:-2px}'
+    + '.cp-stage-card button.cb-slot:focus-visible img{opacity:.85}.cp-stage-card .cb-slot-tag{pointer-events:none}';
   document.head.appendChild(css);
+  window.addEventListener('resize', function () { cpRememberShelfStages(); cpPlaceShootStages(); });
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(cpPlaceShootStages).observe(row);
   bar.addEventListener('click', function (e) {
     var button = e.target.closest('[data-cp-shoot-stage]');
     if (button) cpShowShootStage(button.getAttribute('data-cp-shoot-stage'));
   });
   view.addEventListener('click', function (e) {
-    var article = e.target.closest('[data-cp-stage-article]'), refresh = e.target.closest('[data-cp-stage-refresh]'), file = e.target.closest('[data-cp-stage-preview]');
-    if (refresh) cpShowShootStage(CP_SHOOT_VIEW.key, true);
-    if (article) {
-      CP_SHOOT_VIEW.chosen = article.getAttribute('data-cp-stage-article');
-      cpRenderShootStage();
-    }
+    if (e.target.closest('[data-cp-stage-refresh]')) cpShowShootStage(CP_SHOOT_VIEW.key, true);
+    var file = e.target.closest('[data-cp-stage-preview]');
     if (file) cpPreviewShootStageFile(+file.getAttribute('data-cp-stage-preview'));
-    var trash = e.target.closest('[data-cp-stage-trash]');
-    if (trash) cpTrashShootStageFile(+trash.getAttribute('data-cp-stage-trash'));
+  });
+  view.addEventListener('change', function (e) {
+    if (!e.target.matches('[data-cp-stage-article]')) return;
+    CP_SHOOT_VIEW.filter = e.target.value;
+    cpRenderShootStage();
   });
 })();
 
@@ -459,121 +484,275 @@ function cpShootStageRoot(key) {
 
 function cpRenderShootStageTabs() {
   var bar = document.getElementById('cpShootStageTabs');
-  bar.hidden = !CP.shoot;
+  document.getElementById('cpShootStageRow').hidden = !CP.shoot;
   if (!CP.shoot) return;
+  var labels = Object.fromEntries(cpStageList().map(function (stage) { return [stage.key, stage.label]; }));
   bar.innerHTML = Object.keys(CP_SHOOT_STAGE_LABELS).filter(function (key) {
     return key === 'source' || cpShootStageRoot(key);
   }).map(function (key) {
     var active = key === CP_SHOOT_VIEW.key;
     return '<button type="button" data-cp-shoot-stage="' + key + '" aria-pressed="' + active + '"' + (active ? ' class="cp-on"' : '') + '>'
-      + CP_SHOOT_STAGE_LABELS[key] + '</button>';
+      + cbEsc(labels[key === 'source' ? '' : key] || CP_SHOOT_STAGE_LABELS[key]) + '</button>';
   }).join('');
+  cpPlaceShootStages();
 }
 
-function cpShowShootStage(key, refresh) {
+function cpShowShootStage(key, refresh, opening, quiet) {
   if (!CP.shoot || (!refresh && key === CP_SHOOT_VIEW.key)) return;
-  if (!refresh && !cpConfirmArticleLeave()) return;
+  if (!refresh && !opening && !cpConfirmArticleLeave()) return;
   var shoot = CP.shoot, selected = cbCardById(CP.activeCard), previous = CP_SHOOT_VIEW;
   var root = key === 'source' ? '' : cpShootStageRoot(key);
-  var mode = { key: key, chosen: previous.key === 'source' && selected ? selected.cpArticle || cpSixCode(selected.title) : previous.chosen, files: [], loading: !!root };
-  CP_SHOOT_VIEW = mode;
-  document.body.classList.toggle('cp-viewing-stage', key !== 'source');
-  document.getElementById('cpShootStageView').hidden = key === 'source';
-  cpRenderShootStageTabs();
-  if (key === 'source') return;
-  cpRenderShootStage();
+  var mode = { key: key, chosen: previous.key === 'source' && selected ? selected.cpArticle || cpSixCode(selected.title) : previous.chosen,
+    filter: key === previous.key ? previous.filter : '', files: [], cards: [], loading: !!root, pending: [] };
+  function show() {
+    cpDisposeShootStage();
+    CP_SHOOT_VIEW = mode;
+    document.body.classList.toggle('cp-viewing-stage', key !== 'source');
+    var view = document.getElementById('cpShootStageView');
+    view.hidden = key === 'source';
+    cpRenderShootStageTabs();
+    if (key === 'source') view.replaceChildren();
+    else cpRenderShootStage();
+  }
+  function stillHere() { return CP_SHOOT_VIEW === (quiet ? previous : mode) && CP.shoot === shoot; }
+  if (quiet) previous.checking = true;
+  else show();
   if (!root) return;
   var low = shoot.name.toLowerCase(), stageKey = key;
   var fixed = key === 'retouch' && !((CP.settings || {}).retouch);
-  var scan = function (path) { return cpFindShootIn(path, shoot.name, key === 'site' ? 6 : 3); };
-  var find = fixed ? Promise.resolve([{ path: root }]) : key === 'site' && (CP.settings.siteMore || []).length
-    ? cpPool([root].concat(CP.settings.siteMore), 2, scan).then(function (groups) { return [].concat.apply([], groups); })
-    : scan(root);
-  if (key === 'site' && CP.stageFor === CP.archive && (((CP.stagePaths || {}).site || {})[low] || []).length && !refresh) {
-    find = Promise.resolve(CP.stagePaths.site[low].map(function (path) { return { path: path }; }));
-  }
-  find.then(function (roots) {
-    return cpPool(roots, 2, function (entry) {
-      return CPDisk.walkPhotos(entry.path, false, 4, true).then(function (files) { return { root: entry.path, files: files, dirs: files.dirs || [] }; },
-        function (e) { if (e && e.status === 404) return { root: entry.path, files: [], dirs: [] }; throw e; });
+  var scan = function (path) { return cpFindShootIn(path, shoot.name, key === 'site' ? 6 : key === 'review' ? 4 : 3, true); };
+  var indexed = (!refresh || quiet) && CP.stageFor === CP.archive && ((CP.stagePaths || {})[key] || {})[low];
+  if (quiet && (!indexed || !indexed.length)) indexed = previous.roots;
+  var find = indexed && indexed.length ? Promise.resolve(indexed.map(function (path) { return { path: path }; }))
+    : fixed ? Promise.resolve([{ path: root }]) : key === 'site' && (CP.settings.siteMore || []).length
+      ? cpPool([root].concat(CP.settings.siteMore), 2, scan).then(function (groups) { return [].concat.apply([], groups); }) : scan(root);
+  return Promise.all([find, cpDictReady()]).then(function (result) {
+    var roots = result[0];
+    var paths = Array.from(new Set(roots.map(function (entry) { return entry.path; })));
+    mode.roots = paths;
+    return cpPool(paths, 2, function (path) {
+      return CPDisk.walkPhotos(path, CPDisk.hasProxy() ? false : CP_CONFIG.previewSize, 4, true).then(function (files) { return { root: path, files: files, dirs: files.dirs || [] }; },
+        function (e) { if (e && e.status === 404) return { root: path, files: [], dirs: [] }; throw e; });
     });
   }).then(function (stageFiles) {
-    if (CP_SHOOT_VIEW !== mode || CP.shoot !== shoot) return;
+    if (!stillHere()) return;
     var sel = { path: shoot.path, name: shoot.name, stage: stageKey, stageFiles: stageFiles, data: cbProjectData() };
     cpStageTagIndex(sel);
-    var letters = cpRetoucherTags(), type = cpShootType(shoot.name);
-    mode.files = [];
-    mode.groups = Object.create(null);
+    var letters = cpRetoucherTags(), type = cpShootType(shoot.name), cards = new Map(), seen = new Set();
+    function cardFor(article, parent, code) {
+      var keyPath = cpStageKey((parent ? parent + '/' : '') + 'file', letters).segs.map(function (seg) {
+        return seg.replace(/_доработка$/i, '');
+      }).join('/');
+      var id = keyPath.toLowerCase() + '\n' + code;
+      if (!cards.has(id)) cards.set(id, { code: code, rel: keyPath, files: [], tags: new Set(), statuses: new Set() });
+      var card = cards.get(id);
+      if (article && article.letter) card.tags.add(article.letter);
+      if (article && /_доработка$/i.test(article.bare)) card.statuses.add('На доработке');
+      return card;
+    }
     stageFiles.forEach(function (group) {
       group.dirs.forEach(function (dir) {
         var article = cpRtArtDir(group.root, dir + '/x', letters, type);
-        if (article && article.path === dir && !mode.groups[article.code]) mode.groups[article.code] = [];
+        if (article && article.path === dir) cardFor(article, dir.slice(group.root.length + 1), article.code);
       });
       group.files.forEach(function (file) {
+        if (seen.has(file.path)) return;
+        seen.add(file.path);
         var article = cpRtArtDir(group.root, file.path, letters, type);
         var code = article ? article.code : cpFileArticleCode(file.name, letters);
-        var meta = { file: file, code: code, letter: article && article.letter || '', index: mode.files.length, rel: file.path.slice(group.root.length + 1) };
+        var rel = file.path.slice(group.root.length + 1), dir = article ? article.path.slice(group.root.length + 1) : rel.split('/').slice(0, -1).join('/');
+        var card = cardFor(article, dir, code);
+        var batch = (key === 'review' || key === 'site') && cpReviewVersionPath(root, group.root + '/article');
+        if (batch && letters.indexOf(batch.letter) !== -1) card.tags.add(batch.letter);
+        var image = /^image\//i.test(file.mime_type || '') || /\.(jpe?g|png|webp|gif|avif|heic|heif|tiff?|bmp|psd)$/i.test(file.name);
+        var meta = { file: file, index: mode.files.length, rel: rel, card: card, image: image,
+          photo: { disk: file.path, name: file.name, size: file.size, preview: file.preview } };
         mode.files.push(meta);
-        (mode.groups[code] = mode.groups[code] || []).push(meta);
+        card.files.push(meta);
+        if (file.cpTook && file.cpTook.l) card.tags.add(file.cpTook.l);
+        (file.cpTags || []).filter(function (tag) { return letters.indexOf(tag) !== -1; }).forEach(function (tag) { card.tags.add(tag); });
+        if (file.cpStageStatus) card.statuses.add(file.cpStageStatus);
       });
     });
+    mode.cards = Array.from(cards.values()).sort(function (a, b) {
+      return a.code.localeCompare(b.code, 'ru', { numeric: true }) || a.rel.localeCompare(b.rel, 'ru', { numeric: true });
+    });
     mode.loading = false;
-    cpRenderShootStage();
+    mode.signature = JSON.stringify(mode.cards.map(function (card) {
+      return [card.rel, card.code, Array.from(card.tags), Array.from(card.statuses), card.files.map(function (item) {
+        var f = item.file;
+        return [f.path, f.md5, f.modified, f.size, f.resource_id];
+      })];
+    }));
+    if (!quiet) cpRenderShootStage();
+    else if (!CP.lb && previous.signature !== mode.signature) {
+      mode.filter = previous.filter;
+      var work = document.getElementById('cbWork'), scroll = work.scrollTop;
+      show();
+      work.scrollTop = scroll;
+    }
   }).catch(function (e) {
-    if (CP_SHOOT_VIEW !== mode) return;
+    if (quiet || !stillHere()) return;
     mode.loading = false; mode.error = e && e.message || 'Не удалось прочитать папки';
     cpRenderShootStage();
-  });
+  }).finally(function () { previous.checking = false; });
 }
 
 function cpRenderShootStage() {
   var view = document.getElementById('cpShootStageView'), mode = CP_SHOOT_VIEW;
   if (mode.key === 'source') return;
-  var h = '<div class="cp-stage-view-head"><strong>' + CP_SHOOT_STAGE_LABELS[mode.key] + '</strong>'
-    + '<button type="button" data-cp-stage-refresh class="cp-stage-view-refresh">Обновить</button></div>';
-  if (mode.loading) { view.innerHTML = h + '<p>Читаю папки на Диске…</p>'; return; }
-  if (mode.error) { view.innerHTML = h + '<p>' + cbEsc(mode.error) + '</p>'; return; }
-  var codes = Object.keys(mode.groups || {}).filter(Boolean).sort();
-  if (!mode.files.length && !codes.length) { view.innerHTML = h + '<p>На этом этапе у съёмки пока нет файлов.</p>'; return; }
-  if (mode.chosen && !mode.groups[mode.chosen]) mode.chosen = '';
-  if (codes.length) h += '<div class="cp-stage-view-articles">'
-    + '<button type="button" data-cp-stage-article=""' + (!mode.chosen ? ' class="cp-on"' : '') + '>Все папки</button>'
-    + codes.map(function (code) {
-      var group = mode.groups[code], tags = Object.create(null);
-      group.forEach(function (x) {
-        if (x.letter) tags[x.letter] = true;
-        if (x.file.cpStageStatus) tags[x.file.cpStageStatus] = true;
+  var codes = Array.from(new Set(mode.cards.map(function (card) { return card.code; }).filter(Boolean)));
+  if (mode.filter && codes.indexOf(mode.filter) === -1) mode.filter = '';
+  var h = '<div class="cp-stage-view-head">';
+  if (codes.length) h += '<details class="cp-viewbar"' + (mode.filter ? ' open' : '') + '><summary>Фильтр карточек</summary>'
+    + '<div class="cp-view-controls"><label>Артикул <select data-cp-stage-article><option value="">Все карточки</option>'
+    + codes.map(function (code) { return '<option' + (mode.filter === code ? ' selected' : '') + '>' + cbEsc(code) + '</option>'; }).join('')
+    + '</select></label></div></details>';
+  h += '<button type="button" data-cp-stage-refresh>Обновить</button></div>';
+  if (mode.loading) { view.innerHTML = h + '<p role="status">Читаю папки на Диске…</p>'; return; }
+  if (mode.error) { view.innerHTML = h + '<p role="alert">' + cbEsc(mode.error) + '</p>'; return; }
+  if (!mode.cards.length) { view.innerHTML = h + '<p>На этом этапе у съёмки пока нет файлов.</p>'; return; }
+  if (mode.observer) mode.observer.disconnect();
+  var visible = mode.cards.filter(function (card) { return !mode.filter || card.code === mode.filter; });
+  view.innerHTML = h + visible.map(function (card) {
+    var parent = card.rel.split('/').slice(0, -1).join('/');
+    var status = CP_STAGE_STATUS_ORDER.find(function (s) { return card.statuses.has(s); }) || CP_SHOOT_STAGE_STATUS[mode.key];
+    return '<article class="cb-card cp-stage-card" data-cp-stage-code="' + cbEsc(card.code) + '"><header class="cb-card-head">'
+      + '<b>' + cbEsc(card.code || card.rel || 'Кадры съёмки') + '</b>'
+      + (card.code && parent ? '<small>' + cbEsc(parent) + '</small>' : '')
+      + '<span class="cb-spacer"></span>'
+      + (card.tags.size ? '<b title="Ретушёры">' + cbEsc(Array.from(card.tags).sort().join(' · ')) + '</b>' : '')
+      + '<strong>' + cbEsc(status) + '</strong></header><div class="cp-stage-card-page"></div></article>';
+  }).join('');
+  function loadCard(page, card) {
+    Promise.all(card.files.filter(function (item) { return item.image; }).map(function (item) {
+      return cpQueueStageThumb(mode, item);
+    })).then(function () {
+      if (CP_SHOOT_VIEW !== mode || !page.isConnected || page.contains(document.activeElement)) return;
+      page.innerHTML = cpShootStageCardPages(card);
+    });
+  }
+  var pages = Array.from(view.querySelectorAll('.cp-stage-card-page')), byPage = new Map();
+  if (typeof IntersectionObserver !== 'undefined') {
+    mode.observer = new IntersectionObserver(function (entries, observer) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting || CP_SHOOT_VIEW !== mode) return;
+        observer.unobserve(entry.target);
+        loadCard(entry.target, byPage.get(entry.target));
       });
-      return '<button type="button" data-cp-stage-article="' + cbEsc(code) + '"' + (code === mode.chosen ? ' class="cp-on"' : '') + '>'
-        + cbEsc(code) + ' <small>' + group.length + (Object.keys(tags).length ? ' · ' + cbEsc(Object.keys(tags).join(' · ')) : '') + '</small></button>';
-    }).join('') + '</div>';
-  var list = mode.chosen ? mode.groups[mode.chosen] : mode.files;
-  h += '<div id="cpShootStagePreview"></div>';
-  if (!list.length) h += '<p>Папка артикула пуста.</p>';
-  else h += '<div class="cp-stage-view-files">' + list.map(function (x) {
-    return '<button type="button" data-cp-stage-preview="' + x.index + '">'
-      + cbEsc(x.file.name) + '<small>' + cbEsc(x.rel) + (x.file.cpStageStatus ? ' · ' + cbEsc(x.file.cpStageStatus) : '') + '</small></button>';
-  }).join('') + '</div>';
-  view.innerHTML = h;
+    }, { root: document.getElementById('cbWork'), rootMargin: '350px' });
+  }
+  pages.forEach(function (page, i) {
+    var card = visible[i];
+    page.innerHTML = cpShootStageCardPages(card);
+    if (mode.observer) { byPage.set(page, card); mode.observer.observe(page); }
+    else loadCard(page, card);
+  });
+}
+
+function cpShootStageCardPages(card) {
+  if (!card.files.length) return '<div class="cb-empty-hint">Папка артикула пуста.</div>';
+  var sourceCards = card.code ? cpRtCards(card.code) : [];
+  var template = sourceCards.find(function (c) {
+    return String(c.cpArticleDir || '').toLowerCase() === card.rel.toLowerCase();
+  }) || (sourceCards.length === 1 ? sourceCards[0] : null);
+  var ordered = card.files.slice().sort(function (a, b) { return a.rel.localeCompare(b.rel, 'ru', { numeric: true }); });
+  var available = ordered.slice(), known = new Map();
+  if (template) cpCardPids(template).forEach(function (id) {
+    var n = available.findIndex(function (item) { return item.file.cpPid === id; });
+    if (n !== -1) known.set(id, available.splice(n, 1)[0]);
+  });
+  function slot(item, label) {
+    if (!item) return '<div class="cb-slot"><span class="cb-slot-hint">' + cbEsc(label || '') + '</span></div>';
+    var p = item.photo;
+    return '<button type="button" class="cb-slot cb-filled" data-cp-stage-preview="' + item.index + '" aria-label="' + cbEsc(p.name) + '" title="' + cbEsc(p.name) + '">'
+      + (p.dataUrl ? '<img src="' + p.dataUrl + '" alt="">' : '<span class="cb-slot-hint">' + cbEsc(item.image && !item.failed ? 'Загрузка…' : p.name) + '</span>')
+      + (label ? '<span class="cb-slot-tag">' + cbEsc(label) + '</span>' : '') + '</button>';
+  }
+  var bg = template && template.bg ? ' style="background:' + cbEsc(template.bg) + '"' : '';
+  if (!template || template.mode === 'auto') {
+    var auto = Array.from(known.values()).concat(available);
+    return cpShootStageAutoPage(auto, template && template.hasHero, bg, slot);
+  }
+  var sourceSlots = template.slots || [];
+  var placed = sourceSlots.map(function (s) {
+    var item = known.get(s.pid);
+    known.delete(s.pid);
+    return item || available.shift();
+  });
+  var slots = sourceSlots.map(function (s, i) { return Object.assign({}, s, { pid: placed[i] ? String(placed[i].index) : null }); });
+  var photos = new Map(placed.filter(Boolean).map(function (item) { return [String(item.index), item.photo]; }));
+  var layout = Object.assign({}, template, { slots: slots });
+  var html = sourceSlots.length ? cbPageHTML(template.canvas, cbManualBoxes(layout, function (id) { return photos.get(id); }), function (i) {
+    return slot(placed[i], sourceSlots[i].name);
+  }, bg) : '';
+  return html + (available.length ? cpShootStageAutoPage(available, false, bg, slot) : '');
+}
+
+function cpShootStageAutoPage(items, hasHero, bg, slot) {
+  var aspects = items.map(function (item) {
+    var p = item.photo, source = item.file.cpPid && cbPhotoById(item.file.cpPid);
+    if (p.w > 0 && p.h > 0) return p.w / p.h;
+    return source && source.w > 0 && source.h > 0 ? source.w / source.h : 0.75;
+  });
+  var page = cbAutoBestGeom({ hasHero: hasHero }, aspects);
+  return cbPageHTML(page.canvas, page.geom, function (i) { return slot(items[i]); }, bg);
+}
+
+var cpStageThumbActive = 0;
+
+function cpQueueStageThumb(mode, item) {
+  if (!item.ready) item.ready = new Promise(function (done) {
+    mode.pending.push({ item: item, done: done });
+    cpPumpStageThumbs();
+  });
+  return item.ready;
+}
+
+function cpPumpStageThumbs() {
+  var mode = CP_SHOOT_VIEW;
+  while (cpStageThumbActive < 4 && mode.pending && mode.pending.length) {
+    (function (job) {
+      cpStageThumbActive++;
+      cpLoadThumb(job.item.photo).then(function (thumb) {
+        if (CP_SHOOT_VIEW !== mode || !thumb.w) {
+          URL.revokeObjectURL(thumb.url);
+          job.item.failed = true;
+          return;
+        }
+        var p = job.item.photo;
+        p.dataUrl = thumb.url; p.w = thumb.w; p.h = thumb.h;
+        var button = document.querySelector('#cpShootStageView [data-cp-stage-preview="' + job.item.index + '"]');
+        if (button) {
+          var img = document.createElement('img');
+          img.alt = ''; img.src = thumb.url;
+          var hint = button.querySelector('.cb-slot-hint');
+          if (hint) hint.replaceWith(img);
+        }
+      }).catch(function () { job.item.failed = true; }).then(function () {
+        job.done();
+        cpStageThumbActive--;
+        cpPumpStageThumbs();
+      });
+    })(mode.pending.shift());
+  }
+}
+
+function cpDisposeShootStage() {
+  var mode = CP_SHOOT_VIEW;
+  if (CP.lb && CP.lb.stage) cpLbClose();
+  if (mode.observer) mode.observer.disconnect();
+  (mode.pending || []).splice(0).forEach(function (job) { job.done(); });
+  (mode.files || []).forEach(function (item) { if (item.photo.dataUrl) URL.revokeObjectURL(item.photo.dataUrl); });
 }
 
 function cpPreviewShootStageFile(index) {
-  var mode = CP_SHOOT_VIEW, item = mode.files[index], box = document.getElementById('cpShootStagePreview');
-  if (!item || !box) return;
-  box.innerHTML = '<p>' + cbEsc(item.file.name) + '</p>'
-    + (CP.readOnly ? '' : '<button type="button" data-cp-stage-trash="' + index + '">Убрать с этапа</button>')
-    + '<div class="cp-stage-preview-image">Загружаю превью…</div>';
-  var preview = box.querySelector('.cp-stage-preview-image');
-  CPDisk.proxyPreview(item.file.path, 'XL').then(function (blob) {
-    if (CP_SHOOT_VIEW !== mode || document.getElementById('cpShootStagePreview') !== box) return;
-    var image = document.createElement('img'), url = URL.createObjectURL(blob);
-    image.alt = item.file.name;
-    image.onload = image.onerror = function () { URL.revokeObjectURL(url); };
-    image.src = url;
-    preview.replaceChildren(image);
-  }).catch(function () {
-    if (CP_SHOOT_VIEW === mode && document.getElementById('cpShootStagePreview') === box) box.textContent = 'Превью недоступно: ' + item.file.name;
-  });
+  var item = CP_SHOOT_VIEW.files[index];
+  if (!item) return;
+  var list = Array.from(document.querySelectorAll('#cpShootStageView [data-cp-stage-preview]')).map(function (node) {
+    return CP_SHOOT_VIEW.files[+node.getAttribute('data-cp-stage-preview')];
+  }).filter(function (frame) { return frame.card === item.card; });
+  cpLbOpen(list, list.indexOf(item), true);
 }
 
 function cpTrashShootStageFile(index) {
@@ -582,6 +761,7 @@ function cpTrashShootStageFile(index) {
   var path = item.file.path;
   if (Object.values(CPQ.ops).some(function (entry) { return entry.op.kind === 'stage-trash' && entry.op.path === path; })) return;
   if (!confirm('Убрать «' + item.file.name + '» с этапа «' + CP_SHOOT_STAGE_LABELS[mode.key] + '» в Корзину Диска?')) return;
+  cpLbClose();
   CPQ.add(CP.shoot, {
     kind: 'stage-trash', label: 'Убрать с этапа: ' + item.file.name, stage: mode.key,
     path: path, digest: item.file.md5 || '', size: item.file.size, rid: item.file.resource_id || '',
@@ -614,10 +794,24 @@ CPQ.after['stage-trash'] = function (op, m) {
 };
 CPQ.redraw['stage-trash'] = true;
 
-CP.openedHooks.push(function () {
+function cpResetShootStage() {
+  cpDisposeShootStage();
   CP_SHOOT_VIEW = { key: 'source', chosen: '' };
   document.body.classList.remove('cp-viewing-stage');
-  document.getElementById('cpShootStageView').hidden = true;
+  var view = document.getElementById('cpShootStageView');
+  view.hidden = true;
+  view.replaceChildren();
   cpRenderShootStageTabs();
-  cpEnsureSettings().then(cpRenderShootStageTabs, function () { });
+}
+
+CP.openedHooks.push(function (path, stage) {
+  cpResetShootStage();
+  var shoot = CP.shoot;
+  function showRequestedStage() {
+    if (CP.shoot !== shoot) return;
+    cpRenderShootStageTabs();
+    if (CP_SHOOT_STAGE_STATUS[stage] && cpShootStageRoot(stage) && CP_SHOOT_VIEW.key === 'source') cpShowShootStage(stage, false, true);
+  }
+  if (CP.settings) showRequestedStage();
+  else cpEnsureSettings().then(showRequestedStage, function () { });
 });

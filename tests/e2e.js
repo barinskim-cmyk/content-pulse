@@ -403,19 +403,29 @@ async function articleFolderChecks(ctx, base) {
   FILES.set(retouch + '/ГОТОВО/готово.jpg', Buffer.from('skip this folder'));
   await page.goto(base + '#access_token=TESTTOKEN&token_type=bearer');
   await page.waitForFunction(() => window.CP && CP.booted, null, { timeout: 10000 });
-  await page.evaluate(async ({ cat, source, name, archive, approvalRoot, retouchRoot, reviewRoot, siteRoot }) => {
+  const stageBarBefore = await page.evaluate(async ({ cat, source, name, archive, approvalRoot, retouchRoot, reviewRoot, siteRoot }) => {
     await cpEnsureSettings();
     await cpDictReady();
-    CP.dict = cpParseDict('[Ретушёры: один]\nY');
+    CP.dict = cpParseDict('[Ретушёры: один]\nY\nK');
     CP.archive = cat;
     cpSet('cp_catalog', cat);
     CP.catalogList = [archive, approvalRoot, retouchRoot, reviewRoot, siteRoot].map(path => ({ path, name: cpFolderBase(path) }));
     Object.assign(CP.settings, { archive, approve: approvalRoot, retouch: retouchRoot, retouched: reviewRoot, site: siteRoot });
-    cpOpenShootNow(source, name);
+    CP.stageFilter = '';
+    cpRenderStageBar();
+    const b = document.querySelector('#cpStages button'), r = b.getBoundingClientRect(), s = getComputedStyle(b);
+    const metrics = [r.left, r.top, s.fontSize, s.borderColor, s.color, s.backgroundColor, s.padding];
+    await cpOpenShootNow(source, name);
+    return metrics;
   }, { cat, source, name, archive, approvalRoot, retouchRoot, reviewRoot, siteRoot });
   await page.waitForFunction(() => App.cards.some(c => c.cpArticle === '074478' && cpCardPids(c).length === 1));
   const summary = await page.evaluate(() => App.cards.map(c => [c.cpArticle, cpCardPids(c).length]));
   check('шесть цифр с ведущим нулём распознаются без правил типа съёмки, пустая папка тоже создаёт карточку', JSON.stringify(summary) === '[["012345",0],["074478",1]]', JSON.stringify(summary));
+  const stageBarInside = await page.evaluate(() => {
+    const b = document.querySelector('#cpShootStageTabs button'), r = b.getBoundingClientRect(), s = getComputedStyle(b);
+    return [r.left, r.top, s.fontSize, s.borderColor, s.color, s.backgroundColor, s.padding];
+  });
+  check('переключатель в съёмке расположен и оформлен как на витрине', stageBarBefore.every((v, i) => i < 2 ? Math.abs(v - stageBarInside[i]) <= 1 : v === stageBarInside[i]), JSON.stringify([stageBarBefore, stageBarInside]));
   const cardId = await page.evaluate(() => App.cards.find(c => c.cpArticle === '074478').id);
   const old = source + '/раньше-был-в-отборе.jpg';
   FILES.set(old, Buffer.from('a previously selected frame'));
@@ -481,10 +491,22 @@ async function articleFolderChecks(ctx, base) {
   check('ручное добавление на Диске меняет карточку и копии до ретуши', [approval, retouch].every(target => FILES.has(target + '/руками.jpg'))
     && await page.evaluate(id => cpCardPids(cbCardById(id)).some(pid => cbPhotoById(pid).name === 'руками.jpg'), cardId));
   await page.evaluate(() => cpFlushSave());
-  await page.evaluate(id => { cpSetActiveCard(id); cpShowShootStage('retouch'); }, cardId);
+  await page.evaluate(id => cpSetActiveCard(id), cardId);
+  await page.click('[data-cp-shoot-stage="retouch"]');
   await page.waitForFunction(() => CP_SHOOT_VIEW.key === 'retouch' && !CP_SHOOT_VIEW.loading);
   check('вкладка «Ретушь» открывает тот же артикул, берёт только файлы этапа и пропускает «ГОТОВО»',
     await page.evaluate(() => CP_SHOOT_VIEW.chosen === '074478' && CP_SHOOT_VIEW.files.map(x => x.file.name).sort().join() === 'запасной.jpg,руками.jpg'));
+  if (!process.env.BLOCK_PREVIEW) await page.waitForFunction(() => [...document.querySelectorAll('#cpShootStageView .cb-page img')].filter(img => img.naturalWidth).length === 2);
+  check('ретушь показывает кадры на листе артикула с буквой и статусом', await page.evaluate(() => {
+    const card = document.querySelector('#cpShootStageView [data-cp-stage-code="074478"]');
+    return card.querySelectorAll('.cb-page .cb-box').length === 2 && card.querySelector('.cb-card-head b[title]').textContent === 'Y'
+      && !!card.querySelector('.cb-card-head strong').textContent && document.querySelector('[data-cp-shoot-stage="retouch"]').getAttribute('aria-pressed') === 'true';
+  }));
+  if (process.env.CP_STAGE_SHOT) await page.screenshot({ path: process.env.CP_STAGE_SHOT });
+  await page.click('#cpShootStageView [data-cp-stage-preview="0"]');
+  await page.keyboard.press('ArrowRight');
+  check('кадры этапа листаются в крупном виде внутри артикула', await page.evaluate(() => CP.lb.stage && CP.lb.list.length === 2 && CP.lb.i === 1));
+  await page.keyboard.press('Escape');
   await page.evaluate(() => cpShowShootStage('review'));
   await page.waitForFunction(() => CP_SHOOT_VIEW.key === 'review' && !CP_SHOOT_VIEW.loading);
   check('вкладка «Отретушировано» показывает только сданное', await page.evaluate(() => CP_SHOOT_VIEW.files.map(x => x.file.name).join() === 'сдано.jpg'));
@@ -499,10 +521,36 @@ async function articleFolderChecks(ctx, base) {
   await page.waitForFunction(() => !CP_SHOOT_VIEW.loading && CP_SHOOT_VIEW.files.length === 1);
   await page.click('[data-cp-stage-preview="0"]');
   page.once('dialog', dialog => dialog.accept());
-  await page.click('[data-cp-stage-trash="0"]');
+  await page.click('[data-lb="stage-trash"]');
   await page.waitForFunction(() => !cpqCount() && !CP_SHOOT_VIEW.loading && !CP_SHOOT_VIEW.files.length);
   check('удаление в программе кладёт в Корзину только выбранную копию этапа', TRASHED.includes(review + '/убрать.jpg')
     && !FILES.has(review + '/убрать.jpg') && FILES.has(site + '/убрать.jpg'));
+  const batches = [reviewRoot + '/23.11.26/Y/1/' + name + '/Бренд/Y_' + code + '_оптика',
+    reviewRoot + '/24.11.26/K/2/' + name + '/Бренд/K_' + code + '_оптика', reviewRoot + '/' + name + '/Бренд/099999_оптика'];
+  batches.forEach((dir, i) => {
+    const parts = dir.split('/');
+    for (let n = 2; n <= parts.length; n++) DIRS.add(parts.slice(0, n).join('/'));
+    FILES.set(dir + '/' + (i + 1) + '.jpg', Buffer.from('batch ' + i));
+  });
+  await page.evaluate(async ({ source, name }) => { await cpOpenShoot(source, name, 'review'); }, { source, name });
+  await page.waitForFunction(() => CP_SHOOT_VIEW.key === 'review' && !CP_SHOOT_VIEW.loading);
+  check('открытие съёмки на 04 объединяет кадры из разных дней и дропов по артикулу и показывает другие карточки', await page.evaluate(() => {
+    const cards = [...document.querySelectorAll('#cpShootStageView .cp-stage-card')];
+    return cards.find(c => c.dataset.cpStageCode === '074478').querySelectorAll('.cb-page button').length === 2
+      && cards.find(c => c.dataset.cpStageCode === '074478').querySelector('b[title]').textContent === 'K · Y'
+      && cards.some(c => c.dataset.cpStageCode === '099999') && !CP_SHOOT_VIEW.filter;
+  }));
+  await page.click('[data-cp-shoot-stage="site"]');
+  await page.waitForFunction(() => CP_SHOOT_VIEW.key === 'site' && !CP_SHOOT_VIEW.loading);
+  check('Сайт открывается листом с файлами 05 и статусом «На сайте»', await page.evaluate(() => {
+    const c = document.querySelector('#cpShootStageView [data-cp-stage-code="074478"]');
+    return c.querySelectorAll('.cb-page button').length === 2 && c.querySelector('strong').textContent === 'На сайте';
+  }));
+  await page.evaluate(() => { window.stageCardBeforeRefresh = document.querySelector('#cpShootStageView .cp-stage-card'); });
+  await page.evaluate(() => cpShowShootStage('site', true, false, true));
+  check('фоновая сверка сохраняет листы на месте, если на Диске всё по-прежнему', await page.evaluate(() =>
+    window.stageCardBeforeRefresh === document.querySelector('#cpShootStageView .cp-stage-card')));
+  batches.forEach((dir, i) => { FILES.delete(dir + '/' + (i + 1) + '.jpg'); DIRS.delete(dir); });
   await page.evaluate(id => {
     cpShowShootStage('source');
     CP.brakAuto = { kind: 'photo', note: 'Тестовая причина' };
@@ -666,6 +714,61 @@ async function articleFolderChecks(ctx, base) {
     && cpModelArticleLook('2026-11-23_СК_МОДЕЛЬ', '40/002222_модель') === '40'
     && cpModelArticleLook('2026-11-23_СК_ОПТИКА', '40/002222_оптика') === ''));
 
+  const rvFixture = await page.evaluate(async ({ reviewRoot, modelName }) => {
+    await cpFlushSave();
+    CP.dict = cpParseDict('[Ретушёры: один]\nY');
+    const id = App.cards.find(c => c.cpArticle === '002222').id;
+    return { id, day: cpToday(), base: cpReviewDropDir(reviewRoot, modelName, 'Y', { date: cpToday(), n: '4' }) };
+  }, { reviewRoot, modelName });
+  const submit = (items) => page.evaluate(async ({ model, modelName, items }) => {
+    cpAcceptOpen(model, modelName);
+    const st = CP.accept;
+    st.data = cbProjectData();
+    st.letter = 'Y';
+    st.n = '4';
+    st.nAuto = false;
+    const files = items.map(([rel, bytes]) => ({ rel: modelName + '/40/Y_002222_модель/' + rel, file: new File([bytes], rel.split('/').pop()) }));
+    cpAcceptAdd(files);
+    await cpAcceptUpload();
+    return document.getElementById('cbToast').textContent;
+  }, { model, modelName, items });
+  const resultDir = rvFixture.base + '/40/Y_002222_модель';
+  const first = await submit([['frame.tif', 'first'], ['frame.tif', 'first'], ['FRAME.tif', 'other'], ['вид/frame.tif', 'third']]);
+  const currentFiles = () => [...FILES.keys()].filter(path => path.startsWith(resultDir + '/')).map(path => path.slice(resultDir.length + 1)).sort();
+  check('04: программа создаёт дату/ретушёра/дроп/съёмку/лук/артикул; повтор одного файла пропускается, разные сохраняются',
+    /Загружено в/.test(first) && JSON.stringify(currentFiles()) === JSON.stringify(['FRAME_2.tif', 'frame.tif', 'вид/frame.tif'].sort()),
+    JSON.stringify([resultDir, currentFiles(), first]));
+  FILES.set(resultDir + '/лишний-старый.tif', Buffer.from('not in last version'));
+  const rootOnDisk = reviewRoot + '/' + modelName;
+  DIRS.add(rootOnDisk);
+  const scanned = await page.evaluate(async ({ modelName, rvFixture, rootOnDisk }) => {
+    const plain = await cpFindShootIn(CP.settings.retouched, modelName, 4, true);
+    const listing = await cpReadStage('review', CP.archive, CP.settings);
+    return [plain.some(d => d.path === rootOnDisk), plain.some(d => d.path === rvFixture.base),
+      (listing[2][modelName.toLowerCase()] || []).includes(rvFixture.base)];
+  }, { modelName, rvFixture, rootOnDisk });
+  check('сверка 04 читает плоскую старую папку и новый дроп одной съёмки', scanned.every(Boolean), JSON.stringify(scanned));
+  UPLOAD_FAIL = { re: /bad\.tif$/, n: 100 };
+  await page.evaluate(() => { CP.upRetryMs = 5; });
+  const failed = await submit([['bad.tif', 'never upload'], ['good.tif', 'upload OK']]);
+  UPLOAD_FAIL = null;
+  check('при сбое одного файла карточки прежний 04 остаётся целым, новая часть не появляется',
+    /Комплект не заменился/.test(failed) && currentFiles().includes('лишний-старый.tif') && !currentFiles().includes('good.tif'), failed);
+  await submit([['replace.tif', 'complete new version']]);
+  check('повторная сдача в том же дропе заменяет папку целиком, включая старые файлы вне сохранённого списка',
+    currentFiles().join() === 'replace.tif' && await page.evaluate(({ id, resultDir, reviewRoot }) => {
+      const list = cpRv()[id], last = list.at(-1);
+      return list.length === 2 && last.dir === resultDir && last.n === '4' && cpReviewRel(reviewRoot, last.dir) === '40/Y_002222_модель';
+    }, { id: rvFixture.id, resultDir, reviewRoot }), JSON.stringify(currentFiles()));
+  const manual = await page.evaluate(({ id, resultDir }) => {
+    const m = cpClone(cpMeta()), card = cbCardById(id), latest = m.rv[id].at(-1), frame = latest.files[0];
+    const folder = { byDir: { [resultDir]: { files: [{ ...frame, md5: 'different-md5' }] } } };
+    const known = { [frame.path]: true }, now = new Date().toISOString();
+    const changed = cpMirrorRvFromDisk(m, card, folder, CP.shoot.name, 'Y', now, [], {}, known);
+    const same = cpMirrorRvFromDisk(m, card, folder, CP.shoot.name, 'Y', now, [], {}, known);
+    return !!frame.md5 && changed && !same && latest.status === 'replaced' && m.rv[id].at(-1).status === 'review';
+  }, { id: rvFixture.id, resultDir });
+  check('ручная замена файла с прежним именем и размером создаёт одну новую версию на проверку', manual);
   check('папки и вкладки без ошибок страницы', !errors.length, errors.join(' | '));
   await page.close();
 }
@@ -1313,7 +1416,7 @@ async function articleFolderChecks(ctx, base) {
     ['disk:/Этапы', RV, ST].forEach(d => DIRS.add(d));
     const prev = await page.evaluate(([rv, st]) => { const p = { site: CP.settings.site, retouched: CP.settings.retouched };
       Object.assign(CP.settings, { retouched: rv, site: st }); localStorage.setItem('cp_rt_letter', 'U'); return p; }, [RV, ST]);
-    const today = await page.evaluate(() => cpToday());
+    const [today, sday] = await page.evaluate(() => [cpToday(), cpIsoDots(cpToday())]);
     const needLog = [];
     const up = async (list) => {
       await page.evaluate(l => {
@@ -1337,20 +1440,23 @@ async function articleFolderChecks(ctx, base) {
       await page.click('[data-cp-acc="close"]');
       return txt;
     };
+    const isInReview = k => k.startsWith(RV + '/') && k.split('/').includes(SN) && !k.split('/').some(part => part.startsWith('_cp_'));
     UPLOAD_FAIL = { re: /manekin\.tif$/, n: 2 };
     await page.evaluate(() => { CP.upRetryMs = 20; });
     const t1 = await up([['готово/74595', 'manekin.tif'], ['готово/74596', 'manekin2.tif']]);
     const upToast = await page.evaluate(() => { CP.upRetryMs = 1500; return document.getElementById('cbToast').textContent; });
     check('сдача ретуши: Диск дважды не принял файл — программа догрузила его сама, без «не загрузилось»',
-      UPLOAD_FAIL.n === 0 && /Загружено в/.test(upToast) && !/не загрузилось/.test(upToast) && [...FILES.keys()].filter(k => k.indexOf(RV + '/' + SN + '/') === 0 && k.endsWith('/manekin.tif')).length === 1, upToast);
+      UPLOAD_FAIL.n === 0 && /Загружено в/.test(upToast) && !/не загрузилось/.test(upToast) && [...FILES.keys()].filter(k => isInReview(k) && k.endsWith('/manekin.tif')).length === 1, upToast);
     UPLOAD_FAIL = null;
-    const inRv = n => [...FILES.keys()].filter(k => k.indexOf(RV + '/' + SN + '/') === 0 && k.endsWith('/' + n));
+    const inRv = n => [...FILES.keys()].filter(k => isInReview(k) && k.endsWith('/' + n));
     check('сдача: буква ретушёра с прошлого раза не подставляется; «Загрузить» без неё не грузит и просит выбрать имя',
       needLog.length >= 1 && needLog[0].every(Boolean), JSON.stringify(needLog));
-    check('сдача в 04: кнопка «Загрузить в 04_ОТРЕТУШИРОВАНО», буква выбрана нажатием (U), файлы — 04/<съёмка>/<лук>/<буква_папка артикула>/ (2.0.117: с буквой, как в 03)',
+    check('сдача в 04: кнопка «Загрузить в 04_ОТРЕТУШИРОВАНО», буква выбрана нажатием (U), файлы — 04/<дата>/<буква>/<номер>/<съёмка>/<лук>/<папка артикула>/',
       /Загрузить в 04_ОТРЕТУШИРОВАНО/.test(t1) && inRv('manekin.tif').length === 1 && inRv('manekin2.tif').length === 1 && /\/1\/U_74595_модель\/manekin\.tif$/.test(inRv('manekin.tif')[0]),
       JSON.stringify([t1, inRv('manekin.tif'), inRv('manekin2.tif')]));
     /* карточки, которым досталась эта сдача (у артикула бывает две карточки — смотрим по версиям) */
+    const reviewShootRoot = inRv('manekin.tif')[0].split('/').slice(0, inRv('manekin.tif')[0].split('/').indexOf(SN) + 1).join('/');
+    check('сдача формирует папки даты, ретушёра и номера дропа автоматически', reviewShootRoot === RV + '/' + sday + '/U/1/' + SN, reviewShootRoot);
     const prog = await page.evaluate(() => window.__prog);
     check('по ходу загрузки видно прогресс в окне сдачи (файлы, МБ, %), заставка «Загружаю» — поверх окна', prog.some(t => /Загружаю в 04_ОТРЕТУШИРОВАНО: файлов \d+ из 2 .* МБ \(\d+%\)/.test(t)) && prog.some(t => /\(100%\)/.test(t))
       && await page.evaluate(() => +getComputedStyle(document.getElementById('cbBusy')).zIndex > +getComputedStyle(document.getElementById('cpAccept')).zIndex), JSON.stringify(prog.slice(-3)));
@@ -1368,8 +1474,8 @@ async function articleFolderChecks(ctx, base) {
       for (let i = 0; i < 60; i++) { try { const st = JSON.parse(FILES.get(STF).toString()); if (st.meta.cp.rv && st.meta.cp.rv[ids.a]) break; } catch (e) { } await page.waitForTimeout(100); }
       for (const k of [...FRESH.keys()]) if (k.indexOf(RV) === 0) FRESH.delete(k);   /* свежие файлы Диск показывает не сразу — здесь не ждём */
       await page.evaluate(([rv, rt, sn]) => { const low = sn.toLowerCase(); CP.stagePaths = CP.stagePaths || {};
-        (CP.stagePaths.review = CP.stagePaths.review || {})[low] = [rv + '/' + sn]; (CP.stagePaths.retouch = CP.stagePaths.retouch || {})[low] = [rt];
-        CP.stageFilter = 'review'; cpSelectShoot(CP.shoot.path, CP.shoot.name, ''); }, [RV, RT0, SN]);
+        (CP.stagePaths.review = CP.stagePaths.review || {})[low] = [rv]; (CP.stagePaths.retouch = CP.stagePaths.retouch || {})[low] = [rt];
+        CP.stageFilter = 'review'; cpSelectShoot(CP.shoot.path, CP.shoot.name, ''); }, [reviewShootRoot, RT0, SN]);
       await page.waitForFunction(() => CP.sel && !CP.sel.loading && !!document.querySelector('#cpPanel [data-cp-stdl]'));
       const pt = await page.textContent('#cpPanel');
       check('панель «Отретушировано» показывает только папки 04', /Здесь файлов: 2/.test(pt) && !/99999|Не сдано — без ретуши/.test(pt), pt);
@@ -1402,7 +1508,6 @@ async function articleFolderChecks(ctx, base) {
     FILES.set(RT3 + '/1/74596_модель/manekin2.jpg', Buffer.from('Q'.repeat(140)));
     await page.click('[data-cp-rv="' + ids.b + '"] [data-cp-rva="approve"]');
     /* 2.0.116: сайт / ДД.ММ.ГГ / буква того, кто сдал / съёмка / лук / артикул — структура исходников */
-    const sday = (() => { const d = new Date(), z = n => (n < 10 ? '0' : '') + n; return z(d.getDate()) + '.' + z(d.getMonth() + 1) + '.' + String(d.getFullYear()).slice(2); })();
     const lB = await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].letter, ids.b);
     const nB = await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].n, ids.b);
     /* 2.0.118: сайт / день дропа / буква / номер дропа / съёмка / лук / буква_артикул */
@@ -1503,7 +1608,7 @@ async function articleFolderChecks(ctx, base) {
     await page.waitForFunction(i => cpMeta().rv[i].slice(-1)[0].status === 'approved' && !cpqCount(), ids.a, { timeout: 12000 });
     check('очередь докопировала — теперь «на сайте» и сдано', await page.evaluate(i => !!cpMeta().delivered[i], ids.a));
     const lA = await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].letter, ids.a), nDropA = await page.evaluate(i => cpMeta().rv[i].slice(-1)[0].n, ids.a);
-    check('после копирования всех артикулов папка 04 остаётся', FILES.has(ST + '/' + sday + '/' + lA + '/' + nDropA + '/' + SN + '/1/' + lA + '_74595_модель/manekin.tif') && DIRS.has(RV + '/' + SN) && inRv('manekin.tif').length === 1, JSON.stringify(TRASHED.slice(-4)));
+    check('после копирования всех артикулов папка 04 остаётся', FILES.has(ST + '/' + sday + '/' + lA + '/' + nDropA + '/' + SN + '/1/' + lA + '_74595_модель/manekin.tif') && DIRS.has(reviewShootRoot) && inRv('manekin.tif').length === 1, JSON.stringify(TRASHED.slice(-4)));
     for (let i = 0; i < 40 && !/принято[\s\S]*принято/.test((FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString()); i++) await page.waitForTimeout(100);
     const out = (FILES.get('disk:/_ContentPulse/выработка.csv') || '').toString();
     check('выработка: таблица в служебной папке — сдано ×4, доработка, в карточку, принято ×2, с буквой и датой', /^\uFEFFдата;время;ретушёр/.test(out) && (out.match(/;сдано;/g) || []).length === 4
@@ -1585,8 +1690,8 @@ async function articleFolderChecks(ctx, base) {
         cbMarkDirty();
         return out;
       });
-      for (const d of [...DIRS]) if (d.indexOf(RV + '/' + SN) === 0) DIRS.delete(d);
-      for (const k of [...FILES.keys()]) if (k.indexOf(RV + '/' + SN) === 0) FILES.delete(k);
+      for (const d of [...DIRS]) if (isInReview(d)) DIRS.delete(d);
+      for (const k of [...FILES.keys()]) if (isInReview(k)) FILES.delete(k);
       check('2.0.118: сдали в 04 руками (файлы переименованы, папка U_74598_модель) — у карточки версия «с Диска» на проверке, буква U, день — по файлу',
         hd.added === 1 && hd.batch === 'Диск' && hd.letter === 'U' && hd.status === 'review' && hd.file === 'ret_1.tif' && /^\d{4}-\d{2}-\d{2}$/.test(hd.drop || ''), JSON.stringify(hd));
     }

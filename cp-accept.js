@@ -238,8 +238,11 @@ function cpPlanUpload(files, data) {
   files.forEach(function (x, i) {
     var s = segs[i];
     /* Ближайшая папка артикула имеет приоритет. Не подставляем случайную карточку, если код повторяется. */
-    var card = null;
-    for (var k = s.length - 2; k >= 0 && card === null; k--) card = cardOfFolder(s[k], s.slice(0, k));
+    var card = null, at = -1;
+    for (var k = s.length - 2; k >= 0 && card === null; k--) {
+      card = cardOfFolder(s[k], s.slice(0, k));
+      if (card) at = k;
+    }
     var names = byStem[cpStem(x.file.name)] || [];
     if (card === null && (names.length === 1 || (names.length && !names.some(function (c) { return cpSixCode(c.cpArticle); })))) card = names[0];
     if (card === null) {
@@ -247,7 +250,8 @@ function cpPlanUpload(files, data) {
       if (code) card = cardOfFolder(code, []);
     }
     if (!card) { unmatched.push(s.join('/')); return; }
-    (groups[card.id] = groups[card.id] || []).push({ file: x.file, name: x.file.name });
+    var sub = at === -1 ? [] : s.slice(at + 1, -1);
+    (groups[card.id] = groups[card.id] || []).push({ file: x.file, name: x.file.name, sub: sub });
   });
   return { letter: lm[1] || '', n: lm[2] || '', groups: groups, unmatched: unmatched, top: top };
 }

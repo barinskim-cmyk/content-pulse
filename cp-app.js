@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.128';
+var CP_VERSION = '2.0.129';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -400,7 +400,7 @@ function cpRenderShoots() {
 document.getElementById('cpShelfList').addEventListener('dblclick', function (e) {
   var b = e.target.closest('.cp-shoot');
   if (!b) return;
-  cpOpenShoot(b.getAttribute('data-path'), b.getAttribute('data-name'));
+  cpOpenShoot(b.getAttribute('data-path'), b.getAttribute('data-name'), CP.stageFilter);
 });
 document.getElementById('cpShelfList').addEventListener('click', function (e) {
   var b = e.target.closest('.cp-shoot');
@@ -422,6 +422,7 @@ function cpCloseShoot() {
   if (!CP.shoot) return;
   clearInterval(CP.pollTimer);
   CP.shoot = null;
+  cpResetShootStage();
   CP.readOnly = false;
   CP.saveState = null;
   cbClearDirty();
@@ -500,17 +501,17 @@ function cpFlushSave() {
   });
 }
 
-function cpOpenShoot(path, name) {
+function cpOpenShoot(path, name, stage) {
   if (typeof cpConfirmArticleLeave === 'function' && CP.shoot && CP.shoot.path !== path && !cpConfirmArticleLeave()) return;
   /* сначала дописываем отбор открытой съёмки, потом переключаемся */
   if (CP.shoot && CP.shoot.path !== path && (App.dirty || CP.saving)) {
     cbBusyShow('Сохраняю отбор съёмки ' + CP.shoot.name + '...', 0.05);
-    return cpFlushSave().then(function () { cpOpenShootNow(path, name); });
+    return cpFlushSave().then(function () { return cpOpenShootNow(path, name, stage); });
   }
-  return cpOpenShootNow(path, name);
+  return cpOpenShootNow(path, name, stage);
 }
 
-function cpOpenShootNow(path, name) {
+function cpOpenShootNow(path, name, stage) {
   cbBusyShow('Открываю съёмку ' + name + ': читаю сохранённый отбор...', 0.1);
   /* обход папок идёт параллельно с чтением отбора (или уже идёт с витрины) */
   var walk = cpWalk(path);
@@ -518,7 +519,7 @@ function cpOpenShootNow(path, name) {
   /* Отбор не прочитался — всё равно показываем кадры, но не сохраняем,
      чтобы не затереть чужую работу пустым отбором. */
   var stateError = null;
-  CPDisk.readState(path).catch(function (e) {
+  return CPDisk.readState(path).catch(function (e) {
     if (e && e.status === 401) throw e;
     stateError = e;
     if (window.console) console.error('[CP] отбор не прочитался', path, e && (e.body || e.message), e);
@@ -552,6 +553,7 @@ function cpOpenShootNow(path, name) {
     }
     function opened(added) {
       cbBusyHide();
+      cpRememberShelfStages();
       document.getElementById('cpShelf').classList.remove('cp-open');
       if (stateError) {
         cbToast('Кадры открыты, но сохранённый отбор не прочитался: ' + (stateError.message || stateError)
@@ -561,7 +563,7 @@ function cpOpenShootNow(path, name) {
       }
       cpStartPoll();
       /* модули узнают, что съёмка открыта (фильтр по отмеченным папкам — cp-deliver.js) */
-      (CP.openedHooks || []).forEach(function (f) { try { f(path); } catch (e) { if (window.console) console.error('[CP]', e); } });
+      (CP.openedHooks || []).forEach(function (f) { try { f(path, stage); } catch (e) { if (window.console) console.error('[CP]', e); } });
     }
     /* Съёмку уже открывали: кадры известны из отбора — показываем сразу,
        новые файлы досчитываются в фоне. Новую съёмку ждём целиком. */
@@ -2764,7 +2766,7 @@ cpSetTitle();
 var CP_BIG_SIZE = '2400x2400';
 var CP_BIG_FALLBACK = 'XXXL';
 CP.big = {};          /* путь на Диске -> objectURL крупного превью */
-CP.lb = null;         /* {list:[pid], i} */
+CP.lb = null;         /* исходники: list из pid; этап: list из файлов этапа */
 
 (function cpLbDom() {
   var lb = document.createElement('div');
@@ -2778,6 +2780,8 @@ CP.lb = null;         /* {list:[pid], i} */
     + '<button data-lb="like" title="Лайк — чтобы потом быстрее собрать карточку (клавиша L)">Лайк</button>'
     + '<button data-lb="brak" title="Кадр в брак — на пересъём">В брак</button>'
     + '<button data-lb="retouch" class="cp-act-rt" title="Отправить кадр на ретушь">На ретушь</button>'
+    + '<button data-lb="stage-download" hidden>Скачать файл</button>'
+    + '<button data-lb="stage-trash" hidden>Убрать с этапа</button>'
     + '<button data-lb="close" title="Закрыть (Esc)">Закрыть</button></div>'
     + '<div class="cp-lb-body" id="cpLbBody"><img id="cpLbImg" alt=""><div class="cp-lb-note" id="cpLbNote"></div></div>';
   document.body.appendChild(lb);
@@ -2789,6 +2793,12 @@ CP.lb = null;         /* {list:[pid], i} */
       else if (a === 'prev') cpLbStep(-1);
       else if (a === 'next') cpLbStep(1);
       else if (a === 'like') cpLbLike();
+      else if (a === 'stage-download' && CP.lb && CP.lb.stage) {
+        CPDisk.downloadHref(CP.lb.list[CP.lb.i].file.path).then(function (href) {
+          cpStartDownload(href);
+        }).catch(function (e) { cpHandleError(e, 'Не удалось скачать файл'); });
+      }
+      else if (a === 'stage-trash' && CP.lb && CP.lb.stage) cpTrashShootStageFile(CP.lb.list[CP.lb.i].index);
       else if (a === 'brak' && CP.lb) {
         cpDoAction('reshoot', [CP.lb.list[CP.lb.i]], null);
         setTimeout(cpLbShow, 300);
@@ -2844,8 +2854,8 @@ document.addEventListener('dblclick', function (e) {
   cpLbOpen(list, i);
 }, true);
 
-function cpLbOpen(list, i) {
-  CP.lb = { list: list, i: i };
+function cpLbOpen(list, i, stage) {
+  CP.lb = { list: list, i: i, stage: !!stage };
   document.getElementById('cpLb').classList.add('cp-open');
   document.getElementById('cpLbBody').classList.remove('cp-full');
   cpLbShow();
@@ -2859,7 +2869,7 @@ function cpLbClose() {
 
 /** Лайк кадра в просмотре: общий для всех, хранится в отборе съёмки. */
 function cpLbLike() {
-  if (!CP.lb) return;
+  if (!CP.lb || CP.lb.stage) return;
   var pid = CP.lb.list[CP.lb.i];
   var likes = cpMeta().likes;
   if (likes[pid]) delete likes[pid];
@@ -2881,19 +2891,19 @@ function cpLbNote(text) {
   if (text !== undefined) note.setAttribute('data-t', text);
   var full = document.getElementById('cpLbBody').classList.contains('cp-full');
   note.textContent = (note.getAttribute('data-t') || '') + (full ? ' · 100 % — клик, чтобы вписать' : ' · клик — 100 %')
-    + ' · стрелки — листать · L — лайк · Esc — закрыть';
+    + ' · стрелки — листать' + (CP.lb && CP.lb.stage ? '' : ' · L — лайк') + ' · Esc — закрыть';
 }
 
 function cpLbShow() {
   if (!CP.lb) return;
-  var pid = CP.lb.list[CP.lb.i];
-  var p = cbPhotoById(pid);
+  var frame = CP.lb.list[CP.lb.i], stage = CP.lb.stage, pid = stage ? '' : frame;
+  var p = stage ? frame.photo : cbPhotoById(pid);
   if (!p) return;
   var img = document.getElementById('cpLbImg');
   document.getElementById('cpLbName').textContent = p.name;
-  document.getElementById('cpLbPath').textContent = cpRelDir(p) || 'корень съёмки';
+  document.getElementById('cpLbPath').textContent = (stage ? frame.rel : cpRelDir(p)) || 'корень съёмки';
   document.getElementById('cpLbCount').textContent = (CP.lb.i + 1) + ' / ' + CP.lb.list.length;
-  document.getElementById('cpLbBadges').innerHTML = cpBadgeHTML(pid).replace(/cp-badge/g, 'cp-badge cp-badge-inline');
+  document.getElementById('cpLbBadges').innerHTML = stage ? cbEsc(frame.file.cpStageStatus || '') : cpBadgeHTML(pid).replace(/cp-badge/g, 'cp-badge cp-badge-inline');
   var lkb = document.querySelector('#cpLb [data-lb="like"]');
   var liked = !!cpMeta().likes[pid];
   lkb.textContent = liked ? 'Убрать лайк' : 'Лайк';
@@ -2905,45 +2915,52 @@ function cpLbShow() {
   var rt = document.querySelector('#cpLb [data-lb="retouch"]');
   rt.textContent = st && st.s === 'retouch' ? 'В ретуши' : 'На ретушь';
   rt.disabled = !!(st && st.s === 'retouch');
-  var big = CP.big[p.disk];
+  lkb.hidden = bkb.hidden = rt.hidden = stage;
+  document.querySelector('#cpLb [data-lb="stage-download"]').hidden = !stage || frame.image;
+  document.querySelector('#cpLb [data-lb="stage-trash"]').hidden = !stage || CP.readOnly;
+  if (stage && !frame.image) { img.removeAttribute('src'); cpLbNote('Файл можно скачать'); return; }
+  var largeKey = p.disk + (stage ? '|' + (frame.file.md5 || frame.file.modified || frame.file.resource_id || '') : '');
+  var big = CP.big[largeKey];
   if (big) { img.src = big; cpLbNote('крупно'); return; }
   if (p.dataUrl) img.src = p.dataUrl; else img.removeAttribute('src');
   cpLbNote('загружаю крупно...');
   var disk = p.disk;
-  cpLoadBig(disk).then(function (url) {
-    if (!CP.lb || cbPhotoById(CP.lb.list[CP.lb.i]).disk !== disk) return;
+  function stillOpen() { return CP.lb && CP.lb.stage === stage && CP.lb.list[CP.lb.i] === frame; }
+  cpLoadBig(disk, largeKey, stage ? p : null).then(function (url) {
+    if (!stillOpen()) return;
     img.src = url;
     cpLbNote('крупно');
   }, function (e) {
-    if (!CP.lb || cbPhotoById(CP.lb.list[CP.lb.i]).disk !== disk) return;
+    if (!stillOpen()) return;
     cpLbNote('крупное превью не загрузилось: ' + ((e && (e.status || e.message)) || e));
   });
   /* соседний кадр — заранее, чтобы листалось без ожидания */
-  var nx = cbPhotoById(CP.lb.list[(CP.lb.i + 1) % CP.lb.list.length]);
+  var nx = stage ? null : cbPhotoById(CP.lb.list[(CP.lb.i + 1) % CP.lb.list.length]);
   if (nx && nx.disk && !CP.big[nx.disk]) cpLoadBig(nx.disk).catch(function () { });
 }
 
 var _cpBigP = {};
-function cpLoadBig(disk) {
-  if (CP.big[disk]) return Promise.resolve(CP.big[disk]);
-  if (_cpBigP[disk]) return _cpBigP[disk];
+function cpLoadBig(disk, key, photo) {
+  key = key || disk;
+  if (CP.big[key]) return Promise.resolve(CP.big[key]);
+  if (_cpBigP[key]) return _cpBigP[key];
   var p = CPDisk.proxyPreview(disk, CP_BIG_SIZE).catch(function (e) {
     if (e && e.status === 413) return CPDisk.proxyPreview(disk, CP_BIG_FALLBACK);
     throw e;
   }).catch(function (e) {
     /* у Яндекса нет превью этого кадра — показываем сам файл: прослойка переносит его в Облако */
     if (!e || e.status === 401) throw e;
-    var ph = App.photos.filter(function (q) { return q.disk === disk; })[0] || {};
+    var ph = photo || App.photos.find(function (q) { return q.disk === disk; }) || {};
     return CPDisk.proxyMpu({ op: 'whole', from: disk, size: ph.size || 0, filename: ph.name || 'file.jpg' }).then(function (out) {
       if (!out || !out.url) throw e;
       return cpImgByUrl(out.url).then(function () { return { direct: out.url }; }, function () { throw e; });
     });
   }).then(function (blob) {
     var url = blob && blob.direct ? blob.direct : URL.createObjectURL(blob);
-    CP.big[disk] = url;
-    delete _cpBigP[disk];
+    CP.big[key] = url;
+    delete _cpBigP[key];
     return url;
-  }, function (e) { delete _cpBigP[disk]; throw e; });
-  _cpBigP[disk] = p;
+  }, function (e) { delete _cpBigP[key]; throw e; });
+  _cpBigP[key] = p;
   return p;
 }
