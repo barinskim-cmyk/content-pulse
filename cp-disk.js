@@ -166,6 +166,10 @@ var CPDisk = (function () {
         function (e) { return { status: 0, text: String(e && e.message || e) }; });
   }
 
+  function isReadyFolder(name) {
+    return /^(?:\d{1,2}[_. -]+)?готово$/i.test(String(name || '').trim());
+  }
+
   /** Путь для показа человеку: без «disk:», общий диск — «Общий диск/...» */
   function showPath(p) {
     p = String(p || '');
@@ -232,7 +236,7 @@ var CPDisk = (function () {
   /** Витрина: папки съёмок в архиве, свежие сверху. */
   function listShoots(archive) {
     return listDir(archive).then(function (items) {
-      return items.filter(function (r) { return r.type === 'dir' && r.name.charAt(0) !== '_'; })
+      return items.filter(function (r) { return r.type === 'dir' && r.name.charAt(0) !== '_' && !isReadyFolder(r.name); })
         .sort(function (a, b) { return a.modified < b.modified ? 1 : -1; });
     });
   }
@@ -268,7 +272,7 @@ var CPDisk = (function () {
             var prevDirs = out.dirs.length;
             items.forEach(function (r) {
               if (r.type === 'dir') {
-                if (r.name.charAt(0) === '_' || r.name === RETOUCH_DIR) return;
+                if (r.name.charAt(0) === '_' || r.name === RETOUCH_DIR || isReadyFolder(r.name)) return;
                 queue.push(r.path);
                 out.dirs.push(r.path);
                 if (r.custom_properties) out.dirProps[r.path] = r.custom_properties;
@@ -574,7 +578,7 @@ var CPDisk = (function () {
     previewBlob: previewBlob, downloadHref: downloadHref, downloadBlob: downloadBlob,
     ensureDir: ensureDir, uploadBlob: uploadBlob, copy: copy, waitOperation: waitOperation,
     readState: readState, writeState: writeState, stateRev: stateRev, safeName: safeName,
-    isVd: isVd, rootOf: rootOf, showPath: showPath, rawGet: rawGet,
+    isVd: isVd, rootOf: rootOf, showPath: showPath, isReadyFolder: isReadyFolder, rawGet: rawGet,
     trash: trash, proxyMove: proxyMove, proxyZipPart: proxyZipPart, proxyCrc: proxyCrc, meta: meta, proxySpeedUrls: proxySpeedUrls, uploadHref: uploadHref, proxyCloudUp: proxyCloudUp, opStatus: opStatus, removeTemp: removeTemp
   };
 })();

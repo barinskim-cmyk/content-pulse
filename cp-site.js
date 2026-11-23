@@ -18,7 +18,7 @@
    лежат файлы; файлы прямо в папке даты — метка на ней самой.
    ============================================================ */
 
-CP.siteSub = cpGet('cp_site_sub', '') || '';
+CP.siteSub = '';
 if (CP.siteSub !== 'new' && CP.siteSub !== 'recent') CP.siteSub = '';
 CP.siteRecentDays = 7;
 CP.siteScanMax = 30;        /* сразу читаем столько свежих дат; старые — когда их открыли */
@@ -26,7 +26,10 @@ CP.siteDates = null;        /* [{path, name, date}] */
 CP.siteDatesAt = 0;
 CP.siteScan = {};           /* путь даты -> {at, files, dirs, props, error} */
 
-function cpSiteRootPath() { return String((CP.settings && CP.settings.site) || '').replace(/\/+$/, ''); }
+function cpSiteRootPath() {
+  var path = String((CP.settings && CP.settings.site) || '').replace(/\/+$/, '');
+  return CPDisk.isReadyFolder(cpFolderBase(path)) ? '' : path;
+}
 
 /** Имя папки как дата ГГГГ-ММ-ДД; '' — не дата. */
 function cpSiteDateName(nm) {
@@ -56,7 +59,7 @@ function cpSiteRefresh(force) {
   _cpSiteBusy = true;
   return cpListDirs(root).then(function (ds) {
     CP.siteDatesRoot = root;
-    CP.siteDates = ds.filter(function (d) { return d.name.charAt(0) !== '_'; }).map(function (d) {
+    CP.siteDates = ds.filter(function (d) { return d.name.charAt(0) !== '_' && !CPDisk.isReadyFolder(d.name); }).map(function (d) {
       return { path: d.path, name: d.name, date: cpSiteDateName(d.name) };
     }).sort(function (a, b) { var x = a.date || a.name, y = b.date || b.name; return x < y ? 1 : x > y ? -1 : 0; });
     CP.siteDatesAt = Date.now();
@@ -197,7 +200,6 @@ document.getElementById('cpShelfList').addEventListener('click', function (e) {
   if (b) {
     e.preventDefault(); e.stopPropagation();
     CP.siteSub = b.getAttribute('data-cp-site-sub');
-    cpSet('cp_site_sub', CP.siteSub);
     cpRenderShoots();
     return;
   }

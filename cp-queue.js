@@ -231,6 +231,11 @@ function cpqRun(op) {
     });
   }
   if (op.kind === 'trash') {
+    if (/^Убрать сданное из ретуши:/.test(op.label || '')) {
+      op.label = 'Отменена автоматическая очистка ретуши';
+      op.tries = 0;
+      return Promise.resolve({ ok: true });
+    }
     return CPDisk.trash(op.paths).then(function (res) {
       var left = res.filter(function (x) { return x.status !== 'done' && x.status !== 'gone'; }).map(function (x) { return x.path; });
       op.paths = left;

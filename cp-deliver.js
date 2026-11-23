@@ -138,12 +138,11 @@ function cpOutlineDecorate() {
     if (marks) btn.insertAdjacentHTML('beforeend', '<span class="cp-oi-m">' + marks + '</span>');
   });
   var title = host.querySelector('.cb-outline-title');
-  var visible = App.cards.filter(cpCardMatchesFolders);
+  var visible = App.cards.filter(function (c) { return cpCardMatchesFolders(c) && (!CP.viewStage || cpCardOnStage(c, CP.viewStage)); });
   var n = Object.keys(CP.checked).filter(function (k) { return CP.checked[k] && cbCardById(k); }).length;
   if (title && !title.querySelector('.cp-oi-all')) {
     title.insertAdjacentHTML('beforeend', ' <a href="#" class="cp-oi-all" data-cp-o="all">'
-      + (n && n >= visible.length ? 'снять' : 'отметить все') + '</a>'
-      + (CP.cardFolders && CP.cardFolders.length ? ' <a href="#" data-cp-o="nofilter" title="Сейчас видны карточки папок: ' + cbEsc(CP.cardFolders.join(', ')) + '">все карточки</a>' : ''));
+      + (n && n >= visible.length ? 'снять' : 'отметить все') + '</a>');
   }
   var bar = document.getElementById('cpObar');
   if (!bar) {
@@ -191,13 +190,11 @@ document.getElementById('cbOutline').addEventListener('click', function (e) {
   if (b.hasAttribute('data-cp-batch')) { cpBatchStatus(b.getAttribute('data-cp-batch') || null); return; }
   var act = b.getAttribute('data-cp-o');
   if (act === 'all') {
-    var vis = App.cards.filter(cpCardMatchesFolders);
+    var vis = App.cards.filter(function (c) { return cpCardMatchesFolders(c) && (!CP.viewStage || cpCardOnStage(c, CP.viewStage)); });
     var allOn = vis.length && vis.every(function (c) { return CP.checked[c.id]; });
     CP.checked = {};
     if (!allOn) vis.forEach(function (c) { CP.checked[c.id] = true; });
     cbRenderOutline();
-  } else if (act === 'nofilter') {
-    cpSetCardFolders(null);
   } else if (act === 'download') cpDownloadChecked();
   else if (act === 'site') cpCheckSite();
 }, true);
@@ -346,7 +343,7 @@ function cpSiteRoot() { return (CP.settings && CP.settings.site) || ''; }
 
 function cpListDirs(path, prio) {
   return CPDisk.listDir(path, null, prio).then(function (items) {
-    return items.filter(function (it) { return it.type === 'dir'; });
+    return items.filter(function (it) { return it.type === 'dir' && !CPDisk.isReadyFolder(it.name); });
   }, function (e) { if (e && e.status === 404) return []; throw e; });
 }
 
@@ -443,7 +440,7 @@ function cpCheckSite() {
     cbRenderCards();
     cbRenderOutline();
     cpShowSiteReport(found, del, missing, unmatched, withPhotos.length, root);
-    if (nDel && typeof cpRetouchCleanupSoon === 'function') cpRetouchCleanupSoon();
+    if (nDel && typeof cpMirrorAfterDelivery === 'function') cpMirrorAfterDelivery();
   }).catch(function (e) {
     cbBusyHide();
     if (e && e.plain) { cbToast('Проверить сдачу: ' + e.message); return; }
@@ -546,9 +543,6 @@ function cpSetCardFolders(list) {
 
 cpOpenShootNow = (function (orig) {
   return function (path, name) {
-    /* отмеченные на панели папки этой съёмки — фильтр галереи и карточек после открытия */
-    var sel = CP.sel;
-    var folders = sel && sel.path === path ? Object.keys(sel.folders || {}).filter(function (k) { return sel.folders[k]; }) : [];
     CP.checked = {};
     CP.cardFolders = null;
     /* «Назад» в браузере: одна запись истории на съёмку (вторая съёмка её заменяет) */
@@ -559,23 +553,9 @@ cpOpenShootNow = (function (orig) {
       } catch (e) { }
     }
     CP.fromHistory = false;
-    CP.openFolders = { path: path, folders: folders };
     return orig.apply(this, arguments);
   };
 })(cpOpenShootNow);
-
-CP.openedHooks = CP.openedHooks || [];
-CP.openedHooks.push(function (path) {
-  var o = CP.openFolders;
-  CP.openFolders = null;
-  if (!o || o.path !== path || !o.folders.length) return;
-  CP.folder = o.folders[0];
-  CP.folderByCard = true;   /* в списке папок галереи — отдельным пунктом, если глубже второго уровня */
-  CP.cardFolders = o.folders;
-  cbRenderTray();
-  cbRenderCards();
-  cbRenderOutline();
-});
 
 window.addEventListener('popstate', function (e) {
   var st = e.state || {};

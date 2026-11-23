@@ -49,7 +49,7 @@ CP.catalogList = null;   /* папки открытого каталога: [{na
 /** Путь каталога, если открыт каталог; иначе ''. */
 /** Папка похожа на каталог: внутри есть папки этапов с номерами 01–05. */
 function cpCatLike(items) {
-  return (items || []).some(function (x) { var m = x.type === 'dir' && CP_CAT_RE.exec(x.name); return m && /^0[1-5]$/.test(m[1]); });
+  return (items || []).some(function (x) { var m = x.type === 'dir' && CP_CAT_RE.exec(x.name); return m && /^0[1-5]$/.test(m[1]) && !CPDisk.isReadyFolder(x.name); });
 }
 
 function cpCatalog() {
@@ -59,15 +59,12 @@ function cpCatalog() {
 
 /** Что значит папка каталога: роль или 'skip'. */
 function cpCatRoleOf(name, settings) {
+  if (CPDisk.isReadyFolder(name)) return 'skip';
   var cfg = ((settings || CP.settings || {}).stageRoles) || {};
   var r = cfg[String(name).toLowerCase()];
   if (r) return r;
   for (var i = 0; i < CP_CAT_WORDS.length; i++) if (CP_CAT_WORDS[i][0].test(name)) return CP_CAT_WORDS[i][1];
   var m = CP_CAT_RE.exec(name);
-  /* Отдельная папка «ГОТОВО» без номера этапа (2.0.105 читалась вместе с папкой сайта) — не читается:
-     витрина из-за неё долго доходила до ретуши (Маша, 17.11.2026: «давай обходить папку готово… кроме
-     сайта — там пока не отрубай»). «готово» внутри папки сайта читается по-прежнему; с номером — решает номер.
-     Включить обратно можно в шестерёнке: роль папки «сайт». */
   return (m && CP_CAT_NUM[m[1]]) || 'skip';
 }
 
@@ -87,7 +84,7 @@ function cpCatMerge(settings) {
     if (d) settings[r.setting] = d.path;
     else delete settings[r.setting];
   });
-  /* папок с готовым может быть две («05_САЙТ» и «ГОТОВО»): первая — куда программа отправляет, остальные только читаются */
+  /* Дополнительные папки сайта читаются по роли каталога. */
   var more = cpCatDirs('site', settings).slice(1).map(function (d) { return d.path; });
   if (more.length) settings.siteMore = more; else delete settings.siteMore;
   settings.catalog = cpCatalog();
@@ -140,7 +137,7 @@ cpParseSettings = (function (orig) {
         CP.catalogList = null;
         cpCatRender();
         /* обычный архив: те же папки, что дал бы listOrig, без второго запроса */
-        return items.filter(function (r) { return r.type === 'dir' && r.name.charAt(0) !== '_'; })
+        return items.filter(function (r) { return r.type === 'dir' && r.name.charAt(0) !== '_' && !CPDisk.isReadyFolder(r.name); })
           .sort(function (a, b) { return a.modified < b.modified ? 1 : -1; });
       });
     }
@@ -249,7 +246,7 @@ function cpSiteDirHas(x) {
   };
   return head(x.path).then(function (items) {
     if (real(items)) return true;
-    var dirs = (items || []).filter(function (i) { return i.type === 'dir'; });
+    var dirs = (items || []).filter(function (i) { return i.type === 'dir' && !CPDisk.isReadyFolder(i.name); });
     if (!dirs.length) return false;
     return cpPool(dirs, 2, function (d) { return head(d.path).then(real, function () { return false; }); }).then(function (r) { return r.some(Boolean); });
   }, function (e) { if (e && e.status === 404) return false; throw e; }).then(function (has) {
@@ -305,7 +302,7 @@ function cpCountStageArts(keys) {
             var here = 0, files = [];
             (items || []).forEach(function (x) {
               if (x.type !== 'dir') { files.push(x.name); return; }
-              if (x.name.charAt(0) === '_') return;
+              if (x.name.charAt(0) === '_' || CPDisk.isReadyFolder(x.name)) return;
               var name = x.name.replace(/^(!|\d{1,2})_(?=\D)/, ''), letter = '';
               var sp = cpLetterSplit(name, letters);
               if (sp) { letter = sp.letter; name = sp.rest; }
@@ -463,35 +460,31 @@ function cpArtBarPhys(sum, phys) {
   return '<div class="cp-artbar">' + line + '<div class="cp-artbar-leg">' + leg.join(' · ') + '</div></div>';
 }
 
-/* Фильтр ретуши ничего не прячет молча (Маша, 10.11.2026: «в папке ретушь пишет, что таких съёмок нет,
-   при этом в папке лежит дохрена — он просто её не читает»). Над списком — что лежит в папке ретуши, но
-   в список не попало, и почему: всё уже есть в папке сайта (можно показать) или нет такой съёмки в исходниках. */
-CP.rtShowDone = false;
+/* Папки этапа без пары в исходниках тоже видны на витрине. */
 cpRenderShoots = (function (orig) {
   return function () {
     var r = orig.apply(this, arguments);
-    var list = document.getElementById('cpShelfList');
-    if (!list || !cpCatalog() || CP.stageFilter !== 'retouch' || !CP.shoots) return r;
-    var pres = CP.stagePresence.retouch || {}, have = {};
+    var list = document.getElementById('cpShelfList'), key = CP.stageFilter;
+    if (!list || !cpCatalog() || CP.stageFor !== CP.archive || !CP_STAGE_SETTING[key] || !CP.shoots) return r;
+    var have = Object.create(null), paths = (CP.stagePaths || {})[key] || {};
     CP.shoots.forEach(function (d) { have[d.name.toLowerCase()] = true; });
-    var done = CP.shoots.filter(function (d) { return pres[d.name.toLowerCase()] && cpArtsLeft(d, 'retouch') === 0; });
-    var orphan = Object.keys(pres).filter(function (low) { return !have[low]; }).sort();
-    if (!done.length && !orphan.length) return r;
-    var h = '<div class="cp-rt-note">';
-    if (done.length) h += '<div>Съёмки без работы на ретуши: <b>' + done.length + '</b> — '
-      + '<a href="#" data-cp-rt-done="1">' + (CP.rtShowDone ? 'скрыть' : 'показать') + '</a>.</div>';
-    if (orphan.length) h += '<div>В папке ретуши есть папки, для которых нет съёмки с таким именем в исходниках: <b>' + orphan.length + '</b> — '
-      + cbEsc(orphan.slice(0, 8).join(', ')) + (orphan.length > 8 ? '…' : '') + '</div>';
-    list.insertAdjacentHTML('afterbegin', h + '</div>');
+    var q = document.getElementById('cpShelfSearch').value.trim().toLowerCase(), listed = Object.create(null);
+    var unmatched = [];
+    Object.keys(paths).forEach(function (low) {
+      paths[low].forEach(function (path) {
+        listed[path] = true;
+        if (!have[low]) unmatched.push(path);
+      });
+    });
+    ((CP.stageTop || {})[key] || []).forEach(function (path) { if (!listed[path]) unmatched.push(path); });
+    unmatched = unmatched.filter(function (path) { return !q || cpFolderBase(path).toLowerCase().indexOf(q) !== -1; }).sort();
+    if (unmatched.length) list.insertAdjacentHTML('beforeend', '<div class="cp-rt-note"><b>Другие папки на Диске</b>'
+      + unmatched.map(function (path) {
+        return '<div title="' + cbEsc(CPDisk.showPath(path)) + '">' + cbEsc(cpFolderBase(path)) + '</div>';
+      }).join('') + '</div>');
     return r;
   };
 })(cpRenderShoots);
-document.addEventListener('click', function (e) {
-  if (!e.target.closest || !e.target.closest('[data-cp-rt-done]')) return;
-  e.preventDefault();
-  CP.rtShowDone = !CP.rtShowDone;
-  cpRenderShoots();
-});
 (function () {
   var st = document.createElement('style');
   st.textContent = '.cp-rt-note{grid-column:1/-1;font-size:12px;color:#cfcac2;line-height:1.6;border:1px solid #3a3a37;border-radius:4px;padding:8px 12px;background:#1a1a18}.cp-rt-note b{color:#f2f2f1}.cp-rt-note a{color:#C9956B}';
@@ -508,8 +501,6 @@ cpStagesFor = (function (orig) {
     Object.keys(CP_STAGE_SETTING).forEach(function (key) {
       st[key] = !!(CP.settings && CP.settings[CP_STAGE_SETTING[key]] && CP.stagePresence[key] && CP.stagePresence[key][low]);
     });
-    /* в ретуши не осталось несданного (всё уже в 04 или на сайте) — в фильтре ретуши съёмке делать нечего */
-    if (st.retouch && cpArtsLeft(d, 'retouch') === 0 && !CP.rtShowDone) st.retouch = false;
     return st;
   };
 })(cpStagesFor);

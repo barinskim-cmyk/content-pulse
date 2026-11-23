@@ -487,24 +487,13 @@ cbRenderCards = (function (orig) {
       bar.id = 'cpRvBar';
       bar.className = 'cp-rvbarw';
       root.parentNode.insertBefore(bar, root);
-      bar.addEventListener('change', function (e) {
-        if (e.target.id !== 'cpRvOnly') return;
-        CP.rvOnly = e.target.checked;
-        CP.viewReveal = {};
-        cbRenderCards();
-      });
       bar.addEventListener('click', function (e) {
         if (!e.target.closest('[data-cp-o="accept"]') || !CP.shoot) return;
         e.preventDefault();
         cpAcceptOpen(CP.shoot.path, CP.shoot.name);
       });
     }
-    if (bar) {
-      var nRv = Object.keys(rv).filter(function (k) { return (rv[k] || []).length; }).length;
-      bar.innerHTML = '<label class="cp-rvbar"><input type="checkbox" id="cpRvOnly"' + (CP.rvOnly ? ' checked' : '')
-        + '> Ретушь на проверке — только карточки со сданной ретушью <small>(' + nRv + ')</small></label>'
-        + '<button class="cp-rvup" data-cp-o="accept">Сдать ретушь</button>';
-    }
+    if (bar) bar.innerHTML = '<button class="cp-rvup" data-cp-o="accept">Сдать ретушь</button>';
     Array.prototype.forEach.call(root.querySelectorAll('.cb-card'), function (el) {
       var id = el.getAttribute('data-cid');
       var list = rv[id];
@@ -647,7 +636,7 @@ function cpRvApprove(ids, via) {
     cbRenderCards();
     cbRenderOutline();
     cbToast('На сайт: карточек ' + todo.length);
-    if (typeof cpRetouchCleanupSoon === 'function') cpRetouchCleanupSoon();
+    if (typeof cpMirrorAfterDelivery === 'function') cpMirrorAfterDelivery();
   }).catch(function (e) {
     cbBusyHide();
     if (e && e.plain) { cbToast('На сайт: ' + e.message); return; }

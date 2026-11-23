@@ -25,12 +25,7 @@
        без файлов» / «Докопировать на Диск». Сама программа статусы не
        снимает.
 
-   Ретушь — конечная точка копий (Маша, 06.11): папка из 03 никуда не
-   едет, ретушёры отдают результат в 04. Как только артикул сдан на сайт,
-   его папка в 03 уходит в Корзину Диска (выбор Маши: «артикул сдан — в
-   Корзину»; 30 дней можно восстановить). Оригиналы остаются в 01, готовое —
-   в 05. Если в папке есть и несданные кадры, в Корзину уходят только
-   сданные файлы; опустела папка съёмки — уходит и она.
+   Копии в ретуши остаются доступны после сдачи на сайт.
    ============================================================ */
 
 var CP_DISK_STAGES = [
@@ -49,6 +44,7 @@ function cpStatusRank(s) { return { approval: 1, retouch: 2 }[s] || 0; }
 
 /** Найти папки съёмки внутри этапа: на первом уровне, иначе глубже (до 3), не заходя в чужие съёмки. */
 function cpFindShootIn(root, shootName, maxDepth) {
+  if (CPDisk.isReadyFolder(cpFolderBase(root))) return Promise.resolve([]);
   maxDepth = maxDepth || 3;
   var want = shootName.toLowerCase(), found = [];
   var shootLike = /^\d{4}-\d{2}-\d{2}_./;
@@ -122,14 +118,8 @@ function cpMirrorSync(quiet) {
     if (res.rows && res.rows.length && typeof cpOutputAppend === 'function') cpOutputAppend(res.rows);
     cpUpdateStatusLine();
     if (!quiet || res.changed.length) cbToast(res.changed.length ? 'Сверено с Диском: ' + res.changed.join(', ') : 'Сверено с Диском' + (res.issues ? ', расхождений: ' + res.issues : ' — всё совпадает'));
-    /* сданное на сайт — из ретуши в Корзину */
-    var rt = rs.filter(function (r) { return r.stage.key === 'retouch'; })[0];
-    var plan = rt ? cpRetouchCleanupPlan(rt.found, idx, letters, cpDonePids(true)) : [];
-    /* папки под букву ретушёра — кроме тех, что сейчас уходят в Корзину (сдано на сайт) */
-    var gone = function (p) { return plan.some(function (t) { return p === t || p.indexOf(t + '/') === 0 || t.indexOf(p + '/') === 0; }); };
-    var ren = (res.rtRenames || []).filter(function (x) { return !gone(x.from); });
-    var step = plan.length ? cpRetouchTrash(plan, quiet).then(function (n) { res.trashed = n; }) : Promise.resolve();
-    return step.then(function () { return ren.length ? cpRtRename(ren, quiet) : 0; }).then(function () { return res; });
+    var ren = res.rtRenames || [];
+    return (ren.length ? cpRtRename(ren, quiet) : Promise.resolve()).then(function () { return res; });
   }).catch(function (e) {
     if (!quiet) cbBusyHide();
     idle();
@@ -181,13 +171,9 @@ function cpArtKey(c) {
   return c.cpArticle || (/(?:^|[^\d])(\d{4,7})(?!\d)/.exec(c.title || '') || [])[1] || c.id;
 }
 
-/* byProgram — только карточки, которые на сайт отправила сама программа (кнопкой «На сайт»), а не те,
-   что сверка нашла в папке сайта на Диске. Для уборки ретуши в Корзину нужно именно это: пока ретушёры
-   сдают в «Сайт» руками, «лежит в папке сайта» ещё не значит «принято», а находка сверки — догадка по
-   именам (Маша, 10.11.2026: «он удалил всё из папки ретушь… правда ли они все отретушированы?»). */
-function cpDonePids(byProgram) {
+function cpDonePids() {
   var m = cpMeta(), del = m.delivered || {}, done = {}, keep = {}, delArt = {};
-  var is = function (c) { var d = del[c.id]; return !!d && !(byProgram && d.out === 'Диск'); };
+  var is = function (c) { return !!del[c.id]; };
   /* сдан артикул — сданы все его карточки (собранная кнопкой и собранная руками) */
   App.cards.forEach(function (c) { if (is(c)) delArt[cpArtKey(c)] = true; });
   App.cards.forEach(function (c) {
@@ -200,60 +186,6 @@ function cpDonePids(byProgram) {
   });
   Object.keys(keep).forEach(function (pid) { delete done[pid]; });
   return done;
-}
-
-/**
- * Что из папок съёмки в 03 отправить в Корзину: папка целиком, если в ней
- * есть сданные кадры и нет несданных (файлы, которых нет в отборе, едут
- * вместе с папкой); иначе — только сданные файлы.
- */
-function cpRetouchCleanupPlan(found, idx, letters, done) {
-  var out = [];
-  (found || []).forEach(function (f) {
-    var tree = { path: f.path, dirs: {}, files: [] };
-    (f.files || []).forEach(function (file) {
-      if (file.name === CPDisk.STATE_FILE || file.path.indexOf(f.path + '/') !== 0) return;
-      var raw = file.path.slice(f.path.length + 1).split('/');
-      var name = raw.pop();
-      var mt = cpMirrorMatch(idx, raw, name, letters);
-      var node = tree, cur = f.path;
-      raw.forEach(function (sg) { cur += '/' + sg; node = node.dirs[sg] = node.dirs[sg] || { path: cur, dirs: {}, files: [] }; });
-      node.files.push({ path: file.path, state: mt.p ? (done[mt.p.id] ? 'done' : 'live') : 'other' });
-    });
-    (function count(n) {
-      n.d = 0; n.l = 0;
-      n.files.forEach(function (x) { if (x.state === 'done') n.d++; else if (x.state === 'live') n.l++; });
-      Object.keys(n.dirs).forEach(function (k) { var c = count(n.dirs[k]); n.d += c.d; n.l += c.l; });
-      return n;
-    })(tree);
-    (function pick(n) {
-      if (!n.d) return;
-      if (!n.l) { out.push(n.path); return; }
-      n.files.forEach(function (x) { if (x.state === 'done') out.push(x.path); });
-      Object.keys(n.dirs).forEach(function (k) { pick(n.dirs[k]); });
-    })(tree);
-  });
-  return out;
-}
-
-/** Сданное — из ретуши в Корзину Диска. */
-function cpRetouchTrash(paths, quiet) {
-  if (!paths.length) return Promise.resolve(0);
-  return CPDisk.trash(paths).then(function (res) {
-    var ok = res.filter(function (x) { return x.status === 'done' || x.status === 'gone'; });
-    var bad = res.filter(function (x) { return x.status === 'failed'; });
-    if (ok.length) {
-      cpEvent('retouch_trash', ok.map(function (x) { return x.path.split('/').pop(); }), { note: 'сдано на сайт — из ретуши в Корзину Диска: ' + ok.map(function (x) { return CPDisk.showPath(x.path); }).join(', ') });
-      cbToast('Сданное убрано из ретуши в Корзину Диска: ' + ok.length + (bad.length ? ', не получилось: ' + bad.length : ''));
-    } else if (bad.length && !quiet) cbToast('Не получилось убрать сданное из ретуши: ' + (bad[0].error || ''));
-    if (bad.length && window.console) console.warn('[CP] в Корзину не ушло', bad);
-    if (bad.length && CP.shoot) CPQ.add(CP.shoot, { kind: 'trash', label: 'Убрать сданное из ретуши: ' + bad.length, paths: bad.map(function (x) { return x.path; }) });
-    return ok.length;
-  }, function (e) {
-    if (window.console) console.warn('[CP] в Корзину', e && (e.body || e.message || e));
-    if (!quiet) cpHandleError(e, 'Убрать сданное из ретуши');
-    return 0;
-  });
 }
 
 /** День (ГГГГ-ММ-ДД, по местному времени) из даты Диска «2026-11-18T10:00:00+00:00»; '' — нет даты. */
@@ -881,8 +813,8 @@ CP.openedHooks.push(function (path) {
 CP_ACTION_LABEL.retouch_trash = 'сдано на сайт — убрано из ретуши в Корзину';
 CP_ACTION_LABEL.mirror = 'сверка с Диском';
 
-/** После сдачи на сайт: сразу сверить (тихо) — сданное уйдёт из ретуши в Корзину. */
-function cpRetouchCleanupSoon() {
+/** После сдачи на сайт перечитать этапы открытой съёмки. */
+function cpMirrorAfterDelivery() {
   var path = CP.shoot && CP.shoot.path;
   var ready = typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : Promise.resolve();
   return ready.then(function () {

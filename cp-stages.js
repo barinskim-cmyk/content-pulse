@@ -201,7 +201,7 @@ function cpSumOf(d) {
 CP.stagePresence = {};   /* ключ этапа -> {имя съёмки в нижнем регистре: true} */
 
 var CP_STAGE_SETTING = { approval: 'approve', retouch: 'retouch', review: 'retouched', site: 'site' };
-var CP_STAGE_DEFAULT = { approval: 'Согласование', retouch: 'Ретушь', review: 'Проверка ретуши', site: 'Сайт' };
+var CP_STAGE_DEFAULT = { approval: 'Согласование', retouch: 'Ретушь', review: 'Проверка ретуши', site: 'Сайт', reshoot: 'Брак' };
 
 function cpFolderBase(path) { return path ? String(path).replace(/\/+$/, '').split('/').pop() : ''; }
 function cpStageLabel(key) { return cpFolderBase(CP.settings && CP.settings[CP_STAGE_SETTING[key]]) || CP_STAGE_DEFAULT[key]; }
@@ -217,7 +217,7 @@ CP.siteFreshDates = 2;   /* сколько самых свежих папок-д
 
 /** Какие съёмки лежат в папках этапов: по одному обходу на этап (до 3 уровней). */
 /* запомненное про старые даты «Сайта» — в браузере, отдельно для каждой папки исходников */
-function cpSiteOldKey(archive) { return 'cp_site_old:' + archive; }
+function cpSiteOldKey(archive) { return 'cp_site_old_v2:' + archive; }
 function cpSiteOldCache(archive) {
   if (CP.siteOld && CP.siteOldFor === archive) return CP.siteOld;
   try { return JSON.parse(localStorage.getItem(cpSiteOldKey(archive)) || '{}') || {}; } catch (e) { return {}; }
@@ -281,11 +281,11 @@ function cpStageRecentApply() {
 
 function cpReadStage(key, archive, s, preview) {
   var root = s[CP_STAGE_SETTING[key]];
-  if (!root) return Promise.resolve([key, null]);
+  if (!root || CPDisk.isReadyFolder(cpFolderBase(root))) return Promise.resolve([key, null]);
   var known = {};
   (CP.shoots || []).forEach(function (d) { known[d.name.toLowerCase()] = true; });
   var shootLike = /^\d{4}-\d{2}-\d{2}_./;
-  var names = {}, where = {}, info = {};
+  var names = {}, where = {}, info = {}, top = [];
   /* «Сайт» читаем в том виде, как туда сдают сейчас (Маша, 10.11.2026: «структура шибанутая — дата /
      буква / номер / съёмка / партия; на время тестирования её сохраняем, программа должна уметь
      читать и её, и ту, которую хотим»): папка съёмки ищется на любом уровне до пятого. */
@@ -297,11 +297,14 @@ function cpReadStage(key, archive, s, preview) {
       var prio = key === 'retouch' ? 0 : key === 'site' ? 2 : 1;
       /* 404 на корне этапа — ошибка доступа или путь исчез, а не пустой список. */
       return depth === 1 && key === 'retouch' ? CPDisk.listDir(p, null, prio).then(function (items) {
-        return items.filter(function (x) { return x.type === 'dir'; });
+        return items.filter(function (x) { return x.type === 'dir' && !CPDisk.isReadyFolder(x.name); });
       }) : cpListDirs(p, prio);
     }).then(function (lists) {
       var next = [];
       lists.forEach(function (ds) {
+        if (depth === 1 && key !== 'site') {
+          ds.forEach(function (x) { if (x.name.charAt(0) !== '_') top.push(x.path); });
+        }
         /* «Сайт»: среди соседних папок-дат каждый раз читаем только две самых свежих; остальные — из
            запомненного, перечитываем, только если папка даты изменилась (Маша, 11.11.2026: «очень долго
            сверяет сайт — хранить прошлые даты, считывать только последние две, не добавили ли новое») */
@@ -368,9 +371,8 @@ function cpReadStage(key, archive, s, preview) {
       if (dirty) cpSiteOldSave(archive, cache);
     });
   };
-  /* «Сайт» может быть не один: вторая папка с готовым («ГОТОВО» рядом с «05_САЙТ») читается так же */
-  var roots = [root].concat(key === 'site' ? (s.siteMore || []) : []);
-  return level(roots, 1, cur, false).then(readOld).then(function () { return [key, names, where, info]; }, function (e) { return [key, 'fail', e]; });
+  var roots = [root].concat(key === 'site' ? (s.siteMore || []) : []).filter(function (p) { return !CPDisk.isReadyFolder(cpFolderBase(p)); });
+  return level(roots, 1, cur, false).then(readOld).then(function () { return [key, names, where, info, top]; }, function (e) { return [key, 'fail', e]; });
 }
 
 /* Папки, уже найденные в 03, можно показать, пока читаются вложенные группы.
@@ -395,7 +397,7 @@ function cpPreviewRetouch(archive, root, partial) {
 function cpApplyStage(archive, result, partial) {
   if (CP.archive !== archive) return;
   if (CP.stageFor !== archive) {
-    CP.stagePresence = {}; CP.stagePaths = {}; CP.stageInfo = {}; CP.stageReadFor = {}; CP.stageFailed = [];
+    CP.stagePresence = {}; CP.stagePaths = {}; CP.stageInfo = {}; CP.stageTop = {}; CP.stageReadFor = {}; CP.stageFailed = [];
     if (CP.stageFor) CP.stageRecent = {};
     CP.stageFor = archive;
   }
@@ -411,6 +413,7 @@ function cpApplyStage(archive, result, partial) {
     if (!partial) {
       CP.stageFailed = CP.stageFailed.filter(function (failed) { return failed !== k; });
       (CP.stageReadFor = CP.stageReadFor || {})[k] = archive;
+      (CP.stageTop = CP.stageTop || {})[k] = result[4] || [];
     }
     if (value) { CP.stagePresence[k] = value; CP.stagePaths[k] = result[2]; CP.stageInfo[k] = result[3] || {}; }
     else { delete CP.stagePresence[k]; delete CP.stagePaths[k]; delete CP.stageInfo[k]; }
@@ -480,9 +483,6 @@ function cpStagesFor(d) {
     st[key] = !!pres[name];
     any = true;
   });
-  /* Ретушь — конечная точка копий: съёмка, у которой всё сдано на сайт и в работе ничего не осталось,
-     из фильтра ретуши пропадает, хотя её папка там ещё лежит. */
-  if (st && st.retouch && sum && sum.k[5] > 0 && sum.k[2] + sum.k[3] + sum.k[4] === 0) st.retouch = false;
   return st;
 }
 

@@ -614,7 +614,7 @@ cpRvApprove = function (ids, via) {
     if (typeof cpSiteMarkNew === 'function') cpSiteMarkNew(siteDirs);
     /* дроп мог лечь в папку прошлого дня — отметка на папке дня, чтобы её перечитали и на других компьютерах */
     days.forEach(function (d) { CPDisk.proxyProps(d, { cp_touch: String(Date.now()) }).catch(function () { }); });
-    if (typeof cpRetouchCleanupSoon === 'function') cpRetouchCleanupSoon();
+    if (typeof cpMirrorAfterDelivery === 'function') cpMirrorAfterDelivery();
     return Promise.all([cpOutputAppend(rows)].concat(moved.map(function (t) { return cpTrashEmptyUp(cpParentDir(t.from), cpParentDir(base)); })));
   }).catch(function (e) {
     cbBusyHide();
@@ -660,7 +660,7 @@ CPQ.after['rv-approve'] = function (op, m, shoot) {
   if (a.base) cpTrashEmptyUp(cpParentDir(a.from), cpParentDir(a.base));
   if (CP.shoot && CP.shoot.path === shoot.path) {
     if (typeof cpSiteMarkNew === 'function') cpSiteMarkNew([cpSiteShootDir(a.to, shoot.name)]);
-    if (typeof cpRetouchCleanupSoon === 'function') cpRetouchCleanupSoon();
+    if (typeof cpMirrorAfterDelivery === 'function') cpMirrorAfterDelivery();
   }
 };
 
@@ -932,12 +932,7 @@ function cpReviewPresentStage(key, shootName, dir) {
   if (typeof cpStageNote === 'function') cpStageNote(key, shootName, dir);
 }
 
-/* ---------- съёмка, открытая из фильтра этапа: только карточки этого этапа ----------
-   Маша, 06.11: «отправила на сайт — карточка должна сразу испариться из этой
-   презентации, её уже не нужно просматривать. В исходниках — не исчезает,
-   остаётся со статусом, чтобы в исходниках можно было всё просмотреть».
-   Открыли съёмку из фильтра 02 / 03 / 04 / 05 — видны карточки, которые
-   сейчас на этом этапе; ушло дальше — пропадает. Из исходников — все. */
+/* ---------- ручные фильтры карточек съёмки ---------- */
 
 CP.viewStage = '';
 
@@ -948,13 +943,17 @@ function cpCardOnStage(card, key) {
   if (key === 'retouch') return cs === 'retouch' && !del && ls !== 'review' && ls !== 'rework';
   if (key === 'review') return ls === 'review' || ls === 'rework';
   if (key === 'site') return !!del;
+  if (key === 'reshoot') return cs === 'reshoot';
   return true;
 }
 
 CP.openedHooks = CP.openedHooks || [];
 CP.openedHooks.push(function () {
-  var f = CP.stageFilter || '';
-  CP.viewStage = f && f !== 'select' && typeof CP_STAGE_SETTING !== 'undefined' && CP_STAGE_SETTING[f] ? f : '';
+  CP.viewStage = '';
+  CP.cardFolders = null;
+  CP.showSrc = true;
+  var bar = document.getElementById('cpViewBar');
+  if (bar) bar.open = false;
   CP.rvOnly = false;
   CP.viewReveal = {};
   cbRenderCards();
@@ -966,27 +965,49 @@ cbRenderCards = (function (orig) {
     if (!CP.shoot) return r;
     var root = document.getElementById('cbCards');
     var bar = document.getElementById('cpViewBar');
-    if (!CP.viewStage) { if (bar) bar.remove(); return r; }
-    var key = CP.viewStage, shown = 0;
-    Array.prototype.forEach.call(root.querySelectorAll('.cb-card'), function (el) {
+    var key = CP.viewStage;
+    if (key) Array.prototype.forEach.call(root.querySelectorAll('.cb-card'), function (el) {
       var c = cbCardById(el.getAttribute('data-cid'));
       if (c && !cpCardOnStage(c, key)) el.style.display = 'none';
-      else if (el.style.display !== 'none') shown++;
     });
     if (!bar) {
-      bar = document.createElement('div');
+      bar = document.createElement('details');
       bar.id = 'cpViewBar';
       bar.className = 'cp-viewbar';
       var anchor = document.getElementById('cpRvBar') || root;
       anchor.parentNode.insertBefore(bar, anchor);
+      bar.addEventListener('change', function (e) {
+        var el = e.target;
+        if (el.id === 'cpCardStage') { CP.viewStage = el.value; CP.rvOnly = false; }
+        else if (el.id === 'cpRvOnly') { CP.rvOnly = el.checked; CP.viewStage = ''; }
+        else if (el.hasAttribute('data-cp-src')) CP.showSrc = !el.checked;
+        else if (el.id === 'cpCardFolder') { cpSetCardFolders(el.value ? [el.value] : null); return; }
+        else return;
+        CP.viewReveal = {};
+        cbRenderCards();
+        cbRenderOutline();
+      });
       bar.addEventListener('click', function (e) {
         if (!e.target.closest('[data-cp-view-all]')) return;
-        CP.viewStage = '';
-        cbRenderCards();
+        CP.viewStage = ''; CP.rvOnly = false; CP.showSrc = true; CP.viewReveal = {};
+        cpSetCardFolders(null);
       });
     }
-    bar.innerHTML = 'Открыто из <b>' + cbEsc(cpStageLabel(key)) + '</b>: только карточки этого этапа — ' + shown
-      + (shown ? '' : ' (всё отсюда уже ушло дальше)') + ' <button data-cp-view-all="1">Показать все карточки</button>';
+    var folders = Object.create(null);
+    App.cards.forEach(function (c) { if (c.cpArticleDir) folders[c.cpArticleDir] = true; });
+    App.photos.forEach(function (p) { if (p.disk) { var dir = cpRelDir(p); if (dir) folders[dir] = true; } });
+    var active = !!(key || CP.rvOnly || (CP.cardFolders && CP.cardFolders.length) || !CP.showSrc);
+    bar.innerHTML = '<summary>Фильтр карточек' + (active ? ' · включён' : '') + '</summary><div class="cp-view-controls">'
+      + '<label>Этап <select id="cpCardStage"><option value="">Все этапы</option>'
+      + [['approval', 'На согласовании'], ['retouch', 'На ретуши'], ['site', 'На сайте'], ['reshoot', 'В браке']].map(function (o) {
+        return '<option value="' + o[0] + '"' + (key === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
+      }).join('') + '</select></label>'
+      + '<label>Папка <select id="cpCardFolder"><option value="">Все папки</option>' + Object.keys(folders).sort().map(function (dir) {
+        return '<option value="' + cbEsc(dir) + '"' + (CP.cardFolders && CP.cardFolders.indexOf(dir) !== -1 ? ' selected' : '') + '>' + cbEsc(dir) + '</option>';
+      }).join('') + '</select></label>'
+      + '<label><input type="checkbox" id="cpRvOnly"' + (CP.rvOnly ? ' checked' : '') + '> Ретушь на проверке</label>'
+      + '<label><input type="checkbox" data-cp-src' + (CP.showSrc ? '' : ' checked') + '> Только загруженная ретушь</label>'
+      + (active ? '<button type="button" data-cp-view-all>Сбросить</button>' : '') + '</div>';
     return r;
   };
 })(cbRenderCards);
@@ -1204,8 +1225,8 @@ function cpStageTook(sel, f) {
   return tk || null;
 }
 function cpStageTaken(sel, f) { return sel.stage === 'retouch' && !!cpStageTook(sel, f); }
-/** Виден в панели: скачанное из папки ретуши прячем, пока не отмечено «показать скачанное». */
-function cpStageShown(sel, f) { return !cpStageTaken(sel, f) || !!sel.showTaken; }
+/** Все файлы видны, пока пользователь не включил фильтр. */
+function cpStageShown(sel, f) { return !cpStageTaken(sel, f) || !sel.hideTaken; }
 
 function cpStageTagIndex(sel) {
   var data = sel.data || {}, photos = data.photos || [], cards = data.cards || [];
@@ -1359,8 +1380,8 @@ function cpStageWhoChips(sel, taken) {
     h += '<div class="cp-note cp-warn">Букв ретушёров нет в словаре тегов (группа «[Ретушёры: один]») — скачивание не подписывается буквой.</div>';
   }
   if (taken) {
-    h += '<div class="cp-fchips"><label class="cp-stg-ck" title="Что уже скачали, что назначено другому ретушёру (его буква в имени папки) или сдали (ретушь уже в отретушированном или на сайте). По умолчанию скрыто, чтобы было видно только то, что ещё можно забрать">'
-      + '<input type="checkbox" data-cp-staken="1"' + (sel.showTaken ? ' checked' : '') + '> показать скачанное и сданное <small>' + taken + '</small></label></div>';
+    h += '<div class="cp-fchips"><label class="cp-stg-ck" title="Что уже скачали, что назначено другому ретушёру (его буква в имени папки) или сдали (ретушь уже в отретушированном или на сайте). Отметьте, чтобы видеть только то, что ещё можно забрать">'
+      + '<input type="checkbox" data-cp-staken="1"' + (sel.hideTaken ? ' checked' : '') + '> скрыть скачанное и сданное <small>' + taken + '</small></label></div>';
   }
   return h;
 }
@@ -1426,14 +1447,14 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
   cpRenderPanel();
 });
 
-/* галки «показать скачанное» (сверху) и «и уже скачанные» (перед кнопкой «Скачать») */
+/* Видимость в списке и состав архива настраиваются отдельно. */
 document.getElementById('cpPanel').addEventListener('change', function (e) {
   var sel = CP.sel;
   if (!sel || sel.stage !== 'retouch') return;
   var tk = e.target.closest('[data-cp-staken]'), ag = e.target.closest('[data-cp-sagain]');
   if (!tk && !ag) return;
-  if (tk) { sel.showTaken = tk.checked; if (!tk.checked) sel.againTaken = false; }
-  else { sel.againTaken = ag.checked; if (ag.checked) sel.showTaken = true; }   /* что скачается повторно — должно быть видно */
+  if (tk) { sel.hideTaken = tk.checked; if (tk.checked) sel.againTaken = false; }
+  else { sel.againTaken = ag.checked; if (ag.checked) sel.hideTaken = false; }   /* что скачается повторно — должно быть видно */
   cpRenderPanel();
 });
 
@@ -1499,7 +1520,7 @@ function cpStageTree(sel) {
     x.files.forEach(function (f) {
       if (f.name === CPDisk.STATE_FILE) return;
       var rel = f.path.indexOf(x.root + '/') === 0 ? f.path.slice(x.root.length + 1) : f.name;
-      var tk = rt ? cpStageTook(sel, f) : null, hide = !!tk && !sel.showTaken;
+      var tk = rt ? cpStageTook(sel, f) : null, hide = !!tk && sel.hideTaken;
       if (tk) taken++;
       var dir = hide ? (pre ? pre + (cpParentDir(rel) ? '/' + cpParentDir(rel) : '') : cpParentDir(rel)) : (add(cpParentDir(rel)) || '');
       if (!hide) { nFiles++; bytes += f.size || 0; }
@@ -1559,7 +1580,7 @@ cpRenderPanel = (function (orig) {
     var top = t.kids[''] || [];
     var errs = sel.stageFiles.filter(function (x) { return x.error; });
     if (!top.length && !errs.length) body += '<div class="cp-note">' + (t.files ? 'Вложенных папок нет — файлы лежат прямо в папке съёмки.'
-      : rt && t.taken ? 'Забирать нечего: всё, что здесь лежит, уже скачано или сдано. Посмотреть — «показать скачанное и сданное» вверху.' : 'Папка пустая.') + '</div>';
+      : rt && t.taken ? 'Забирать нечего: всё, что здесь лежит, уже скачано или сдано. Снимите фильтр «скрыть скачанное и сданное», чтобы увидеть все папки.' : 'Папка пустая.') + '</div>';
     var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
     if (top.length === 1 && sel.open[top[0]] === undefined) sel.open[top[0]] = true;   /* одна папка — сразу раскрыта */
     var row = function (fp, depth) {
@@ -1586,10 +1607,10 @@ cpRenderPanel = (function (orig) {
     if (errs.length) body += '<div class="cp-note cp-warn">Не прочиталось: ' + errs.map(function (x) { return cbEsc(CPDisk.showPath(x.root)); }).join(', ') + '</div>';
     body += '<div class="cp-note">' + sel.stagePaths.map(function (p) { return cbEsc(CPDisk.showPath(p)); }).join('<br>') + '</div>';
     panel.setAttribute('data-path', sel.path);
-    var hidden = rt && !sel.showTaken ? t.taken : 0;
-    var sum = (rt ? (sel.showTaken ? 'Здесь файлов' : 'Можно забрать') : 'Здесь файлов') + ': <b>' + t.files + '</b> · ' + cpMb(t.bytes)
+    var hidden = rt && sel.hideTaken ? t.taken : 0;
+    var sum = (rt && sel.hideTaken ? 'Можно забрать' : 'Здесь файлов') + ': <b>' + t.files + '</b> · ' + cpMb(t.bytes)
       + (hidden ? ' · уже скачано или сдано (скрыто): ' + hidden : '')
-      + (narrowed || (rt && sel.showTaken && t.taken) ? ' · к скачиванию: <b>' + picked + '</b> · ' + cpMb(pickedBytes) : '');
+      + (narrowed || (rt && !sel.hideTaken && t.taken) ? ' · к скачиванию: <b>' + picked + '</b> · ' + cpMb(pickedBytes) : '');
     /* перед кнопкой «Скачать»: взять и то, что уже скачивали (потерял файлы, забирает другой ретушёр) */
     var again = rt && t.taken ? '<label class="cp-stg-ck cp-stg-again" title="Без галки уже скачанное в архив не попадёт — чтобы не взять в работу второй раз. '
       + 'С галкой — попадёт (и сданное тоже); скачали с другой буквой — артикул переходит к ней"><input type="checkbox" data-cp-sagain="1"' + (sel.againTaken ? ' checked' : '') + '> и уже скачанные <small>' + t.taken + '</small></label>' : '';
@@ -2014,39 +2035,31 @@ document.getElementById('cbCards').addEventListener('drop', function (e) {
   cpDropFiles(e.dataTransfer).then(function (files) { return cpRvCardUpload(id, files); });
 }, true);
 
-/* ---------- в 04 и 05 — только загруженная версия, исходники скрыты ----------
-   Маша, 09.11: «важно, чтобы везде отображалась последняя загруженная версия и не
-   отображались исходники». Открыто из «Отретушировано» или «Сайта» — у карточки не видно
-   раскладки с исходными кадрами, только файлы последней версии (крупнее). Кнопка над
-   карточками показывает исходники обратно, если нужно сравнить. */
-CP.showSrc = false;
+/* ---------- ручной режим просмотра только загруженной ретуши ---------- */
+CP.showSrc = true;
 cbRenderCards = (function (orig) {
   return function () {
     var r = orig.apply(this, arguments);
-    var key = CP.viewStage, root = document.getElementById('cbCards');
-    if (!CP.shoot || !root || (key !== 'review' && key !== 'site')) return r;
+    var root = document.getElementById('cbCards');
+    if (!CP.shoot || !root) return r;
     var rv = cpRv(), del = cpMeta().delivered || {};
     Array.prototype.forEach.call(root.querySelectorAll('.cb-card'), function (el) {
       var id = el.getAttribute('data-cid');
       el.classList.toggle('cp-src-hidden', !CP.showSrc);
-      if (!cpLastRv(rv[id]) && !el.querySelector('.cp-rv-none')) {
+      if (!CP.showSrc && !cpLastRv(rv[id]) && !el.querySelector('.cp-rv-none')) {
         var head = el.querySelector('.cb-card-head'), d = del[id];
         if (head) head.insertAdjacentHTML('afterend', '<div class="cp-rv-none">Загруженной версии ретуши в отборе нет'
           + (d && d.at ? ' · сдано в ' + cbEsc(d.at) : '') + (CP.showSrc ? '' : ' — исходные кадры скрыты') + '</div>');
       }
     });
-    var bar = document.getElementById('cpViewBar');
-    if (bar && !bar.querySelector('[data-cp-src]')) {
-      bar.insertAdjacentHTML('beforeend', '<button data-cp-src="1">' + (CP.showSrc ? 'Скрыть исходные кадры' : 'Показать исходные кадры') + '</button>');
-      bar.querySelector('[data-cp-src]').addEventListener('click', function () { CP.showSrc = !CP.showSrc; cbRenderCards(); });
-    }
     return r;
   };
 })(cbRenderCards);
 
 (function cpReviewCss() {
   var st = document.createElement('style');
-  st.textContent = '.cp-viewbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px;color:#cfcac2;margin:0 0 10px;padding:8px 10px;border:1px solid #3a3a37;border-radius:4px;background:#1a1a18}'
+  st.textContent = '.cp-viewbar{font-size:13px;color:#cfcac2;margin:0 0 10px;padding:8px 10px;border:1px solid #3a3a37;border-radius:4px;background:#1a1a18}'
+    + '.cp-viewbar summary{cursor:pointer}.cp-view-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding-top:8px}.cp-view-controls select{max-width:220px}'
     + '.cp-reveal-note{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px;color:#e7c9a8;background:#211c17;border:1px dashed #5a4632;border-radius:4px;padding:6px 10px;margin:0 0 8px}'
     + '.cp-reveal-note button{padding:2px 10px;font-size:12px}'
     + '.cb-card.cp-flash{box-shadow:0 0 0 2px #C9956B;transition:box-shadow .3s}'

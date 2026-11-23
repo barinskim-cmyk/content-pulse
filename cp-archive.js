@@ -148,7 +148,7 @@ function cpArchLoad() {
   CP.archRoot = root;
   CPDisk.listDir(root).then(function (items) {
     if (CP.archRoot !== root) return;
-    CP.archShoots = items.filter(function (r) { return r.type === 'dir' && r.name.charAt(0) !== '_'; })
+    CP.archShoots = items.filter(function (r) { return r.type === 'dir' && r.name.charAt(0) !== '_' && !CPDisk.isReadyFolder(r.name); })
       .sort(function (a, b) { return a.modified < b.modified ? 1 : -1; });
     if (CP.stageFilter === 'archive') cpRenderShoots();
   }, function (e) { cpHandleError(e, 'Не удалось прочитать архив'); });
