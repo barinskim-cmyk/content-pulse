@@ -1787,7 +1787,7 @@ function cpDropCodes(files) {
       if (lm) sg = lm.rest;
       got = cpArtCode(null, sg);
     }
-    if (!got && !segs.length) got = cpArtCode(null, name);
+    if (!got) got = cpFileArticleCode(name, letters);
     add(got);
   });
   return order;
@@ -1820,29 +1820,52 @@ function cpAcceptOpenFound(found, d, files) {
   cpAcceptAdd(files);
 }
 
-/** Артикулы нашлись в нескольких съёмках — сначала спросить, в какую сдаём (ничего не выбрано заранее). */
+/* При неоднозначном имени или неизвестном артикуле сохраняем файлы и даём выбрать съёмку. */
 function cpAcceptChoose(found, files) {
   var box = document.getElementById('cpAccept');
   if (!box) { box = document.createElement('div'); box.id = 'cpAccept'; box.className = 'cp-files'; document.body.appendChild(box); }
+  var list = found.list.slice(), paths = Object.create(null);
+  list.forEach(function (x) { paths[x.d.path] = true; });
+  var selected = CP.sel && CP.sel.path;
+  var all = (CP.shoots || []).slice();
+  if (selected) all.sort(function (a, b) { return Number(b.path === selected) - Number(a.path === selected); });
+  all.forEach(function (d) {
+    if (!paths[d.path]) list.push({ d: d, hit: [], miss: found.codes.slice() });
+  });
+  if (!list.length) { cbToast('Список съёмок ещё пуст. Обновите витрину и попробуйте снова.'); return; }
   CP.accept = null;
-  CP.acceptChoice = { found: found, files: files };
-  box.innerHTML = '<div class="cp-files-box"><div class="cp-files-head"><b>Сдать ретушь · в какую съёмку?</b><button data-cp-acc-x="1" title="Закрыть">×</button></div>'
-    + '<div class="cp-acc-body"><div class="cp-acc-found">Папки артикулов без папки съёмки: ' + cbEsc(found.codes.slice(0, 12).join(', ')) + (found.codes.length > 12 ? '…' : '')
-    + '. Такие артикулы сейчас в работе в нескольких съёмках — выберите, в какую сдаём:'
-    + '<div class="cp-acc-shoots">' + found.list.map(function (x, i) {
-      return '<button data-cp-acc-pick="' + i + '"><b>' + cbEsc(x.d.name) + '</b><small>артикулов из ваших папок: ' + x.hit.length + ' из ' + found.codes.length
-        + (x.miss.length ? ' · нет: ' + cbEsc(x.miss.slice(0, 6).join(', ')) : '') + '</small></button>';
-    }).join('') + '</div></div></div></div>';
+  CP.acceptChoice = { found: found, list: list, files: files };
+  var message = found.list.length ? 'Артикулы есть в нескольких съёмках. Выберите нужную.'
+    : found.codes.length ? 'Не нашлось съёмки по артикулам ' + found.codes.slice(0, 6).join(', ') + '. Выберите съёмку.'
+      : 'По этим файлам нельзя определить съёмку. Выберите её по названию.';
+  box.innerHTML = '<div class="cp-files-box"><div class="cp-files-head"><b>Сдать ретушь · выбрать съёмку</b><button data-cp-acc-x="1" title="Закрыть">×</button></div>'
+    + '<div class="cp-acc-body"><p>' + cbEsc(message) + '</p><input id="cpAccShootSearch" type="search" placeholder="Название съёмки" aria-label="Название съёмки">'
+    + '<div class="cp-acc-shoots">' + list.map(function (x, i) {
+      return '<button data-cp-acc-pick="' + i + '"><b>' + cbEsc(x.d.name) + '</b>'
+        + (x.hit.length ? '<small>артикулов: ' + x.hit.length + ' из ' + found.codes.length
+          + (x.miss.length ? ' · нет: ' + cbEsc(x.miss.slice(0, 6).join(', ')) : '') + '</small>' : '') + '</button>';
+    }).join('') + '</div><div id="cpAccNoShoots" hidden>Нет съёмок с таким названием.</div></div></div>';
   box.classList.add('cp-open');
+  var search = document.getElementById('cpAccShootSearch');
+  search.addEventListener('input', function () {
+    var q = search.value.trim().toLowerCase(), count = 0;
+    Array.prototype.forEach.call(box.querySelectorAll('[data-cp-acc-pick]'), function (button, i) {
+      button.hidden = list[i].d.name.toLowerCase().indexOf(q) === -1;
+      if (!button.hidden) count++;
+    });
+    document.getElementById('cpAccNoShoots').hidden = count > 0;
+  });
+  search.focus();
 }
 
 document.addEventListener('click', function (e) {
   var pick = e.target.closest('[data-cp-acc-pick]'), x = e.target.closest('[data-cp-acc-x]'), sw = e.target.closest('[data-cp-acc-shoot]');
   if (x) { document.getElementById('cpAccept').classList.remove('cp-open'); CP.acceptChoice = null; return; }
   if (pick && CP.acceptChoice) {
-    var ch = CP.acceptChoice, it = ch.found.list[+pick.getAttribute('data-cp-acc-pick')];
+    var ch = CP.acceptChoice, it = ch.list[+pick.getAttribute('data-cp-acc-pick')];
     CP.acceptChoice = null;
-    if (it) cpAcceptOpenFound(ch.found, it.d, ch.files);
+    if (it && it.hit.length) cpAcceptOpenFound(ch.found, it.d, ch.files);
+    else if (it) { cpAcceptOpen(it.d.path, it.d.name); cpAcceptAdd(ch.files); }
     return;
   }
   if (sw && CP.accept && CP.accept.found) {
@@ -1855,17 +1878,11 @@ document.addEventListener('click', function (e) {
 
 function cpReviewDrop(files) {
   if (!files.length) return;
-  var top = files[0].rel.split('/')[0];
-  var d = files.every(function (f) { return f.rel.split('/')[0] === top; }) ? cpShootByFolder(top) : null;
-  if (d) { cpAcceptOpen(d.path, d.name); cpAcceptAdd(files); return; }
-  /* папки артикулов без папки съёмки — ищем съёмку по артикулам */
+  var path = String(files[0].rel || ''), top = path.indexOf('/') === -1 ? '' : path.split('/')[0];
+  var named = top && files.every(function (f) { return String(f.rel || '').indexOf(top + '/') === 0; }) ? cpShootByFolder(top) : null;
+  if (named) { cpAcceptOpen(named.path, named.name); cpAcceptAdd(files); return; }
   var found = cpShootsByArticles(files);
-  if (!found.list.length) {
-    cbToast(found.codes.length ? 'Не нашла съёмку, где артикул' + (found.codes.length > 1 ? 'ы ' : ' ') + found.codes.slice(0, 6).join(', ') + ' сейчас в ретуши. Выберите съёмку и нажмите «Сдать»'
-      : 'Не нашла съёмку по имени папки «' + top + '». Выберите съёмку и нажмите «Сдать»');
-    return;
-  }
-  if (found.list.length === 1) cpAcceptOpenFound(found, found.list[0].d, files);
+  if (found.list.length === 1 && !found.list[0].miss.length) cpAcceptOpenFound(found, found.list[0].d, files);
   else cpAcceptChoose(found, files);
 }
 
@@ -1874,15 +1891,17 @@ cpRenderShoots = (function (orig) {
     var r = orig.apply(this, arguments);
     var root = cpReviewRoot(), list = document.getElementById('cpShelfList');
     if (!list || CP.stageFilter !== 'review' || !root || document.getElementById('cpRvDrop')) return r;
-    list.insertAdjacentHTML('afterbegin', '<div class="cp-rv-drop" id="cpRvDrop">Перетащите сюда папку с готовой ретушью — как на Диск '
-      + '(или <label class="cp-acc-pick">выберите папку<input type="file" id="cpRvDropPick" webkitdirectory multiple hidden></label>). '
-      + 'Можно скачанный архив целиком, можно просто папки артикулов: съёмка найдётся по имени папки или по артикулам, файлы лягут в ' + cbEsc(cpFolderBase(root)) + '.</div>');
+    list.insertAdjacentHTML('afterbegin', '<div class="cp-rv-drop" id="cpRvDrop">Перетащите готовую ретушь или '
+      + '<label class="cp-acc-pick">выберите папку<input type="file" id="cpRvDropPick" webkitdirectory multiple hidden></label> · '
+      + '<label class="cp-acc-pick">выберите файлы<input type="file" id="cpRvFilesPick" multiple hidden></label></div>');
     var z = document.getElementById('cpRvDrop');
-    var pick = document.getElementById('cpRvDropPick');
-    pick.onchange = function () {
-      cpReviewDrop(Array.prototype.slice.call(pick.files).map(function (f) { return { file: f, rel: f.webkitRelativePath || f.name }; }));
-      pick.value = '';
-    };
+    ['cpRvDropPick', 'cpRvFilesPick'].forEach(function (id) {
+      var pick = document.getElementById(id);
+      pick.onchange = function () {
+        cpReviewDrop(Array.prototype.slice.call(pick.files).map(function (f) { return { file: f, rel: f.webkitRelativePath || f.name }; }));
+        pick.value = '';
+      };
+    });
     z.addEventListener('dragover', function (e) { e.preventDefault(); z.classList.add('cp-over'); });
     z.addEventListener('dragleave', function () { z.classList.remove('cp-over'); });
     z.addEventListener('drop', function (e) {
@@ -2088,6 +2107,7 @@ cbRenderCards = (function (orig) {
   var st = document.createElement('style');
   st.textContent = '.cp-viewbar{font-size:13px;color:#cfcac2;margin:0 0 10px;padding:8px 10px;border:1px solid #3a3a37;border-radius:4px;background:#1a1a18}'
     + '.cp-viewbar summary{cursor:pointer}.cp-view-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding-top:8px}.cp-view-controls select{max-width:220px}'
+    + '.cp-acc-shoots [hidden]{display:none}'
     + '.cp-reveal-note{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px;color:#e7c9a8;background:#211c17;border:1px dashed #5a4632;border-radius:4px;padding:6px 10px;margin:0 0 8px}'
     + '.cp-reveal-note button{padding:2px 10px;font-size:12px}'
     + '.cb-card.cp-flash{box-shadow:0 0 0 2px #C9956B;transition:box-shadow .3s}'

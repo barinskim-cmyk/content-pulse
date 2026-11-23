@@ -108,6 +108,11 @@ function cpStem(name) {
   return String(name).replace(/\.[^.]+$/, '').replace(/^\d{1,3}_/, '').toLowerCase();
 }
 
+function cpFileArticleCode(name, letters) {
+  var stem = cpStem(name), prefix = cpLetterSplit(stem, letters);
+  return cpArtCode(null, prefix ? prefix.rest : stem);
+}
+
 /* ---------- не хватает кадра ----------
    Маша, 09.11: «чтобы оно ругалось, когда какой-то фотки нет — алярм: в карточке не хватает
    кадра, потеряли по дороге». Кадры карточки, ушедшие на ретушь, сверяются с файлами версии
@@ -213,6 +218,10 @@ function cpPlanUpload(files, data) {
     var card = null;
     for (var k = s.length - 2; k >= 0 && !card; k--) card = cardOfFolder(s[k]);
     card = card || byStem[cpStem(x.file.name)] || null;
+    if (!card) {
+      var code = cpFileArticleCode(x.file.name, rtLetters);
+      if (code) card = cardOfFolder(code);
+    }
     if (!card) { unmatched.push(s.join('/')); return; }
     (groups[card.id] = groups[card.id] || []).push({ file: x.file, name: x.file.name });
   });
@@ -230,6 +239,7 @@ function cpAcceptOpen(shootPath, shootName) {
     document.body.appendChild(box);
   }
   var st = { path: shootPath, name: shootName, data: null, plan: null, files: [] };
+  CP.acceptChoice = null;
   CP.accept = st;
   box.innerHTML = '<div class="cp-files-box"><div class="cp-files-head"><b>Сдать ретушь · ' + cbEsc(shootName) + '</b>'
     + '<button data-cp-acc="close" title="Закрыть">×</button></div>'
@@ -242,7 +252,11 @@ function cpAcceptOpen(shootPath, shootName) {
   var ready = (CP.shoot && CP.shoot.path === shootPath)
     ? Promise.resolve(cbProjectData())
     : CPDisk.readState(shootPath).then(function (r) { return r.data || cpBlankProject(shootName); });
-  ready.then(function (data) { st.data = data; if (st.files.length) cpAcceptPlan(); }, function (e) { cpHandleError(e, 'Не удалось прочитать отбор съёмки'); });
+  ready.then(function (data) {
+    if (CP.accept !== st) return;
+    st.data = data;
+    if (st.files.length) cpAcceptPlan();
+  }, function (e) { if (CP.accept === st) cpHandleError(e, 'Не удалось прочитать отбор съёмки'); });
   var drop = document.getElementById('cpAccDrop');
   drop.addEventListener('dragover', function (e) { e.preventDefault(); drop.classList.add('cp-over'); });
   drop.addEventListener('dragleave', function () { drop.classList.remove('cp-over'); });

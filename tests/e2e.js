@@ -891,7 +891,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
   await page.waitForFunction(() => !CP.mirrorBusy);
   check('сверка после сдачи оставляет обе папки в ретуши',
     (FILES.has(RT + '1/Y_74595_модель/manekin.jpg') || FILES.has(RT + '1/74595_модель/manekin.jpg'))
-    && FILES.has(RT + '1/Y_74596_модель/manekin2.jpg') && !TRASHED.some(p => p.indexOf(RT) === 0), JSON.stringify([...FILES.keys()].filter(p => p.indexOf(RT) === 0)));
+    && (FILES.has(RT + '1/Y_74596_модель/manekin2.jpg') || FILES.has(RT + '1/74596_модель/manekin2.jpg')) && !TRASHED.some(p => p.indexOf(RT) === 0), JSON.stringify([...FILES.keys()].filter(p => p.indexOf(RT) === 0)));
   check('сданное в ретушь не докопируется', await page.evaluate(() => { var done = cpDonePids(); var c = App.cards.find(x => x.title === '74595'); return cpCardPids(c).every(pid => done[pid]); }));
   await page.screenshot({ path: path.join(ROOT, 'tests', 'shot-site.png') });
   await page.click('[data-cp-sr="close"]');
@@ -3348,6 +3348,34 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
       }, mkFiles);
       check('кто забирал — известно: «Эти артикулы забирал(а) Y. Это вы?» — буква предложена, но не выбрана, пока не нажали',
         /забирал\(а\) Y/.test(w2.txt) && /Это вы\?/.test(w2.txt) && JSON.stringify(w2.before) === '["","Y",false]' && JSON.stringify(w2.after) === '["Y","took",true]', JSON.stringify(w2));
+      const jpeg = await t.evaluate(async (mk) => {
+        const files = eval(mk);
+        const A = '2026-11-10_SV_ОПТИКА_AUTO';
+        const photo = files([A + '_preview.jpg']);
+        cpReviewDrop(photo);
+        const notFolder = !CP.accept && CP.acceptChoice && CP.acceptChoice.files[0] === photo[0];
+        document.querySelector('[data-cp-acc-x]').click();
+        const plain = files(['x1.jpg']);
+        cpReviewDrop(plain);
+        const input = document.getElementById('cpAccShootSearch');
+        input.value = 'оптика_auto';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        const visible = [...document.querySelectorAll('[data-cp-acc-pick]:not([hidden])')];
+        const searchWorks = visible.length === 1 && visible[0].textContent.includes(A);
+        visible[0].click();
+        await Promise.resolve();
+        await Promise.resolve();
+        const retains = CP.accept && CP.accept.name === A && CP.accept.files[0] === plain[0]
+          && CP.accept.plan && Object.keys(CP.accept.plan.groups).length === 1;
+        document.querySelector('[data-cp-acc="close"]').click();
+        cpReviewDrop(files(['Export/U_81001_finish.jpg']));
+        await Promise.resolve();
+        await Promise.resolve();
+        const byCode = CP.accept && CP.accept.name === A && CP.accept.plan && Object.keys(CP.accept.plan.groups).length === 1;
+        document.querySelector('[data-cp-acc="close"]').click();
+        return [!!notFolder, searchWorks, !!retains, !!byCode];
+      }, mkFiles);
+      check('отдельный JPEG не выдаётся за папку, выбор съёмки сохраняет файл, JPEG с артикулом находится автоматически', jpeg.every(Boolean), JSON.stringify(jpeg));
       /* артикулы в двух съёмках — сначала вопрос «в какую сдаём», ничего не выбрано; выбрали — окно этой съёмки, можно переключить */
       const w3 = await t.evaluate(async (mk) => {
         const files = eval(mk);
@@ -3370,7 +3398,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         return { btns, noAccept, second, swTxt, first, letter };
       }, mkFiles);
       check('артикулы есть в двух съёмках: сначала выбор «в какую сдаём» (обе, ничего не выбрано), выбрали вторую — окно её сдачи, по ссылке — в первую; буква из папки «Y_81003_c»',
-        w3.btns.length === 2 && /ОПТИКА_AUTO/.test(w3.btns[0]) && /2 из 2/.test(w3.btns[0]) && /LM-2001/.test(w3.btns[1]) && /1 из 2/.test(w3.btns[1]) && w3.noAccept
+        w3.btns.length === 3 && /ОПТИКА_AUTO/.test(w3.btns[0]) && /2 из 2/.test(w3.btns[0]) && /LM-2001/.test(w3.btns[1]) && /1 из 2/.test(w3.btns[1]) && w3.noAccept
         && w3.second === 'LM-2001' && /ОПТИКА_AUTO/.test(w3.swTxt) && w3.first === '2026-11-10_SV_ОПТИКА_AUTO' && w3.letter === 'Y', JSON.stringify(w3));
     }
     /* 2.0.98: просмотр ретуши — как галерея исходников; отметки по кадрам; на сайт — когда принята вся карточка */
