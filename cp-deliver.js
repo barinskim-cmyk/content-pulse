@@ -211,6 +211,10 @@ function cpBatchStatus(status) {
   if (!cards.length) return;
   if ((status === 'retouch' || status === 'approval') && typeof cpCatStageMissing === 'function'
     && cpCatStageMissing(status === 'retouch' ? 'retouch' : 'approve')) return;
+  if (status === 'retouch' || status === 'approval') {
+    cards = cards.filter(function (card) { return !cpEnqueueDraftStage(card, status); });
+    if (!cards.length) return;
+  }
   var m = cpMeta();
   var pidsOf = function (c) { return cpCardPids(c).filter(function (pid) { var p = cbPhotoById(pid); return p && (p.kind || 'photo') !== 'ref'; }); };
   /* согласование в каталоге: копия в 02 -> статус (cp-review.js) */

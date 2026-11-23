@@ -56,7 +56,7 @@ function cpqSave(shoot, fn) {
   if (CP.shoot && CP.shoot.path === shoot.path && !CP.readOnly) {
     var m = cpMeta();
     m.q = m.q || {};
-    fn(m);
+    fn(m, null);
     cbMarkDirty();
     return Promise.resolve();
   }
@@ -64,7 +64,7 @@ function cpqSave(shoot, fn) {
   return cpMutateState({ path: shoot.path, name: shoot.name }, function (data) {
     var m = data.meta.cp;
     m.q = m.q || {};
-    fn(m);
+    fn(m, data);
   }).catch(function (e) { if (window.console) console.error('[CPQ] очередь не записалась', shoot.path, e); });
 }
 
@@ -89,7 +89,7 @@ CPQ.adopt = function () {
   Object.keys(q).forEach(function (id) {
     if (!CPQ.ops[id]) {
       var op = q[id];
-      if (op.kind === 'article-edit' && op.held) op.held = false;
+      if (op.kind === 'article-edit' && op.held && op.by !== cpActor()) return;
       CPQ.ops[id] = { shoot: { path: CP.shoot.path, name: CP.shoot.name }, op: op };
     }
   });
@@ -176,6 +176,8 @@ function cpqTick() {
 /** Выполнить перенос и проверить результат по Диску. -> {ok} | {ok:false, err, stuck} */
 function cpqRun(op, shoot) {
   if (op.kind === 'article-edit') return cpRunArticleEdit(op, shoot);
+  if (op.kind === 'article-save') return cpRunArticleSave(op, shoot);
+  if (op.kind === 'article-send') return cpRunArticleSend(op, shoot);
   if (op.kind === 'article-brak') return cpRunArticleBrak(op);
   if (op.kind === 'stage-trash') return cpRunStageTrash(op);
   /* Пачками: прослойка берёт за вызов не больше 1000 копий и 200 переносов, остальное молча
@@ -275,16 +277,16 @@ function cpqThere(path) {
 function cpqDone(ent) {
   var op = ent.op;
   delete CPQ.ops[op.id];
-  return cpqSave(ent.shoot, function (m) {
+  return cpqSave(ent.shoot, function (m, data) {
     delete m.q[op.id];
     var fn = op.after && CPQ.after[op.after.type];
-    if (fn) { try { fn(op, m, ent.shoot); } catch (e) { if (window.console) console.error('[CPQ] after', e); } }
+    if (fn) { try { fn(op, m, ent.shoot, data); } catch (e) { if (window.console) console.error('[CPQ] after', e); } }
     (m.events = m.events || []).push({ ts: new Date().toISOString(), action: 'queue_done', actor: cpActor(), items: [], note: op.label + (op.tries ? ' — с ' + (op.tries + 1) + '-й попытки' : '') });
   }).then(function () {
     /* перерисовать только если поменялось видимое (статус ретуши на карточке); служебные отметки
        (копии в 02, в _БРАК) на экран не влияют — лишняя перерисовка сбивает работу с карточками */
     if (CP.shoot && CP.shoot.path === ent.shoot.path && op.after && CPQ.redraw[op.after.type]) cpAfterStatus();
-    if (/^article-(edit|brak)$/.test(op.kind)) cpArticleRefreshSoon(ent.shoot.path);
+    if (/^article-(edit|brak|save|send)$/.test(op.kind)) cpArticleRefreshSoon(ent.shoot.path);
     if (op.kind === 'stage-trash' && CP.shoot && CP.shoot.path === ent.shoot.path && CP_SHOOT_VIEW.key === op.stage) {
       cpShowShootStage(op.stage, true);
     }
@@ -297,8 +299,13 @@ function cpqDrop(id) {
   var ent = CPQ.ops[id];
   if (!ent) return;
   delete CPQ.ops[id];
+  var discard = Object.values(CPQ.ops).filter(function (entry) {
+    return /^(article-send|article-brak)$/.test(entry.op.kind) && (entry.op.waitsFor || []).indexOf(id) !== -1;
+  });
+  discard.forEach(function (entry) { delete CPQ.ops[entry.op.id]; });
   cpqSave(ent.shoot, function (m) {
     delete m.q[id];
+    discard.forEach(function (entry) { delete m.q[entry.op.id]; });
     (m.events = m.events || []).push({ ts: new Date().toISOString(), action: 'queue_drop', actor: cpActor(), items: [], note: 'убрано из очереди: ' + ent.op.label + ' — ' + (ent.op.err || '') });
   });
   cpqRender();
@@ -359,9 +366,9 @@ function cpBusyNow() {
 
 window.addEventListener('beforeunload', function (e) {
   /* разбор 10.11: во время загрузки исходников и сборки архива страница закрывалась без вопроса */
-  if (cpqCount() || cpBusyNow() || (CP.shoot && (App.dirty || CP.saving))) {
+  if (cpqCount() || cpBusyNow() || (CP.shoot && (App.dirty || CP.saving || Object.keys(cpDrafts()).length))) {
     if (CP.shoot && !CP.readOnly && typeof cpArticleJobs === 'function' && cpArticleJobs(CP.shoot.path).length) {
-      cpBackupSave(CP.shoot.path, cbProjectData(), CP.rev);
+      cpBackupSave(CP.shoot.path, cpArticleSharedData(cbProjectData()), CP.rev);
     }
     e.preventDefault();
     e.returnValue = 'Изменения ещё не сохранены на Диске';

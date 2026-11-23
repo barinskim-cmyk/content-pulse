@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.126';
+var CP_VERSION = '2.0.127';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -588,7 +588,7 @@ function cpSetTitle() {
 function cpApplyRemote(data) {
   data = data || cpBlankProject(CP.shoot ? CP.shoot.name : 'Съёмка');
   data.name = CP.shoot ? CP.shoot.name : data.name;
-  cbApplyProject(data);
+  cbApplyProject(typeof cpOverlayArticleDrafts === 'function' ? cpOverlayArticleDrafts(data) : data);
   App.photos.forEach(function (p) {
     if (!p.disk) return;
     var t = CP.thumbs[p.disk];
@@ -1141,9 +1141,13 @@ cbAutosaveNow = function () {
     if (el0) el0.textContent = 'отбор не сохраняется: не прочитан с Диска';
     return;
   }
+  var data = cpArticleSharedData(cbProjectData());
+  if (CP.base && Object.keys(cpDrafts()).length) {
+    var shared = Object.assign({}, data, { savedAt: CP.base.savedAt });
+    if (cpSame(shared, CP.base)) { cbClearDirty(); cpUpdateStatusLine(); return; }
+  }
   CP.saving = true;
   var seq = CP.editSeq;
-  var data = cbProjectData();
   cpBackupSave(CP.shoot.path, data, CP.rev);
   cpSaveState('сохраняю…', 'busy');
   /* Запись могла закончиться, когда уже открыта другая съёмка: тогда её
@@ -1175,7 +1179,7 @@ cbAutosaveNow = function () {
     }
     if (e && e.conflict) {
       /* чужая версия + наши правки: склеиваем и сохраняем ещё раз */
-      var merged = cpMerge3(CP.base, cbProjectData(), e.data || {});
+      var merged = cpMerge3(CP.base, cpArticleSharedData(cbProjectData()), e.data || {});
       CP.rev = e.rev;
       cpApplyRemote(merged);
       CP.base = cpClone(e.data || {});
@@ -1325,6 +1329,7 @@ document.getElementById('cpVersList').addEventListener('click', function (e) {
 
 cbSaveProject = function () {
   if (!CP.shoot) { cbToast('Сначала откройте съёмку на витрине'); return; }
+  cpCommitOtherDrafts();
   App.dirty = true;
   cbAutosaveNow();
 };
@@ -1410,6 +1415,7 @@ function cpDoAction(status, pids, cardId) {
   pids = pids.filter(function (pid) { var p = cbPhotoById(pid); return p && (p.kind || 'photo') !== 'ref'; });
   if (!pids.length) { cbToast('Нет кадров для действия'); return; }
   var card = cardId ? cbCardById(cardId) : null;
+  if ((status === 'retouch' || status === 'approval') && cpWholeLinkedCard(card, pids) && cpEnqueueDraftStage(card, status)) return;
   var extra = card ? { card: card.title || card.category || ('карточка ' + (App.cards.indexOf(card) + 1)) } : {};
   if (!status) {
     cpSetStatus(pids, null, cardId);

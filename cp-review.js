@@ -794,7 +794,10 @@ function cpApprovalSync() {
   var m = cpMeta(), ap2 = m.ap2 = m.ap2 || {};
   var shootPath = CP.shoot.path.replace(/\/+$/, ''), shootName = CP.shoot.name;
   var base = root.replace(/\/+$/, '') + '/' + CPDisk.safeName(shootName);
-  var want = Object.keys(m.status).filter(function (pid) { return m.status[pid].s === 'approval'; });
+  var want = Object.keys(m.status).filter(function (pid) {
+    var status = m.status[pid];
+    return status.s === 'approval' && (!status.card || (!cpDrafts()[status.card] && !cpArticleJobs(shootPath, status.card).length));
+  });
   var inQueue = CPQ.pendingFrom();
   var copy = want.filter(function (pid) { var p0 = cbPhotoById(pid); return !ap2[pid] && !(p0 && inQueue[p0.disk]); }).map(function (pid) {
     var p = cbPhotoById(pid);

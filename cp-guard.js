@@ -72,8 +72,9 @@ function cpInSelection(pid) {
 function cpGuardCheck() {
   if (!CP.shoot) { CP.cardSnap = null; return; }
   var now = cpSnapNow();
-  var prev = CP.cardSnap;
+  var prev = CP.cardSnap, layouts = CP.cardLayoutSnap || {};
   CP.cardSnap = now;
+  if (typeof cpDraftLayoutSnapshot === 'function') CP.cardLayoutSnap = cpDraftLayoutSnapshot();
   if (!prev || CP.snapShoot !== CP.shoot.path || CP.guardMute) { CP.snapShoot = CP.shoot.path; return; }
   var m = cpMeta();
   var actor = cpActor(), ts = new Date().toISOString();
@@ -85,12 +86,11 @@ function cpGuardCheck() {
     var a = prev[cid] || [], b = now[cid] || [];
     var removed = a.filter(function (p) { return b.indexOf(p) === -1; });
     var added = b.filter(function (p) { return a.indexOf(p) === -1; });
-    if (!removed.length && !added.length) return;
     var card = cbCardById(cid);
+    if (!removed.length && !added.length && (!card || !cpLinkedArticle(card) || cpSame(a, b))) return;
     var cst = m.cardStatus[cid];
     if (typeof cpLinkedArticle === 'function' && cpLinkedArticle(card)) {
-      removed.forEach(function (pid) { cpQueueArticleEdit(card, pid, 'remove', false); });
-      added.forEach(function (pid) { cpQueueArticleEdit(card, pid, 'add', false); });
+      cpTrackArticleDraft(card, a, b, layouts[cid]);
       return;
     }
     /* из карточки уже скачивали — предупреждаем и помечаем карточку */
@@ -164,13 +164,19 @@ function cpGuardCheck() {
   window.cpApplyRemote = function () {
     CP.guardMute = true;
     try { return applyOrig.apply(this, arguments); }
-    finally { CP.guardMute = false; CP.cardSnap = CP.shoot ? cpSnapNow() : null; CP.snapShoot = CP.shoot ? CP.shoot.path : ''; }
+    finally {
+      CP.guardMute = false;
+      CP.cardSnap = CP.shoot ? cpSnapNow() : null;
+      if (CP.shoot) CP.cardLayoutSnap = cpDraftLayoutSnapshot();
+      CP.snapShoot = CP.shoot ? CP.shoot.path : '';
+    }
   };
   var renderOrig = window.cbRenderCards;
   window.cbRenderCards = function () {
     try { cpGuardCheck(); } catch (e) { if (window.console) console.error('[CP] правила отбора', e); }
     var r = renderOrig.apply(this, arguments);
     cpGuardDecorate();
+    if (CP.shoot && typeof cpArticleDraftButtons === 'function') cpArticleDraftButtons();
     return r;
   };
 })();
@@ -247,9 +253,13 @@ function cpFollowOn() { return cpGet('cp_follow_card', '0') === '1'; }
 
 function cpSetActiveCard(id) {
   if (CP.shoot && CP.activeCard !== id && typeof cpReleaseArticleJobs === 'function') {
+    cpCommitOtherDrafts(id);
     var path = CP.shoot.path;
     cpArticleJobs(path).forEach(function (entry) {
       if (entry.op.held && entry.op.card !== id) cpReleaseArticleJobs(path, entry.op.card);
+    });
+    document.querySelectorAll('[data-cp-save-article]').forEach(function (button) {
+      if (!cpDrafts()[button.dataset.cpSaveArticle]) button.remove();
     });
   }
   CP.activeCard = id || null;

@@ -421,6 +421,7 @@ function cpCollectCards() {
       var saved = Object.keys(byDir).filter(function (key) { return key.toLowerCase() === counterpart.toLowerCase() && !arts[key]; });
       if (saved.length === 1) {
         card = byDir[saved[0]];
+        if (cpDrafts()[card.id]) return;
         delete byDir[saved[0]];
         byDir[d] = card;
         card.cpArticleDir = d;
@@ -450,7 +451,7 @@ function cpCollectCards() {
       var outcome = cpReconcileArticleCard(card, inDir[d] || [], fresh && initialized && !createdHere, renamed);
       membershipChanged = membershipChanged || outcome.changed || !initialized;
       res.added += outcome.added;
-      if (fresh) {
+      if (fresh && !cpDrafts()[card.id]) {
         var marked = (m.articleBrak || {})[card.id];
         if (cpArticleIsBrak(d) && !marked) cpQueueArticleBrak(card, true);
         if (!cpArticleIsBrak(d) && marked) cpQueueArticleBrak(card, false);
@@ -482,7 +483,7 @@ function cpCollectCards() {
     }
   });
   if (fresh && typeof cpLinkedArticle === 'function') App.cards.forEach(function (card) {
-    if (!cpLinkedArticle(card) || arts[card.cpArticleDir] || cpArticleJobs(CP.shoot.path, card.id).length) return;
+    if (!cpLinkedArticle(card) || arts[card.cpArticleDir] || cpDrafts()[card.id] || cpArticleJobs(CP.shoot.path, card.id).length) return;
     if (!card.cpFolderMissing) membershipChanged = true;
     card.cpFolderMissing = true;
     if (card.cpFolderLinked) {
@@ -495,7 +496,11 @@ function cpCollectCards() {
   if (res.late.length) note += '; новые кадры в карточках в работе (' + res.late.join(', ') + ') — без статуса';
   cpEvent('auto_cards', [], { note: note }, true);
   /* это не правка человека: правила «кадр добавили в карточку» (cp-guard.js) не запускаем */
-  if (typeof cpSnapNow === 'function') { CP.cardSnap = cpSnapNow(); CP.snapShoot = CP.shoot.path; }
+  if (typeof cpSnapNow === 'function') {
+    CP.cardSnap = cpSnapNow();
+    CP.cardLayoutSnap = cpDraftLayoutSnapshot();
+    CP.snapShoot = CP.shoot.path;
+  }
   cbMarkDirty();
   cbRenderCards();
   cbRenderTray();

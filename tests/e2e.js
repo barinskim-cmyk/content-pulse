@@ -439,8 +439,22 @@ async function articleFolderChecks(ctx, base) {
   check('правка состава ждёт смены карточки, закрытие страницы вызывает предупреждение', !FILES.has(article + '/запасной.jpg') && await page.evaluate(() => {
     const e = new Event('beforeunload', { cancelable: true });
     window.dispatchEvent(e);
-    return e.defaultPrevented && Object.values(CPQ.ops).some(x => x.op.held);
+    return e.defaultPrevented && !cpqCount() && Object.keys(cpDrafts()).length === 1;
   }));
+  const privateDraft = await page.evaluate(async ({ source, cardId }) => {
+    await cpFlushSave();
+    const { data } = await CPDisk.readState(source);
+    return (data.cards || []).find(c => c.id === cardId).pids.length === 2 && !Object.keys(data.meta.cp.q || {}).length;
+  }, { source, cardId });
+  check('черновик виден автору, в общих данных коллеги видят только последний сохранённый отбор', privateDraft);
+  await page.evaluate(id => {
+    const card = cbCardById(id), backup = JSON.parse(localStorage.getItem(cpDraftKey(CP.shoot.path)));
+    if (!backup[id]) throw new Error('не записан черновик');
+    CP_ARTICLE_DRAFTS = { path: '', cards: {} };
+    cpApplyRemote(cpClone(CP.base));
+  }, cardId);
+  check('черновик восстанавливается из браузера поверх общего отбора', await page.evaluate(id =>
+    cpCardPids(cbCardById(id)).some(pid => cbPhotoById(pid).name === 'запасной.jpg') && !cpqCount(), cardId));
   await page.evaluate(() => cpSetActiveCard(App.cards.find(c => c.cpArticle === '012345').id));
   await page.waitForFunction(() => !cpqCount());
   await page.evaluate(() => cpSyncPhotos(false));
@@ -529,6 +543,55 @@ async function articleFolderChecks(ctx, base) {
   check('суффикс, добавленный и снятый прямо на Диске, меняет ту же карточку; обе копии остаются в архиве',
     snapshot !== second && [snapshot, second].every(path => FILES.has(path + '/руками.jpg')) && DIRS.has(article)
     && await page.evaluate(id => cbCardById(id).cpArticleDir === 'Бренд/074478_оптика', cardId));
+  const cancelled = source + '/отменила.jpg', ready = source + '/добавила-перед-отправкой.jpg';
+  FILES.set(cancelled, Buffer.from('gesture cancelled'));
+  FILES.set(ready, Buffer.from('save before dispatch'));
+  await page.evaluate(async id => {
+    await cpSyncPhotos(false);
+    const card = cbCardById(id), undo = App.photos.find(p => p.name === 'отменила.jpg');
+    cpSetActiveCard(id);
+    card.pids.push(undo.id);
+    cbRenderCards();
+    card.pids = card.pids.filter(pid => pid !== undo.id);
+    cbRenderCards();
+  }, cardId);
+  check('добавление и отмена до ухода не создают задания и не трогают файлы', !FILES.has(article + '/отменила.jpg')
+    && await page.evaluate(() => !Object.keys(cpDrafts()).length && !cpqCount()));
+  FAIL_COPY = /074478_оптика\/добавила-перед-отправкой\.jpg$/;
+  await page.evaluate(id => {
+    const card = cbCardById(id);
+    card.pids.push(App.photos.find(p => p.name === 'добавила-перед-отправкой.jpg').id);
+    cbRenderCards();
+    cpDoAction('retouch', cpCardPids(card), id);
+  }, cardId);
+  await page.waitForFunction(() => Object.values(CPQ.ops).some(({ op }) => op.kind === 'article-save' && op.tries));
+  check('кнопка «На ретушь» ставит отправку после сохранения; при сбое отправка ждёт',
+    !FILES.has(retouch + '/добавила-перед-отправкой.jpg') && await page.evaluate(() =>
+      Object.values(CPQ.ops).some(({ op }) => op.kind === 'article-send' && op.waitsFor.some(id => CPQ.ops[id]))));
+  FAIL_COPY = null;
+  await page.click('#cpQueue [data-cpq="now"]');
+  await page.waitForFunction(() => !cpqCount());
+  check('после сохранения отправка проходит из папки артикула и сохраняет букву на этапе', FILES.has(article + '/добавила-перед-отправкой.jpg')
+    && FILES.has(retouch + '/добавила-перед-отправкой.jpg') && DIRS.has(retouch));
+
+  const working = article + '/руками.jpg';
+  await page.evaluate(async id => {
+    await cpSyncPhotos(false);
+    const card = cbCardById(id);
+    card.pids = card.pids.filter(pid => cbPhotoById(pid).name !== 'руками.jpg');
+    cbRenderCards();
+  }, cardId);
+  const colleague = Buffer.from('colleague saved a different file at the same path');
+  FILES.set(working, colleague);
+  await page.click('[data-cp-save-article="' + cardId + '"]');
+  await page.waitForFunction(() => Object.values(CPQ.ops).some(({ op }) => op.kind === 'article-save' && op.stuck));
+  check('если коллега заменил убираемый файл, сохранение показывает конфликт и оставляет его копию на месте',
+    FILES.get(working).equals(colleague) && !FILES.has(source + '/Лишние кадры/' + rel + '/руками.jpg')
+    && await page.evaluate(() => Object.values(CPQ.ops).some(({ op }) => op.err.includes('изменился на Диске'))));
+  await page.evaluate(() => {
+    const id = Object.keys(CPQ.ops).find(key => CPQ.ops[key].op.stuck);
+    cpqDrop(id);
+  });
   check('папки и вкладки без ошибок страницы', !errors.length, errors.join(' | '));
   await page.close();
 }

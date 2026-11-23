@@ -22,7 +22,7 @@ function cpLinkedArticle(card) {
 
 function cpArticleJobs(path, id) {
   return Object.keys(CPQ.ops).map(function (key) { return CPQ.ops[key]; }).filter(function (entry) {
-    return entry.shoot.path === path && /^article-(edit|brak)$/.test(entry.op.kind) && (!id || entry.op.card === id);
+    return entry.shoot.path === path && /^article-(edit|brak|save|send)$/.test(entry.op.kind) && (!id || entry.op.card === id);
   });
 }
 
@@ -147,8 +147,11 @@ function cpArticleUpdateStages(op, shoot, source) {
                 var digest = op.digest, same = files.filter(function (file) { return digest && file.md5 === digest; });
                 var named = same.filter(function (file) { return cpStem(file.name) === cpStem(op.name); });
                 if (op.direction === 'add') {
-                  var added = named.length ? Promise.resolve() : cpArticleMediaOp(source, folder.path + '/' + op.name, op.digest, false);
-                  return added.then(function () { op.reached = stage.key; });
+                  var added = named.length ? Promise.resolve(named[0].path) : cpArticleMediaOp(source, folder.path + '/' + op.name, op.digest, false);
+                  return added.then(function (path) {
+                    op.reached = stage.key;
+                    if (stage.key === 'approval') op.approvedPath = path;
+                  });
                 }
                 var matches = named.length ? named : same.length === 1 ? same : [];
                 return matches.reduce(function (done, file) {
@@ -198,10 +201,12 @@ CPQ.after['article-edit'] = function (op, m, shoot) {
       var copies = m.articleCopies = m.articleCopies || {};
       (copies[op.card] = copies[op.card] || {})[op.pid] = op.resultPath;
     }
+    if (op.approvedPath) (m.ap2 = m.ap2 || {})[op.pid] = op.approvedPath;
     if (op.reached && (!current || current.s === 'removed')) {
       m.status[op.pid] = { s: op.reached, card: op.card, by: op.by, ts: new Date().toISOString() };
     }
   } else if (current && current.card === op.card && /^(approval|retouch)$/.test(current.s)) {
+    if (m.ap2) delete m.ap2[op.pid];
     if (((m.downloads || {})[op.pid] || {}).n) {
       m.status[op.pid] = Object.assign({}, current, { s: 'removed', was: current.s });
     } else delete m.status[op.pid];
@@ -218,6 +223,7 @@ function cpWholeLinkedCard(card, pids) {
 function cpQueueArticleBrak(card, active, info) {
   var shoot = CP.shoot, art = cpLinkedArticle(card);
   if (!shoot || !art || CP.readOnly || card.cpFolderMissing) return;
+  if (!cpCommitArticleDraft(card.id)) return;
   var jobs = cpArticleJobs(shoot.path, card.id);
   if (jobs.some(function (entry) { return entry.op.kind === 'article-brak'; })) return;
   var root = active ? cpBrakRoot(shoot.name) : '';
@@ -292,11 +298,11 @@ CPQ.redraw['article-brak'] = true;
 
 /* Состав проверяется по полному снимку исходников, с учётом локальной очереди. */
 function cpReconcileArticleCard(card, incoming, fresh, renamed) {
+  if (cpDrafts()[card.id]) return { changed: false, added: 0 };
   var m = cpMeta(), previous = cpCardPids(card), byPath = Object.create(null);
   incoming.forEach(function (photo) { byPath[photo.disk] = photo.id; });
   var jobs = cpArticleJobs(CP.shoot.path, card.id), removed = {}, held = {};
-  jobs.forEach(function (entry) {
-    var op = entry.op;
+  cpArticlePendingEdits(CP.shoot.path, card.id).forEach(function (op) {
     if (op.direction === 'remove') { delete held[op.pid]; removed[op.pid] = true; }
     if (op.direction === 'add') { delete removed[op.pid]; held[op.pid] = true; }
   });
@@ -307,6 +313,10 @@ function cpReconcileArticleCard(card, incoming, fresh, renamed) {
     if (status && status.card === card.id) {
       if (!m.status[mapped]) m.status[mapped] = status;
       delete m.status[old];
+    }
+    if (m.ap2 && m.ap2[old]) {
+      if (!m.ap2[mapped]) m.ap2[mapped] = m.ap2[old];
+      delete m.ap2[old];
     }
     delete savedCopies[old];
   });
@@ -373,11 +383,12 @@ setInterval(function () {
 function cpConfirmArticleLeave() {
   if (!CP.shoot) return true;
   var path = CP.shoot.path;
-  if (!cpArticleJobs(path).length && !Object.values(CPQ.ops).some(function (entry) {
+  cpCommitOtherDrafts();
+  if (!Object.keys(cpDrafts()).length && !cpArticleJobs(path).length && !Object.values(CPQ.ops).some(function (entry) {
     return entry.shoot.path === path && entry.op.kind === 'stage-trash';
   })) return true;
   cpReleaseArticleJobs(path);
-  if (!CP.readOnly) cpBackupSave(path, cbProjectData(), CP.rev);
+  if (!CP.readOnly) cpBackupSave(path, cpArticleSharedData(cbProjectData()), CP.rev);
   return confirm('Изменения карточек ещё не сохранены на Диске. Синхронизация запущена. Переключиться сейчас?');
 }
 
