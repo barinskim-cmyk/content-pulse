@@ -70,7 +70,7 @@ function cpDropFiles(dt) {
   if (entries.length) {
     return Promise.all(entries.map(function (e) { return cpEntryFiles(e, ''); })).then(function (l) { return [].concat.apply([], l); });
   }
-  return Promise.resolve(Array.prototype.slice.call(dt.files || []).map(function (f) { return { file: f, rel: f.name }; }));
+  return Promise.resolve(Array.prototype.slice.call(dt.files || []).map(function (f) { return { file: f, rel: f.webkitRelativePath || f.name }; }));
 }
 
 /* ---------- загрузка с повторами ----------
@@ -170,16 +170,17 @@ function cpPlanUpload(files, data) {
   var tops = {};
   segs.forEach(function (s) { tops[s[0]] = true; });
   var top = '';
-  /* одна общая папка, внутри — папки карточек: это скачанный архив */
+  /* Общую папку читаем как подсказку о дропе. Для артикула сохраняем весь путь. */
   if (Object.keys(tops).length === 1 && segs.every(function (s) { return s.length >= 3; })) {
     top = segs[0][0];
-    segs = segs.map(function (s) { return s.slice(1); });
   }
-  var lm = /_([A-Za-zА-Яа-яЁё]{1,3})_(\d+)$/.exec(top) || [];
+  var rtLetters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
+  var prefix = cpLetterSplit(top, rtLetters);
+  var topArticle = cpArtCode(null, prefix ? prefix.rest : top);
+  var lm = !topArticle && /_([A-Za-zА-Яа-яЁё]{1,3})_(\d+)$/.exec(top) || [];
   /* Буква ретушёра известна по именам папок — тогда выбирать её не нужно (Маша, 10.11.2026:
      «сдаёт папку, в которой уже есть буква его имени, — сразу подставляем»): архив из папки
      ретуши «…_03_РЕТУШЬ_Y_2026-11-10» и папки артикулов «Y_74595_…». Разные буквы — не знаем. */
-  var rtLetters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
   if (!lm[1] && rtLetters.length) {
     var am = /_([A-Za-zА-Яа-яЁё]{1,3})(?:\+[^_]*)?_\d{4}-\d{2}-\d{2}$/.exec(top);
     var seen = {};
@@ -208,8 +209,11 @@ function cpPlanUpload(files, data) {
   var cardOfFolder = function (name) {
     var n = name.toLowerCase();
     if (byFolder[n]) return byFolder[n];
-    var code = (/(?:^|[^\d])(\d{4,7})(?!\d)/.exec(name) || [])[1];
-    return code ? cards.filter(function (c) { return c.cpArticle === code || String(c.title || '').indexOf(code) !== -1; })[0] : null;
+    var sp = cpLetterSplit(name, rtLetters);
+    var code = cpArtCode(null, sp ? sp.rest : name.replace(/^(?:!|\d{1,2})_/, ''));
+    if (!code) return null;
+    return cards.filter(function (c) { return String(c.cpArticle || '').split(/,\s*/).indexOf(code) !== -1; })[0]
+      || cards.filter(function (c) { return cpArtCode(null, c.title) === code; })[0] || null;
   };
   var groups = {}, unmatched = [];
   files.forEach(function (x, i) {

@@ -1974,7 +1974,7 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     await page.waitForFunction(() => /Архив готов/.test((document.getElementById('cpDlCard') || {}).textContent || ''), null, { timeout: 10000 }).catch(() => {});
     for (let i = 0; i < 60 && !(kState().meta.cp.rtdl || {})['74001_модель/k1.jpg']; i++) await page.waitForTimeout(100);
     const zY = [...ZIPS.entries()].filter(([k]) => /2026-11-06_SV_КАТ_03_РЕТУШЬ_U\+Y_/.test(k)).flatMap(([, v]) => v);
-    check('скачалось только с тегом Y — папка Y_74001_модель, без 74002; в имени архива — буква того, кто скачал', zY.length === 1 && /Y_74001_модель\/k1\.jpg$/.test(zY[0]), JSON.stringify([...ZIPS.keys()].slice(-2)) + ' ' + zY.join(' | '));
+    check('скачалось только из выбранной папки Y, а в архиве папка артикула подписана U', zY.length === 1 && /U_74001_модель\/k1\.jpg$/.test(zY[0]), JSON.stringify([...ZIPS.keys()].slice(-2)) + ' ' + zY.join(' | '));
     let ks = kState(), rec = (ks.meta.cp.rtdl || {})['74001_модель/k1.jpg'] || {};
     const evDl = (ks.meta.cp.events || []).filter(e => e.action === 'download_retouch').pop() || {};
     check('скачали — в отборе съёмки запись: кто (буква U), когда, какой архив; в журнале — событие', rec.l === 'U' && rec.n === 1 && !!rec.ts && /03_РЕТУШЬ_U\+Y_/.test(rec.export || '') && !!rec.rid
@@ -1984,6 +1984,15 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
     check('2.0.111: забрал U из папки «Y_74001_модель» — папка артикула в 03 переименована под букву: U_74001_модель', DIRS.has(KRT + '/U_74001_модель') && !DIRS.has(KRT + '/Y_74001_модель')
       && FILES.has(KRT + '/U_74001_модель/k1.jpg'), JSON.stringify([...DIRS].filter(d => d.indexOf(KRT) === 0)));
     await page.waitForFunction(() => /скачано: U/.test((document.getElementById('cpPanel') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => {});
+    const checkedLetter = (kState().meta.cp.rtLetter || {})['74001'];
+    check('подтверждённая буква папки записана вместе со временем скачивания', checkedLetter && checkedLetter.l === 'U' && checkedLetter.ts === rec.ts, JSON.stringify(checkedLetter));
+    const renamedFile = await page.evaluate(root => {
+      const file = { path: root + '/Y_74001_модель/переименованный_кадр.jpg', name: 'переименованный_кадр.jpg', size: 12 };
+      const sel = { name: CP.sel.name, path: CP.sel.path, data: CP.sel.data, stage: 'retouch', stageFiles: [{ root, files: [file] }] };
+      cpStageTagIndex(sel);
+      return [file.cpPid, file.cpCards, file.cpTags];
+    }, KRT);
+    check('кадр с другим именем в папке артикула всё равно связан с карточкой для скачивания и тега', renamedFile[0] === '' && renamedFile[1].includes('c1') && renamedFile[2].includes('U'), JSON.stringify(renamedFile));
     pan = await page.textContent('#cpPanel');
     sb = await stBtn();
     check('после скачивания у папки — «скачано: U», галка «и уже скачанные» снята сама', /скачано: U/.test(pan) && await page.evaluate(() => !document.querySelector('#cpPanel [data-cp-sagain]').checked) && sb[1], pan.slice(0, 600));
@@ -3269,16 +3278,20 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         cpMeta().rtdl = { ['brand/81003_c/' + p.name.toLowerCase()]: { l: 'U', by: 'тест', ts: new Date().toISOString(), export: 'x', n: 1, rid: '1111111111111111' } };
         cpMirrorApply(rs, ['Y', 'U']);
         const byRecord = card.tags.join();
+        const download = cpMeta().rtdl['brand/81003_c/' + p.name.toLowerCase()];
+        cpMeta().rtLetter = { '81003': { l: 'U', ts: download.ts } };
+        cpMirrorApply(rs, ['Y', 'U']);
+        const laterManual = card.tags.join();
         card.tags = []; delete cpMeta().rtLetter;
         cpMeta().rtdl['brand/81003_c/' + p.name.toLowerCase()].rid = '2222222222222222';   /* запись о прежней копии файла */
         cpMirrorApply(rs, ['Y', 'U']);
         const stale = card.tags.join();
         delete cpMeta().rtdl; delete cpMeta().rtLetter; card.tags = []; CP.rtDirs = null;
         CP.dict = dictWas; CP.dictGroups = groupsWas;
-        return [byFolder, byRecord, stale, cpStageKey('1/Y_74595_модель/A.JPG', ['Y']).key, cpStageKey('1/74595_модель_доработка/A.JPG', ['Y']).key];
+        return [byFolder, byRecord, stale, laterManual, cpStageKey('1/Y_74595_модель/A.JPG', ['Y']).key, cpStageKey('1/74595_модель_доработка/A.JPG', ['Y']).key];
       });
       check('сверка с Диском: буква карточки — по записи «скачано» (U), без записи или с записью о прежней копии — по имени папки (Y)',
-        mr[0] === 'Y' && mr[1] === 'U' && mr[2] === 'Y' && mr[3] === '1/74595_модель/a.jpg' && mr[4] === mr[3], JSON.stringify(mr));
+        mr[0] === 'Y' && mr[1] === 'U' && mr[2] === 'Y' && mr[3] === 'Y' && mr[4] === '1/74595_модель/a.jpg' && mr[5] === mr[4], JSON.stringify(mr));
     }
     /* 2.0.97: сдача просто папками артикулов — съёмка ищется по артикулам; букву нужно выбрать */
     {
@@ -3376,6 +3389,28 @@ let FAIL_MOVE = null;   /* перенос этих путей «падает» *
         return [!!notFolder, searchWorks, !!retains, !!byCode];
       }, mkFiles);
       check('отдельный JPEG не выдаётся за папку, выбор съёмки сохраняет файл, JPEG с артикулом находится автоматически', jpeg.every(Boolean), JSON.stringify(jpeg));
+      const folderIntake = await t.evaluate(async (mk) => {
+        const files = eval(mk), shoot = '2026-11-10_SV_ОПТИКА_AUTO';
+        const nested = ['U_81001_a_2/экспорт/новое_имя.jpg', 'U_81001_a_2/другой_ракурс/другое_имя.jpg'];
+        const dropped = await cpDropFiles({ files: files(nested).map(x => {
+          Object.defineProperty(x.file, 'webkitRelativePath', { value: x.rel });
+          return x.file;
+        }) });
+        cpReviewDrop(dropped);
+        await Promise.resolve();
+        await Promise.resolve();
+        const first = CP.accept && CP.accept.name === shoot && CP.accept.plan && CP.accept.plan.unmatched.length === 0
+          && Object.values(CP.accept.plan.groups).flat().length === 2 && CP.accept.plan.letter === 'U';
+        document.querySelector('[data-cp-acc="close"]').click();
+        cpReviewDrop(files(['1_' + shoot + ' +/бренд/U_81001_a/готовый_кадр.jpg']));
+        await Promise.resolve();
+        await Promise.resolve();
+        const second = CP.accept && CP.accept.name === shoot && CP.accept.plan && CP.accept.plan.unmatched.length === 0
+          && Object.keys(CP.accept.plan.groups).length === 1;
+        document.querySelector('[data-cp-acc="close"]').click();
+        return [!!first, !!second];
+      }, mkFiles);
+      check('сдача дерева папок находит артикул на верхнем уровне и съёмку в папке с номером очереди', folderIntake.every(Boolean), JSON.stringify(folderIntake));
       /* артикулы в двух съёмках — сначала вопрос «в какую сдаём», ничего не выбрано; выбрали — окно этой съёмки, можно переключить */
       const w3 = await t.evaluate(async (mk) => {
         const files = eval(mk);

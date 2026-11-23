@@ -1275,7 +1275,7 @@ function cpStageTagIndex(sel) {
   var m = (data.meta && data.meta.cp) || {}, status = m.status || {}, cst = m.cardStatus || {};
   var src = String(sel.path || '').replace(/\/+$/, '') + '/';
   var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
-  var byRel = {}, byStem = {}, tagsOf = {}, cardOf = {};
+  var byRel = {}, byStem = {}, tagsOf = {}, cardOf = {}, cardsByCode = Object.create(null), cardsById = Object.create(null);
   photos.forEach(function (p) {
     if (!p.disk) return;
     var rel = p.disk.indexOf(src) === 0 ? p.disk.slice(src.length) : p.name;
@@ -1284,6 +1284,10 @@ function cpStageTagIndex(sel) {
     (byStem[st] = byStem[st] || []).push(p.id);
   });
   cards.forEach(function (c) {
+    cardsById[c.id] = c;
+    String(c.cpArticle || cpArtCode(null, c.title) || '').split(/,\s*/).filter(Boolean).forEach(function (code) {
+      (cardsByCode[code] = cardsByCode[code] || []).push(c.id);
+    });
     var pids = c.mode === 'auto' ? (c.pids || []) : (c.slots || []).map(function (x) { return x.pid; }).filter(Boolean);
     pids.forEach(function (pid) {
       (tagsOf[pid] = tagsOf[pid] || {}); (c.tags || []).forEach(function (t) { tagsOf[pid][t] = true; });
@@ -1315,7 +1319,10 @@ function cpStageTagIndex(sel) {
       if (k.letter) tags[k.letter] = true;
       var pid = byRel[k.key];
       if (!pid) { var c = byStem[cpStem(name)] || []; if (c.length === 1) pid = c[0]; }
+      var article = cpRtArtDir(x.root, f.path, letters, stype), code = article && article.code || cpArtCode(stype, name);
+      f.cpCards = pid ? cardOf[pid] || [] : cardsByCode[code] || [];
       if (pid && tagsOf[pid]) Object.keys(tagsOf[pid]).forEach(function (t) { tags[t] = true; });
+      if (!pid) f.cpCards.forEach(function (id) { (cardsById[id].tags || []).forEach(function (t) { tags[t] = true; }); });
       /* папка ретуши: запись «скачано» из отбора; буква в имени папки — забрали руками на Диске */
       f.cpKey = k.key;
       f.cpTook = null;
@@ -1324,22 +1331,18 @@ function cpStageTagIndex(sel) {
         if (rec && rec.rid && rid && rec.rid !== rid) rec = null;   /* на этом месте лежит уже другая копия */
         f.cpTook = rec || (k.letter ? { l: k.letter, folder: true } : null);
         if (rec && rec.l) tags[rec.l] = true;
-        f.cpDone = isDone(k, pid ? cardOf[pid] || [] : []);
+        f.cpDone = isDone(k, f.cpCards);
         if (f.cpDone && !f.cpTook) f.cpTook = { l: '', done: true };
       }
       if (letters.length && !Object.keys(tags).some(function (t) { return letters.indexOf(t) !== -1; })) tags[CP_NO_RT] = true;
       f.cpTags = Object.keys(tags);
       f.cpPid = pid || '';
-      f.cpCards = pid ? cardOf[pid] || [] : [];
-      var code = '';
-      for (var i = k.segs.length - 1; i >= 0 && !code; i--) code = cpArtCode(stype, k.segs[i]);
-      if (!code) code = cpArtCode(stype, name);
       f.cpStageStatus = '';
       if (sel.stage !== 'site' && (hasStageCode('site', code) || f.cpCards.some(function (id) { return delivered[id]; }))) f.cpStageStatus = 'На сайте';
       else if (sel.stage === 'retouch' && f.cpDone) f.cpStageStatus = 'Отретушировано';
       else if (sel.stage === 'approval' && (hasStageCode('review', code) || cpStageHasRv(sel, f.cpCards))) f.cpStageStatus = 'Отретушировано';
       else if (sel.stage === 'approval' && (hasStageCode('retouch', code) || f.cpCards.some(function (id) { return cst[id] && cst[id].s === 'retouch'; }))) f.cpStageStatus = 'На ретуши';
-      f.cpBrak = !!(pid && ((status[pid] && status[pid].s === 'reshoot') || f.cpCards.some(function (c) { return cst[c] && cst[c].s === 'reshoot'; })));
+      f.cpBrak = !!((pid && status[pid] && status[pid].s === 'reshoot') || f.cpCards.some(function (c) { return cst[c] && cst[c].s === 'reshoot'; }));
       if (f.cpBrak) {
         f.cpStageStatus = 'В браке';
         if (rtdl) {
@@ -1652,6 +1655,18 @@ cpRenderPanel = (function (orig) {
   };
 })(cpRenderPanel);
 
+/* В архиве папка артикула подписана той же буквой, что и копия в 03. */
+function cpStageZipName(groups, entry, who, letters, type) {
+  if (!who) return entry.name;
+  var group = groups.filter(function (x) { return entry.f.path.indexOf(x.root + '/') === 0; })[0];
+  var article = group && cpRtArtDir(group.root, entry.f.path, letters, type);
+  if (!article) return entry.name;
+  var tail = cpFolderBase(article.path) + entry.f.path.slice(article.path.length);
+  return entry.name.slice(-tail.length) === tail
+    ? entry.name.slice(0, -tail.length) + who + '_' + article.bare + entry.f.path.slice(article.path.length)
+    : entry.name;
+}
+
 /* «Скачать отсюда»: что выбрано в панели этапа, одним архивом со структурой */
 document.getElementById('cpPanel').addEventListener('click', function (e) {
   if (!e.target.closest('[data-cp-stdl]') || !CP.sel || !CP.sel.stage || !CP.sel.stageFiles) return;
@@ -1659,7 +1674,18 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
   var sel = CP.sel, entries = [], got = [];
   var rt = sel.stage === 'retouch', who = rt ? (sel.who || '') : '';
   if (rt && !who && typeof cpRetoucherTags === 'function' && cpRetoucherTags().length) { cbToast('Отметьте вверху свою букву — без неё из папки ретуши не скачать'); return; }
-  cpStagePool(sel).forEach(function (x) { if (cpStageOk(sel, x.f)) { entries.push({ from: x.f.path, size: x.f.size, name: x.name }); got.push(x.f); } });
+  var selected = cpStagePool(sel).filter(function (x) { return cpStageOk(sel, x.f); });
+  var names = Object.create(null), letters = who ? cpRetoucherTags() : [], type = who ? cpShootType(sel.name) : null;
+  var archiveNames = selected.map(function (x) {
+    var name = cpStageZipName(sel.stageFiles, x, who, letters, type);
+    names[name] = (names[name] || 0) + 1;
+    return name;
+  });
+  selected.forEach(function (x, i) {
+    var name = archiveNames[i];
+    entries.push({ from: x.f.path, size: x.f.size, name: names[name] === 1 ? name : x.name });
+    got.push(x.f);
+  });
   if (!entries.length) { cbToast('Нечего скачивать'); return; }
   var on = Object.keys(sel.stageTags || {}).filter(function (k) { return sel.stageTags[k] && k !== who; }).map(function (t) { return t === CP_NO_RT ? 'без ретушёра' : t; });
   if (who) on.unshift(who);
@@ -1714,6 +1740,19 @@ function cpStageMarkTaken(sel, files, who, name, r) {
   }).then(function () {
     /* буква ретушёра — и в имени папки артикула в 03 (K_23466…), чтобы на Диске было видно, кто забрал */
     return (who ? cpRtRenameTaken(sel, files, who) : Promise.resolve(null)).then(function (rn) {
+      if (!rn || !rn.ok.length) return rn;
+      var confirmed = rn.ok.filter(function (x) { return !rn.bad.some(function (b) { return b.x.code === x.code; }); });
+      if (!confirmed.length) return rn;
+      return cpMutateState(sel, function (d) {
+        var base = d.meta.cp.rtLetter = d.meta.cp.rtLetter || {};
+        confirmed.forEach(function (x) {
+          if (!base[x.code] || (base[x.code].ts || '') <= now) base[x.code] = { l: x.letter, ts: now };
+        });
+      }).then(function () { return rn; }, function (e) {
+        if (window.console) console.warn('[CP] отметка о букве папки не записалась', e);
+        return rn;
+      });
+    }).then(function (rn) {
       if (CP.sel !== sel) return;
       sel.againTaken = false;
       /* пути в 03 поменялись — поправить их в панели на месте (выбранная буква и галки остаются) */
@@ -1741,16 +1780,18 @@ function cpStageMarkTaken(sel, files, who, name, r) {
 function cpRtRenameTaken(sel, files, who) {
   var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
   if (!who || letters.indexOf(who) === -1 || typeof cpRtArtDir !== 'function') return Promise.resolve(null);
-  var stype = typeof cpShootType === 'function' ? cpShootType(sel.name) : null, seen = {}, list = [];
+  var stype = typeof cpShootType === 'function' ? cpShootType(sel.name) : null, seen = {}, list = [], aligned = [];
   files.forEach(function (f) {
     var x = (sel.stageFiles || []).filter(function (g) { return f.path.indexOf(g.root + '/') === 0; })[0];
     var d = x ? cpRtArtDir(x.root, f.path, letters, stype) : null;
-    if (!d || d.letter === who || seen[d.path]) return;
+    if (!d || seen[d.path]) return;
     seen[d.path] = true;
-    list.push({ code: d.code, from: d.path, to: cpRtDirTarget(d, who), letter: who });
+    var change = { code: d.code, from: d.path, to: d.letter === who ? d.path : cpRtDirTarget(d, who), letter: who };
+    (d.letter === who ? aligned : list).push(change);
   });
-  if (!list.length) return Promise.resolve(null);
+  if (!list.length && !aligned.length) return Promise.resolve(null);
   return cpRtMove(list).then(function (r) {
+    r.ok = r.ok.concat(aligned);
     if (r.bad.length && window.console) console.warn('[CP] буква ретушёра: папки в 03 не переименованы', r.bad);
     return r;
   }, function (e) { if (window.console) console.warn('[CP] буква ретушёра', e); return null; });
@@ -1760,10 +1801,12 @@ function cpRtRenameTaken(sel, files, who) {
 
 /** Съёмка по имени перетащенной папки: «<съёмка>», «<съёмка>_Y_1», «<съёмка>_отбор_2». */
 function cpShootByFolder(top) {
-  var t = String(top || '').toLowerCase(), best = null;
+  var norm = function (s) { return String(s || '').normalize('NFC').trim().toLowerCase(); };
+  var full = norm(top), bare = full.replace(/^(?:!|\d{1,2})_/, '').replace(/\s*\+\s*$/, '');
+  var best = null;
   (CP.shoots || []).forEach(function (d) {
-    var n = d.name.toLowerCase();
-    if ((t === n || t.indexOf(n + '_') === 0) && (!best || n.length > best.name.length)) best = d;
+    var n = norm(d.name);
+    if ((full === n || full.indexOf(n + '_') === 0 || bare === n || bare.indexOf(n + '_') === 0) && (!best || n.length > norm(best.name).length)) best = d;
   });
   return best;
 }

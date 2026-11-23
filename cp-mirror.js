@@ -385,7 +385,7 @@ function cpMirrorDataApply(data, d, ph, letters) {
   Object.keys(ph.retouch || {}).forEach(function (code) {
     var dl = ph.retouch[code];
     if (!dl || letters.indexOf(dl) === -1) return;
-    var cs = cards.filter(function (c) { return c.cpArticle === code; });
+    var cs = cards.filter(function (c) { return cpRtCardCode(c) === code; });
     if (!cs.length || (base[code] && base[code].l === dl)) return;
     cs.forEach(function (c) {
       if (letterOf(c) === dl && (c.tags || []).filter(function (t) { return letters.indexOf(t) !== -1; }).length === 1) return;
@@ -868,7 +868,8 @@ function cpRtArtDir(root, filePath, letters, stype) {
 function cpRtDirTarget(d, letter) { return d.parent + '/' + (letter ? letter + '_' : '') + d.bare; }
 
 /** Карточки артикула открытой съёмки. */
-function cpRtCards(code) { return App.cards.filter(function (c) { return c.cpArticle === code; }); }
+function cpRtCardCode(card) { return card.cpArticle || cpArtCode(null, card.title); }
+function cpRtCards(code) { return App.cards.filter(function (c) { return cpRtCardCode(c) === code; }); }
 
 /** Путь в 03 с учётом буквы: папка артикула уже переименована (Y_74595_модель) — путь ведёт в неё, а не рядом. */
 function cpRtLetteredPath(target, shootPath) { return cpRtCopyPath(target, shootPath, true); }
@@ -974,7 +975,7 @@ function cpRtDecide(dirs, recs, letters, skip) {
     var diskL = (list.filter(function (d) { return d.letter; })[0] || {}).letter || '';
     var b = base[code], bl = b ? b.l : undefined, rec = recs && recs[code];
     var progL = cpRtProgLetter(cards, bl);
-    var fromRec = !!rec && (!b || (rec.ts || '') >= (b.ts || ''));
+    var fromRec = !!rec && (!b || (rec.ts || '') > (b.ts || ''));
     if (fromRec) { progL = rec.l; out.nCards += cpRtSetCards(cards, progL, letters); }
     var mixed = list.some(function (d) { return d.letter !== diskL; });
     /* с Диска буква только приходит (появилась или стала другой); пропавшую из имени папки букву не снимаем
@@ -1093,7 +1094,7 @@ function cpRtRefresh() {
         for (var i = segs.length - 1; i >= 0; i--) {
           var sp = cpLetterSplit(segs[i], letters), code = cpArtCode(stype, sp ? sp.rest : segs[i]);
           if (!code) continue;
-          if (!base[code] || (rec.ts || '') >= (base[code].ts || '')) skip[code] = true;
+          if (!base[code] || (rec.ts || '') > (base[code].ts || '')) skip[code] = true;
           break;
         }
       });
@@ -1179,7 +1180,8 @@ function cpRtLetterPush() {
      читали или артикул отправили только что) — быстрая сверка: она прочитает папки и переименует */
   var cst = m.cardStatus || {};
   var blind = App.cards.some(function (c) {
-    return c.cpArticle && cst[c.id] && cst[c.id].s === 'retouch' && cpCardLetter(c) && !(known && known[c.cpArticle]);
+    var code = cpRtCardCode(c);
+    return code && cst[c.id] && cst[c.id].s === 'retouch' && cpCardLetter(c) && !(known && known[code]);
   });
   if (blind && Date.now() - (CP.rtTriedAt || 0) > (CP.rtRetryMs || 20000)) {
     CP.rtTriedAt = Date.now();
