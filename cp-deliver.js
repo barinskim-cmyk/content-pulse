@@ -314,12 +314,9 @@ function cpDownloadChecked() {
   var stype = typeof cpShootType === 'function' ? cpShootType(shoot.name) : null;
   var entries = cpSelectionEntries(jobs, stype && stype.exportMode === 'folders');
   var name = CPDisk.safeName(shoot.name);
-  var pids = jobs.map(function (j) {
-    var p = App.photos.filter(function (x) { return x.disk === j.disk; })[0];
-    return p && p.id;
-  }).filter(Boolean);
   cpExportBundle(name, entries, 'Карточек: ' + cards.length + ', кадров: ' + entries.length + '.').then(function (r) {
     if (!CP.shoot || CP.shoot.path !== shoot.path) return;
+    var pids = App.photos.filter(function (p) { return r.included.has(p.disk); }).map(function (p) { return p.id; });
     var m = cpMeta(), now = new Date().toISOString(), who = cpActor();
     pids.forEach(function (pid) {
       var cur = m.downloads[pid];

@@ -300,7 +300,10 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
   var title = sel.date ? sel.date : sel.name;
   var name = CPDisk.safeName(cpStageLabel('site')) + '_' + CPDisk.safeName(title) + (sel.skipDl ? '_нескачанное' : '');
   cpExportBundle(name, entries, cpStageLabel('site') + ' за ' + (sel.date ? cpSiteFmt(sel.date) : sel.name) + ': артикулов ' + units.length + ', файлов ' + entries.length + '.')
-    .then(function () { return cpSiteMarkDownloaded(root, units.map(function (u) { return u.path; })); })
+    .then(function (r) {
+      var ready = units.filter(function (u) { return u.files.every(function (f) { return r.included.has(f.path); }); });
+      return cpSiteMarkDownloaded(root, ready.map(function (u) { return u.path; }));
+    })
     .catch(function (err) { cpHandleError(err, 'Скачивание'); });
 });
 
@@ -308,18 +311,17 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
 function cpSiteMarkDownloaded(datePath, dirs) {
   if (!dirs.length) return Promise.resolve();
   var now = new Date().toISOString(), who = cpActor();
-  var sc = CP.siteScan[datePath];
-  dirs.forEach(function (d) {
-    if (!sc) return;
-    if (d === datePath) sc.rootProps = Object.assign({}, sc.rootProps || {}, { cp_dl: now, cp_dl_by: who });
-    else sc.props[d] = Object.assign({}, sc.props[d] || {}, { cp_dl: now, cp_dl_by: who });
-  });
-  cpSiteRerender();
+  var mark = { cp_dl: now, cp_dl_by: who };
   return cpPool(dirs, 3, function (p) {
-    return CPDisk.proxyProps(p, { cp_dl: now, cp_dl_by: who }).catch(function (e) {
+    return CPDisk.proxyProps(p, mark, 15000).then(function () {
+      var sc = CP.siteScan[datePath];
+      if (!sc) return;
+      if (p === datePath) sc.rootProps = Object.assign({}, sc.rootProps || {}, mark);
+      else sc.props[p] = Object.assign({}, sc.props[p] || {}, mark);
+    }, function (e) {
       if (window.console) console.warn('[CP] метка «скачано» не записалась', p, e && (e.body || e.message || e));
     });
-  });
+  }).then(cpSiteRerender);
 }
 
 /** В «Сайт» приехало новое («На сайт»): старая метка у папки съёмки (2.0.72) снимается, дата перечитывается. */

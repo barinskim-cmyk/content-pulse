@@ -915,6 +915,7 @@ function cpShelfDownload() {
       var pidByDisk = {};
       (d.photos || []).forEach(function (p) { if (p.disk) pidByDisk[p.disk] = p.id; });
       items.forEach(function (x) {
+        if (!r.included.has(x.file.path)) return;
         var pid = pidByDisk[x.file.path];
         if (!pid) {   /* кадр ещё не в отборе — заводим запись, чтобы помнить скачивание */
           pid = 'p' + (d.nextId = (d.nextId || 1) + 1) + 'x' + (CP.idTag || '');   /* метка вкладки: у двух людей номера не совпадут */
@@ -926,7 +927,7 @@ function cpShelfDownload() {
         d.meta.cp.downloads[pid] = { n: (cur ? cur.n : 0) + 1, first: cur ? cur.first : stamp, last: stamp };
       });
       cpShelfEvent(d, 'download', { export: name, count: r.files, parts: r.parts.length, filters: filters,
-        again: items.filter(function (x) { return x.dl; }).length || undefined });
+        again: items.filter(function (x) { return x.dl && r.included.has(x.file.path); }).length || undefined });
     }).then(function () {
       cpRenderPanel();
     });

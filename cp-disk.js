@@ -101,7 +101,9 @@ var CPDisk = (function () {
     var controller = new AbortController(), timer;
     var timeout = new Promise(function (_, reject) {
       timer = setTimeout(function () {
-        reject(new DiskError(0, 'нет ответа за ' + Math.round(ms / 1000) + ' с', url));
+        var error = new DiskError(0, 'нет ответа за ' + Math.round(ms / 1000) + ' с', url);
+        error.timeout = true;
+        reject(error);
         controller.abort();
       }, ms);
     });
@@ -309,8 +311,8 @@ var CPDisk = (function () {
   /* сеть/CORS не повторяем долго: при отказе есть запасной путь через скачивание */
   function previewBlob(previewUrl) { return req(previewUrl, { as: 'blob', retries: 1 }); }
 
-  function downloadHref(path) {
-    return api(ep(path, '/download'), { path: path }).then(function (d) { return d.href; });
+  function downloadHref(path, timeout) {
+    return api(ep(path, '/download'), { path: path }, 'GET', timeout).then(function (d) { return d.href; });
   }
 
   /** Скачать файл целиком. Ссылку берём свежую перед каждым файлом. */
@@ -459,13 +461,14 @@ var CPDisk = (function () {
   }
 
   /** CRC куска файла Диска (для больших файлов в архиве). */
-  function proxyCrc(body) {
-    return proxyReq({ a: 'crc' }, { method: 'POST', body: body, as: 'json' });
+  function proxyCrc(body, timeout) {
+    return proxyReq({ a: 'crc' }, { method: 'POST', body: body, as: 'json', timeout: timeout });
   }
 
   /** Кусок одного архива (см. proxy/index.js doZipPart). */
-  function proxyZipPart(body) {
-    return proxyReq({ a: 'zippart' }, { method: 'POST', body: body, as: 'json' });
+  function proxyZipPart(body, timeout) {
+    /* Повтором той же части и сообщением о нём управляет сборка ZIP. */
+    return proxyReq({ a: 'zippart' }, { method: 'POST', body: body, as: 'json', timeout: timeout, retries: 0 });
   }
 
   /** Свойства для проверки содержимого, идентичности и меток операций. */
@@ -495,6 +498,8 @@ var CPDisk = (function () {
   function proxyReq(params, opts) {
     opts = opts || {};
     var attempt = 0;
+    var httpRetries = opts.retries === undefined ? 3 : opts.retries;
+    var netRetries = opts.retries === undefined ? 2 : opts.retries;
     var url = proxy + qs(params);
     function run(signal) {
       if (signal && signal.aborted) return Promise.reject(new DiskError(0, 'время ожидания истекло', url));
@@ -509,11 +514,11 @@ var CPDisk = (function () {
         return resp.text().then(function (body) {
           /* ответ прослойки виден в консоли целиком — по нему и разбираемся */
           if (window.console) console.warn('[CP] прослойка ' + (params.a || '') + ' ' + (params.path || '') + ' -> HTTP ' + resp.status + ': ' + String(body).slice(0, 500));
-          if (RETRY[resp.status] && attempt < 3) return sleep(backoff(attempt++)).then(function () { return run(signal); });
+          if (RETRY[resp.status] && attempt < httpRetries) return sleep(backoff(attempt++)).then(function () { return run(signal); });
           throw new DiskError(resp.status, body, url);
         });
       }, function (netErr) {
-        if ((!signal || !signal.aborted) && attempt < 2) return sleep(backoff(attempt++)).then(function () { return run(signal); });
+        if ((!signal || !signal.aborted) && attempt < netRetries) return sleep(backoff(attempt++)).then(function () { return run(signal); });
         throw new DiskError(0, String(netErr && netErr.message || netErr), url);
       });
     }
@@ -523,12 +528,12 @@ var CPDisk = (function () {
   function proxyPreview(path, size) { return proxyReq({ a: 'preview', path: path, size: size || 'XL' }); }
   function proxyFile(path) { return proxyReq({ a: 'file', path: path }); }
   /** Собрать ZIP из файлов Диска и положить на Диск: entries [{from, name, size}] -> {path, bytes, files, ms} */
-  function proxyZip(target, entries) {
-    return proxyReq({ a: 'zip' }, { method: 'POST', body: { target: target, entries: entries }, as: 'json' });
+  function proxyZip(target, entries, timeout) {
+    return proxyReq({ a: 'zip' }, { method: 'POST', body: { target: target, entries: entries }, as: 'json', timeout: timeout });
   }
   /** Крупный файл в облако частями: body {op: start|part|done|abort, ...} */
-  function proxyMpu(body) {
-    return proxyReq({ a: 'mpu' }, { method: 'POST', body: body, as: 'json' });
+  function proxyMpu(body, timeout) {
+    return proxyReq({ a: 'mpu' }, { method: 'POST', body: body, as: 'json', timeout: timeout });
   }
   /** Замер скорости чтения кадров и загрузки на Диск: paths -> отчёт */
   function proxyBench(paths, dir) {

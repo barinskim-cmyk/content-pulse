@@ -70,6 +70,7 @@ const md5 = (b) => require('crypto').createHash('md5').update(b).digest('hex');
 const TRASHED = [], MOVED = [], ZIPPART_CALLS = [];
 const CRC_CALLS = [], ZIP_SLICES = [];
 let ZIPPART_FAIL_ONCE = null, ZIPPART_BAD = null;   /* ZIPPART_BAD — файл, который Яндекс не отдаёт (HTTP 500) */   /* оборвать один кусок архива — страница должна повторить */   /* что ушло в Корзину Диска / перенесено между этапами */
+let ZIP_RESPONSE_HOLD = null;
 const PROPS = new Map();   /* custom_properties папок (сводка съёмки) */
 let LIST_FAIL = null;   /* список этих папок Диск «не отдаёт» (403) — проверка сверки витрины */
 let LIST_SLOW = null;   /* {re, ms}: списки этих папок Диск отдаёт с задержкой — «Сайт» большой и читается долго */
@@ -99,6 +100,10 @@ async function route(r) {
   const pauseTransfer = async (paths) => {
     const hold = TRANSFER_HOLD[q.a];
     if (hold && paths.some(p => hold.re.test(p))) { hold.hit = true; await hold.resume; }
+  };
+  const pauseZip = async (op, target) => {
+    const hold = ZIP_RESPONSE_HOLD;
+    if (hold && hold.op === op && !hold.hit && target.endsWith(hold.name + '.zip')) { hold.hit = true; await hold.wait; }
   };
   log.push(m + ' ' + u.pathname + ' ' + (q.path || q.p || ''));
   if (u.host === 'cloud-api.yandex.net') {
@@ -240,7 +245,8 @@ async function route(r) {
           /* один архив из кусков: в бакете — один файл */
           if (!/\.zip$/.test(b.filename || '') || (b.parts || []).length !== u.calls) return json(502, { error: 'куски архива не сошлись' });
           ZIPS.set(u.target, u.names); CLOUD.set(b.key, u.target);
-          return json(200, { url: 'https://storage.yandexcloud.net/content-pulse-exports-test/' + b.key + '?X-Amz-Signature=x&name=' + encodeURIComponent(b.filename), store: 'cloud' });
+          await pauseZip('done', u.target);
+          return json(200, { url: 'https://storage.yandexcloud.net/content-pulse-exports-test/' + b.key + '?X-Amz-Signature=x&name=' + encodeURIComponent(b.filename), store: 'cloud' }).catch(() => {});
         }
         const whole = Buffer.concat(Object.keys(u.parts).sort((a, c) => a - c).map(k => u.parts[k]));
         if (!whole.equals(FILES.get(u.from))) return json(502, { error: 'собрано неверно' });
@@ -299,6 +305,8 @@ async function route(r) {
       const b = JSON.parse(req.postData() || '{}');
       const u = MPU.get(b.key);
       if (!u) return json(404, { error: 'нет загрузки' });
+      const previous = (u.zipParts || {})[b.n];
+      if (previous && previous.body === req.postData()) return json(200, previous.result);
       for (const e of b.entries) {
         if (!FILES.has(e.from)) return json(422, { error: 'нет файла ' + e.from });
         if (FILES.get(e.from).length !== e.size) return json(422, { error: 'размер изменился ' + e.from });
@@ -320,7 +328,10 @@ async function route(r) {
       });
       u.next = off;
       if (b.final && (b.done || []).length + done.length !== u.names.length) return json(400, { error: 'оглавление неполное' });
-      return json(200, { n: b.n, etag: '"z' + b.n + '"', next: off, bytes: off - b.offset, done });
+      const result = { n: b.n, etag: '"z' + b.n + '"', next: off, bytes: off - b.offset, done };
+      (u.zipParts ||= {})[b.n] = { body: req.postData(), result };
+      await pauseZip('part', b.target);
+      return json(200, result).catch(() => {});
     }
     if (q.a === 'zip' && m === 'POST') {
       const b = JSON.parse(req.postData() || '{}');
@@ -454,6 +465,71 @@ async function retouchTransferChecks(ctx, base) {
   await send();
   await finish();
   check('повторная отправка уже проверенного комплекта обходится без повторного переноса папки', MOVED.length === before);
+  await page.close();
+}
+
+async function downloadReliabilityChecks(ctx, base) {
+  const page = await ctx.newPage(), errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  const site = 'disk:/Проверка выгрузки/05_САЙТ', day = site + '/2026-11-12';
+  const a = day + '/2026-11-12_СК_ТЕСТ/988001', b = day + '/2026-11-12_СК_ТЕСТ/988002';
+  const name = '05_САЙТ_2026-11-12', chunkBytes = Buffer.alloc(950000, 65);
+  for (const dir of [a, b]) {
+    const parts = dir.split('/');
+    for (let i = 2; i <= parts.length; i++) DIRS.add(parts.slice(0, i).join('/'));
+    for (let i = 1; i <= 49; i++) FILES.set(dir + '/' + i + '.jpg', chunkBytes);
+  }
+  function hold(op, name) {
+    let release;
+    const wait = new Promise(resolve => { release = resolve; });
+    return ZIP_RESPONSE_HOLD = { op, name, wait, hit: false, release() { ZIP_RESPONSE_HOLD = null; release(); } };
+  }
+  await page.goto(base + '#access_token=TESTTOKEN&token_type=bearer');
+  await page.waitForFunction(() => window.CP && CP.booted);
+  await page.evaluate(async ({ day, site }) => {
+    await cpEnsureSettings();
+    CP.settings.site = site;
+    CP_ZIP_WAIT_PART_MS = 250;
+    cpSiteSelectDate(day);
+  }, { day, site });
+  await page.waitForFunction(() => /98 файл/.test(document.querySelector('[data-cp-site-dl]')?.textContent || ''));
+  const firstReply = hold('part', name);
+  try {
+    await page.click('[data-cp-site-dl]');
+    await page.waitForFunction(() => /готово 0 из 98 файлов/.test(document.getElementById('cbBusyText').textContent));
+    check('Сайт: прогресс показывает подтверждённые файлы, пока первая часть ждёт ответа',
+      await page.evaluate(() => cpBusyNow()) && !PROPS.get(a)?.cp_dl && !PROPS.get(b)?.cp_dl);
+    await page.waitForFunction(() => /Повторяю часть 1/.test(document.getElementById('cbBusyText').textContent));
+    await page.waitForFunction(day => cpSiteSummary(day)?.nNew === 0 && !cpBusyNow(), day);
+    const parts = [...MPU.values()].find(u => u.target?.endsWith('/' + name + '.zip')).zipParts;
+    const sizes = Object.values(parts).map(p => JSON.parse(p.body).entries.length);
+    check('Сайт: 98 файлов скачиваются одним ZIP после потери ответа, части ограничены количеством файлов',
+      firstReply.hit && zipVersions(name).length === 1 && latestZip(name).length === 98 && sizes.length > 1 && Math.max(...sizes) <= 16,
+      JSON.stringify(sizes));
+  } finally { firstReply.release(); }
+  PROPS.delete(a); PROPS.delete(b);
+  await page.evaluate(day => cpSiteSelectDate(day), day);
+  await page.waitForFunction(day => cpSiteSummary(day)?.nNew === 2, day);
+  ZIPPART_BAD = b + '/1.jpg';
+  try {
+    await page.click('[data-cp-site-dl]');
+    await page.waitForFunction(day => cpSiteSummary(day)?.nNew === 1 && !cpBusyNow(), day);
+    check('Сайт: артикул с пропущенным кадром остаётся нескачанным, полный отмечается',
+      latestZip(name).length === 97 && !!PROPS.get(a)?.cp_dl && !PROPS.get(b)?.cp_dl && /Не попали/.test(await page.textContent('#cpDlCard')));
+  } finally { ZIPPART_BAD = null; }
+  const delayedLink = hold('done', 'Не пришла ссылка');
+  try {
+    await page.evaluate(file => {
+      CP_ZIP_WAIT_LINK_MS = 700;
+      window.linkFailed = false;
+      cpExportBundle('Не пришла ссылка', [{ from: file, name: '1.jpg', size: 950000 }], '').catch(() => { window.linkFailed = true; });
+    }, a + '/1.jpg');
+    await page.waitForFunction(() => /Получаю ссылку на архив/.test(document.getElementById('cbBusyText').textContent));
+    await page.waitForFunction(() => window.linkFailed && !cpBusyNow());
+    check('зависший ответ со ссылкой освобождает окно, показывает ошибку и не запускает пустое скачивание',
+      delayedLink.hit && !await page.locator('#cpDlCard .cp-dlcard-btn').count() && /Не удалось собрать архив/.test(await page.textContent('#cpDlCard')));
+  } finally { delayedLink.release(); }
+  check('скачивание не вызывает ошибок браузера', !errors.length, errors.join(' | '));
   await page.close();
 }
 
@@ -946,6 +1022,7 @@ async function articleFolderChecks(ctx, base) {
   /* фоновое зеркало всех съёмок (2.0.119) пишет в отборы и выработку само — в тестах включаем только там, где проверяем его */
   await ctx.addInitScript(() => { window.cpNoMirrorAll = true; });
   if (process.env.CP_ARTICLE_ONLY) {
+    await downloadReliabilityChecks(ctx, base);
     await retouchTransferChecks(ctx, base);
     await stageWorkflowChecks(ctx, base);
     await articleFolderChecks(ctx, base);
@@ -4237,6 +4314,7 @@ async function articleFolderChecks(ctx, base) {
     await old.close();
   }
 
+  await downloadReliabilityChecks(ctx, base);
   await retouchTransferChecks(ctx, base);
   await stageWorkflowChecks(ctx, base);
   await articleFolderChecks(ctx, base);

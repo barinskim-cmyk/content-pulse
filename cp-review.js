@@ -1790,12 +1790,15 @@ function cpDownloadStageFiles(sel, selected) {
   if (!entries.length) { cbToast('Нечего скачивать'); return; }
   var name = CPDisk.safeName(sel.name);
   return cpExportBundle(name, entries, cpStageLabel(sel.stage) + ': файлов ' + entries.length + '.' + (rt ? ' После скачивания файлы отмечаются как скачанные' + (who ? ' (' + who + ')' : '') + '.' : ''))
-    .then(function (r) { return rt ? cpStageMarkTaken(sel, got, who, name, r) : null; })
+    .then(function (r) {
+      if (rt) return cpStageMarkTaken(sel, got.filter(function (f) { return r.included.has(f.path); }), who, name, r);
+    })
     .catch(function (err) { cpHandleError(err, 'Скачивание'); });
 }
 
 /** Скачали из папки ретуши: запись у каждого файла, буква — карточкам, событие в журнал. */
 function cpStageMarkTaken(sel, files, who, name, r) {
+  if (!files.length) return Promise.resolve();
   var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
   var actor = cpActor(), now = new Date().toISOString();
   var again = files.filter(function (f) { return cpStageTook(sel, f); }).length;
