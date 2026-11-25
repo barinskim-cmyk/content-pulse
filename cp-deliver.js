@@ -238,10 +238,11 @@ function cpBatchStatus(status) {
   }
   /* Ретушь (Маша, 10.11.2026): сначала копии в папку ретуши, статус — кадрам и карточкам, чьи
      файлы на месте. Карточку артикула отправляем целиком, включая повторную отправку. */
-  var plan = [], same = [], names = [], going = cpGoingFrom('retouch'), all = [], cardOf = {};
+  var plan = [], same = [], names = [];
   cards.forEach(function (c) {
     var pids = pidsOf(c), cst = m.cardStatus[c.id];
     var notYet = c.cpArticleDir ? pids : pids.filter(function (pid) { return !(m.status[pid] && m.status[pid].s === 'retouch'); });
+    var going = cpGoingFrom('retouch', c.id);
     var fresh = notYet.filter(function (pid) { var p = cbPhotoById(pid); return !(p && p.disk && going[p.disk]); });
     if (!notYet.length) {
       if (cst && cst.s === 'retouch') { same.push(c.title || 'карточка'); return; }
@@ -251,23 +252,21 @@ function cpBatchStatus(status) {
     }
     if (!fresh.length) return;   /* уже едут в очереди */
     plan.push({ card: c, pids: fresh });
-    fresh.forEach(function (pid) { if (all.indexOf(pid) === -1) { all.push(pid); cardOf[pid] = c.id; } });
   });
   var extra = {};
   if (same.length) extra.note = 'уже были на ретуши в этом составе, не отправлялись: ' + same.join(', ');
-  if (!all.length) {
+  if (!plan.length) {
     if (names.length) { extra.card = names.join(', '); cpEvent('to_retouch', [], extra); cpAfterStatus(); cbRenderOutline(); cbToast('На ретушь: карточек ' + names.length + ' — кадры уже были в папке ретуши'); return; }
     cbToast(same.length ? 'Уже на ретуши в этом составе — повторно не отправляю: ' + same.join(', ') : 'Уже копируется на ретушь — статус появится, когда файлы будут на месте');
     return;
   }
-  cpRetouchCopy(all, null, 'Копирую на ретушь: карточек ' + plan.length, { s: 'retouch', by: cpActor(), cards: cardOf }).then(function (r) {
-    var okSet = {}, okAll = [];
-    (r.okPids || []).forEach(function (pid) { okSet[pid] = true; });
+  cpRetouchCopy(null, null, 'Копирую на ретушь: карточек ' + plan.length, { s: 'retouch', by: cpActor(), groups: plan }).then(function (r) {
+    var okAll = new Set();
     plan.forEach(function (pl) {
-      var okp = pl.pids.filter(function (pid) { return okSet[pid]; });
-      if (!okp.length) return;
-      cpRetouchMark(okp, pl.card.id);
-      okp.forEach(function (pid) { if (okAll.indexOf(pid) === -1) okAll.push(pid); });
+      var okp = r.okByCard[pl.card.id];
+      if (!okp || !okp.size) return;
+      cpRetouchMark(Array.from(okp), pl.card.id, r.folder);
+      okp.forEach(function (pid) { okAll.add(pid); });
       names.push(pl.card.title || pl.card.category || 'карточка');
     });
     if (names.length) {
@@ -275,7 +274,7 @@ function cpBatchStatus(status) {
       extra.folder = CPDisk.showPath(r.folder);
       extra.copied = r.done;
       if (r.exists) extra.existed = r.exists;
-      cpEvent('to_retouch', cpPhotoNames(okAll), extra);
+      cpEvent('to_retouch', cpPhotoNames(Array.from(okAll)), extra);
     }
     cpAfterStatus();
     cbRenderOutline();

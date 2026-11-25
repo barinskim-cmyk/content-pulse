@@ -137,17 +137,18 @@ function cpArticleUpdateStages(op, shoot, source) {
           paths = roots.map(function (x) { return x.path; });
           return cpRtListDirs(paths, letters, cpShootType(shoot.name));
         }).then(function (byCode) {
-          var parent = op.article.indexOf('/') === -1 ? '' : cpParentDir(op.article);
-          var folders = (byCode[op.code] || []).filter(function (d) {
-            return paths.some(function (path) { return d.parent === path + (parent ? '/' + parent : ''); });
-          });
+          var folders = cpStageArticleDirs(byCode[op.code], paths, op.article);
           return folders.reduce(function (p, folder) {
             return p.then(function () {
               return CPDisk.walkPhotos(folder.path, false, 2, true).then(function (files) {
                 var digest = op.digest, same = files.filter(function (file) { return digest && file.md5 === digest; });
                 var named = same.filter(function (file) { return cpStem(file.name) === cpStem(op.name); });
                 if (op.direction === 'add') {
-                  var added = named.length ? Promise.resolve(named[0].path) : cpArticleMediaOp(source, folder.path + '/' + op.name, op.digest, false);
+                  var articleRoot = op.root + '/' + op.article + '/';
+                  var relative = source.indexOf(articleRoot) === 0 ? source.slice(articleRoot.length) : op.name;
+                  var target = folder.path + '/' + relative;
+                  var have = named.find(function (file) { return cpParentDir(file.path) === cpParentDir(target); });
+                  var added = have ? Promise.resolve(have.path) : cpArticleMediaOp(source, target, op.digest, false);
                   return added.then(function (path) {
                     op.reached = stage.key;
                     if (stage.key === 'approval') op.approvedPath = path;
@@ -457,6 +458,8 @@ function cpPlaceShootStages() {
     + '.cp-stage-view-head,.cp-stage-card small{color:#a3a09a}.cp-stage-view-head{display:flex;gap:8px;align-items:flex-start;margin-bottom:12px}'
     + '.cp-stage-view-head details{flex:1;margin:0}.cp-stage-card .cb-card-head strong{color:#e7c9a8;font-weight:700}'
     + '.cp-stage-workflow .cb-outline-item small{display:block;margin:3px 0 0;color:#a3a09a;white-space:normal}.cp-stage-workflow .cp-obar-l button[aria-pressed=true]{border-color:#C9956B;color:#e7c9a8}'
+    + '.cp-stage-look>h2{max-width:820px;margin:22px auto 10px;font-size:16px}'
+    + '.cp-stage-look-outline{margin:12px 14px 4px;color:#e7c9a8;font-size:11px}.cp-stage-look-total{margin:0 0 12px;color:#a3a09a;font-size:12px}'
     + '.cp-stage-review-actions:not(:empty){display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:10px}.cp-stage-review-actions p{flex-basis:100%;margin:0 0 4px;color:#e7c9a8;overflow-wrap:anywhere}'
     + '.cp-stage-card .cb-slot{border-radius:0;padding:0}.cp-stage-card button.cb-slot:hover,.cp-stage-card button.cb-slot:focus-visible{outline:2px solid #C9956B;outline-offset:-2px}'
     + '.cp-stage-card button.cb-slot:focus-visible img{opacity:.85}.cp-stage-card .cb-slot-tag{pointer-events:none}';
@@ -584,12 +587,16 @@ function cpShowShootStage(key, refresh, opening, quiet) {
     cpStageTagIndex(sel);
     mode.stageFiles = stageFiles;
     var letters = cpRetoucherTags(), type = cpShootType(shoot.name), cards = new Map(), seen = new Set();
+    var model = type && type.roles.some(function (role) { return role === 'лук' || role === 'образ'; });
     function cardFor(article, parent, code) {
-      var keyPath = cpStageKey((parent ? parent + '/' : '') + 'file', letters).segs.map(function (seg) {
+      var dir = article ? cpParentDir('/' + parent).slice(1) : parent;
+      var keyPath = key === 'retouch' ? (article ? (dir ? dir + '/' : '') + article.bare : parent)
+        : cpStageKey((parent ? parent + '/' : '') + 'file', letters).segs.map(function (seg) {
         return seg.replace(/_доработка$/i, '');
       }).join('/');
       var id = keyPath.toLowerCase() + '\n' + code;
-      if (!cards.has(id)) cards.set(id, { id: id, code: code, rel: keyPath, files: [], dirs: new Map(), tags: new Set(), statuses: new Set() });
+      var look = key === 'retouch' && (model || /^\d+$/.test(cpFolderBase(dir))) ? dir : '';
+      if (!cards.has(id)) cards.set(id, { id: id, code: code, rel: keyPath, look: look, files: [], dirs: new Map(), tags: new Set(), statuses: new Set() });
       var card = cards.get(id);
       if (article) {
         card.dirs.set(article.path, article);
@@ -625,8 +632,10 @@ function cpShowShootStage(key, refresh, opening, quiet) {
       });
     });
     mode.cards = Array.from(cards.values()).sort(function (a, b) {
-      return a.code.localeCompare(b.code, 'ru', { numeric: true }) || a.rel.localeCompare(b.rel, 'ru', { numeric: true });
+      return a.look.localeCompare(b.look, 'ru', { numeric: true }) || a.code.localeCompare(b.code, 'ru', { numeric: true })
+        || a.rel.localeCompare(b.rel, 'ru', { numeric: true });
     });
+    mode.hasLooks = key === 'retouch' && (model || mode.cards.some(function (card) { return !!card.look; }));
     mode.cards.forEach(function (card, i) { card.index = i; });
     if (key === 'review' && !CP.rvv && !CP.readOnly) cpIndexShootStageReview(mode, shoot);
     mode.loading = false;
@@ -669,16 +678,24 @@ function cpRenderShootStage() {
   if (!mode.cards.length) { view.innerHTML = h + '<p>На этом этапе у съёмки пока нет файлов.</p>'; return; }
   if (mode.observer) mode.observer.disconnect();
   var visible = cpShootStageVisible();
-  view.innerHTML = h + visible.map(function (card) {
+  function renderCard(card) {
     var parent = card.rel.split('/').slice(0, -1).join('/');
     return '<article class="cb-card cp-stage-card" data-cp-stage-row="' + card.index + '" data-cp-stage-code="' + cbEsc(card.code) + '"><header class="cb-card-head">'
       + '<b>' + cbEsc(card.code || card.rel || 'Кадры съёмки') + '</b>'
-      + (card.code && parent ? '<small>' + cbEsc(parent) + '</small>' : '')
+      + (card.code && parent && !card.look ? '<small>' + cbEsc(parent) + '</small>' : '')
       + '<span class="cb-spacer"></span>'
       + (card.tags.size ? '<b title="Ретушёры">' + cbEsc(Array.from(card.tags).sort().join(' · ')) + '</b>' : '')
       + '<strong>' + cbEsc(cpShootStageCardStatus(card)) + '</strong></header>'
       + (mode.key === 'review' ? '<div class="cp-stage-review-actions"></div>' : '') + '<div class="cp-stage-card-page"></div></article>';
-  }).join('');
+  }
+  var groups = cpShootStageLooks(visible);
+  view.innerHTML = h + (mode.hasLooks ? '<p class="cp-stage-look-total">Образов ' + groups.filter(function (group) { return group[0]; }).length
+    + ' · карточек ' + visible.filter(function (card) { return card.code; }).length + '</p>' : '')
+    + groups.map(function (group) {
+      var html = group[1].map(renderCard).join('');
+      return mode.hasLooks ? '<section class="cp-stage-look" data-cp-stage-look="' + cbEsc(group[0]) + '"><h2>'
+        + cbEsc(cpShootStageLookLabel(group[0])) + '</h2>' + html + '</section>' : html;
+    }).join('');
   if (mode.key === 'review') cpUpdateShootStageReviewCards();
   function loadCard(page, card) {
     Promise.all(card.files.filter(function (item) { return item.image; }).map(function (item) {
@@ -698,8 +715,8 @@ function cpRenderShootStage() {
       });
     }, { root: document.getElementById('cbWork'), rootMargin: '350px' });
   }
-  pages.forEach(function (page, i) {
-    var card = visible[i];
+  pages.forEach(function (page) {
+    var card = mode.cards[+page.closest('[data-cp-stage-row]').dataset.cpStageRow];
     page.innerHTML = cpShootStageCardPages(card);
     if (mode.observer) { byPage.set(page, card); mode.observer.observe(page); }
     else loadCard(page, card);
@@ -709,6 +726,19 @@ function cpRenderShootStage() {
 function cpShootStageVisible() {
   var mode = CP_SHOOT_VIEW;
   return (mode.cards || []).filter(function (card) { return !mode.filter || card.code === mode.filter; });
+}
+
+function cpShootStageLooks(cards) {
+  var groups = new Map();
+  cards.forEach(function (card) {
+    if (!groups.has(card.look)) groups.set(card.look, []);
+    groups.get(card.look).push(card);
+  });
+  return Array.from(groups);
+}
+
+function cpShootStageLookLabel(path) {
+  return path ? 'Образ ' + path : 'Без образа';
 }
 
 function cpShootStageSources(card, mode) {
@@ -750,7 +780,7 @@ function cpRenderShootStageOutline() {
   var html = '<div class="cb-outline-title">Карточки'
     + (rt && selectable.length && !locked ? ' <a href="#" data-cp-stage-all>' + (all ? 'снять все' : 'отметить все') + '</a>' : '') + '</div>';
   if (!cards.length) html += '<div class="cb-outline-empty">' + (mode.loading ? 'Читаю папки…' : 'Карточек пока нет') + '</div>';
-  html += cards.map(function (card) {
+  function renderCard(card) {
     var name = card.code || card.rel || 'Кадры съёмки';
     var parent = cpParentDir('/' + card.rel).slice(1);
     var label = rt ? (Array.from(card.tags).sort().join(' · ') || 'Без ретушёра') : cpShootStageCardStatus(card);
@@ -759,7 +789,11 @@ function cpRenderShootStageOutline() {
       + (mode.checked.has(card.id) ? ' checked' : '') + (locked || !card.files.length ? ' disabled' : '') + '>' : '')
       + '<button type="button" class="cb-outline-item" data-cp-stage-nav="' + card.index + '" title="' + cbEsc(card.rel || name) + '">'
       + '<span class="cb-outline-num">' + (card.index + 1) + '.</span>' + cbEsc(name) + '<span class="cb-outline-count">' + card.files.length + '</span>'
-      + '<small>' + cbEsc((card.code && parent ? parent + ' · ' : '') + label + (downloaded ? ' · скачано' : '')) + '</small></button></div>';
+      + '<small>' + cbEsc((card.code && parent && !card.look ? parent + ' · ' : '') + label + (downloaded ? ' · скачано' : '')) + '</small></button></div>';
+  }
+  html += cpShootStageLooks(cards).map(function (group) {
+    return (mode.hasLooks ? '<h3 class="cp-stage-look-outline">' + cbEsc(cpShootStageLookLabel(group[0])) + '</h3>' : '')
+      + group[1].map(renderCard).join('');
   }).join('');
   if (rt && marked.length) {
     html += '<div class="cp-obar"><div class="cp-obar-n">Отмечено: ' + marked.length + '</div><div class="cp-obar-l">'

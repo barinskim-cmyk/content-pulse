@@ -885,6 +885,14 @@ function cpRtArtDir(root, filePath, letters, stype) {
 /** Новое имя папки артикула: буква + «_» + имя без буквы; без буквы — просто имя. */
 function cpRtDirTarget(d, letter) { return d.parent + '/' + (letter ? letter + '_' : '') + d.bare; }
 
+/* Артикул в другом образе — соседняя карточка, даже если код совпадает. */
+function cpStageArticleDirs(dirs, roots, relative) {
+  var parent = cpParentDir('/' + relative), leaf = cpFolderBase(relative);
+  return (dirs || []).filter(function (dir) {
+    return dir.bare === leaf && roots.some(function (root) { return dir.parent === root + parent; });
+  });
+}
+
 /** Карточки артикула открытой съёмки. */
 function cpRtCardCode(card) { return card.cpArticle || cpArtCode(null, card.title); }
 function cpRtCards(code) { return App.cards.filter(function (c) { return cpRtCardCode(c) === code; }); }
@@ -914,7 +922,7 @@ function cpRtRootOf(shootPath, plain) {
  * появляется в имени папки»). Список папок съёмки в 03 неизвестен — путь не трогаем: гадать, есть ли там
  * папка, нельзя — получатся две папки одного артикула.
  */
-function cpRtCopyPath(target, shootPath, onlyExisting) {
+function cpRtCopyPath(target, shootPath, onlyExisting, owner) {
   if (!CP.rtDirs || !shootPath || CP.rtDirsFor !== shootPath || !CP.shoot || CP.shoot.path !== shootPath) return target;
   var letters = typeof cpRetoucherTags === 'function' ? cpRetoucherTags() : [];
   var plain, folder;
@@ -926,9 +934,13 @@ function cpRtCopyPath(target, shootPath, onlyExisting) {
   var d = cpRtArtDir(folder, target, letters, typeof cpShootType === 'function' ? cpShootType(CP.shoot.name) : null);
   if (!d) return target;
   var list = CP.rtDirs[d.code] || [];
-  var have = list.filter(function (x) { return x.parent === d.parent && x.bare === d.bare; })[0];
+  var have = list.find(function (x) { return x.parent === d.parent && x.bare === d.bare; });
   if (have) return have.path + target.slice(d.path.length);
-  if (onlyExisting || list.length) return target;
+  if (onlyExisting || (list.length && !owner)) return target;
+  if (owner) {
+    var assigned = cpCardLetter(owner);
+    return assigned ? cpRtDirTarget(d, assigned) + target.slice(d.path.length) : target;
+  }
   var cards = cpRtCards(d.code), letter = cards.length ? cpRtProgLetter(cards, undefined) : '';
   return letter ? cpRtDirTarget(d, letter) + target.slice(d.path.length) : target;
 }

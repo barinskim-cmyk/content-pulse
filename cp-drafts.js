@@ -261,18 +261,17 @@ function cpEnqueueDraftStage(card, status) {
 function cpRunArticleSend(op, shoot) {
   var from = shoot.path.replace(/\/+$/, '') + '/' + op.article;
   var parent = op.article.indexOf('/') === -1 ? '' : cpParentDir(op.article) + '/';
-  var leaf = cpFolderBase(op.article), letters = [], folder = op.destination;
+  var leaf = cpFolderBase(op.article), letters = [], folder = op.destination, roots = [];
   return cpDictReady().then(function () {
     letters = cpRetoucherTags();
     if (!op.root) return [];
     return cpFindShootIn(op.root, shoot.name, 3);
   }).then(function (found) {
     if (found.length) folder = (found.find(function (entry) { return entry.path !== op.destination; }) || found[0]).path;
-    return cpRtListDirs(found.length ? found.map(function (entry) { return entry.path; }) : [folder], letters, cpShootType(shoot.name));
+    roots = found.length ? found.map(function (entry) { return entry.path; }) : [folder];
+    return cpRtListDirs(roots, letters, cpShootType(shoot.name));
   }).then(function (byCode) {
-    var existing = (byCode[op.code] || []).filter(function (entry) {
-      return entry.bare === leaf && (!parent || entry.parent.endsWith('/' + parent.slice(0, -1)));
-    });
+    var existing = cpStageArticleDirs(byCode[op.code], roots, op.article);
     if (existing.length > 1) throw { conflict: true, message: 'У артикула несколько папок на выбранном этапе' };
     var tag = op.stage === 'retouch' && op.letter ? op.letter + '_' : '';
     var to = existing.length ? existing[0].path : folder + '/' + parent + tag + leaf;
@@ -280,7 +279,7 @@ function cpRunArticleSend(op, shoot) {
       if (!files.length) throw { conflict: true, message: 'В артикуле нет кадров для отправки' };
       var items = files.map(function (f) { return { from: f.path, path: to + f.path.slice(from.length), meta: f }; });
       return cpReplaceStageArticle(items, to, false).then(function () {
-        op.sentFolder = folder;
+        op.sentFolder = roots.find(function (root) { return to.indexOf(root + '/') === 0; }) || folder;
         if (op.stage === 'approval') {
           op.approvalFiles = Object.fromEntries(items.map(function (item) { return [item.from, item.path]; }));
         }

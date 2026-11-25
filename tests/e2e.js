@@ -468,6 +468,85 @@ async function retouchTransferChecks(ctx, base) {
   await page.close();
 }
 
+async function retouchLookChecks(ctx, base) {
+  const page = await ctx.newPage();
+  const cat = 'disk:/Проверка структуры образов', name = '2026-11-25_СК_МОДЕЛЬ';
+  const source = cat + '/01_ИСХОДНИКИ/' + name, root = cat + '/03_РЕТУШЬ', destination = root + '/' + name;
+  const looks = Array.from({ length: 16 }, (_, i) => String(i + 1)).concat('40');
+  const articles = looks.flatMap((look, i) => (i < 9 ? [0, 1] : [0]).map(n => ({
+    root: look + '/' + String(760000 + i * 2 + n) + '_модель', file: n === 0 ? 'вариант/кадр.jpg' : 'кадр.jpg'
+  })));
+  function addFile(path) {
+    const parts = path.split('/');
+    for (let i = 2; i < parts.length; i++) DIRS.add(parts.slice(0, i).join('/'));
+    FILES.set(path, Buffer.from(path));
+  }
+  for (const article of articles) addFile(source + '/' + article.root + '/' + article.file);
+  const shared = source + '/1/кадр_лука.jpg';
+  addFile(shared);
+  DIRS.add(root);
+  await page.goto(base + '#access_token=TESTTOKEN&token_type=bearer');
+  await page.waitForFunction(() => window.CP && CP.booted);
+  await page.evaluate(async ({ cat, source, root, name }) => {
+    await cpEnsureSettings();
+    await cpDictReady();
+    CP.dict = cpParseDict('[Ретушёры: один]\nY\nK');
+    CP.archive = cat;
+    cpSet('cp_catalog', cat);
+    CP.catalogList = [root].map(path => ({ path, name: cpFolderBase(path) }));
+    CP.settings.retouch = root;
+    await cpOpenShootNow(source, name);
+  }, { cat, source, root, name });
+  await page.waitForFunction(() => App.cards.length === 26 && App.cards.every(c => c.cpArticleDir && cpCardPids(c).length));
+  await page.evaluate(shared => {
+    const photo = App.photos.find(p => p.disk === shared);
+    for (const card of App.cards.filter(c => c.cpArticleDir.startsWith('1/'))) card.pids.push(photo.id);
+    CP.checked = Object.fromEntries(App.cards.map(card => [card.id, true]));
+    cbRenderOutline();
+  }, shared);
+  await page.click('[data-cp-batch="retouch"]');
+  await page.waitForFunction(() => !cpBusyNow() && !cpqCount() && App.cards.every(c => cpMeta().cardStatus[c.id]?.s === 'retouch'));
+  const direct = [...DIRS].filter(dir => dir.startsWith(destination + '/') && dir.split('/').length === destination.split('/').length + 1);
+  check('Ретушь: 26 карточек сохраняют 17 исходных папок образов, включая образ 40',
+    direct.length === looks.length && looks.every(look => direct.includes(destination + '/' + look))
+    && articles.every(a => FILES.get(destination + '/' + a.root + '/' + a.file)?.equals(FILES.get(source + '/' + a.root + '/' + a.file))));
+  check('Ретушь: общий кадр образа копируется в каждую отмеченную карточку, исходный кадр остаётся в образе',
+    articles.slice(0, 2).every(a => FILES.get(destination + '/' + a.root + '/кадр_лука.jpg')?.equals(FILES.get(shared)))
+    && !FILES.has(destination + '/1/кадр_лука.jpg') && FILES.has(shared));
+
+  await page.evaluate(shared => {
+    const photo = App.photos.find(p => p.disk === shared);
+    for (const card of App.cards.filter(c => c.cpArticleDir.startsWith('1/'))) card.pids = card.pids.filter(pid => pid !== photo.id);
+  }, shared);
+  page.once('dialog', dialog => dialog.accept());
+  await page.click('[data-cp-shoot-stage="retouch"]');
+  await page.waitForFunction(() => CP_SHOOT_VIEW.key === 'retouch' && !CP_SHOOT_VIEW.loading, null, { timeout: 45000 }).catch(async error => {
+    const state = await page.evaluate(() => [CP_SHOOT_VIEW.key, CP_SHOOT_VIEW.loading, CP_SHOOT_VIEW.error, Object.keys(cpDrafts()).length]);
+    throw new Error('Вкладка ретуши: ' + JSON.stringify(state), { cause: error });
+  });
+  const stage = await page.locator('#cpShootStageView').innerText();
+  check('Ретушь: листы и боковая панель сгруппированы по 17 образам, в первом две карточки',
+    stage.includes('Образов 17 · карточек 26') && await page.locator('[data-cp-stage-look]').count() === 17
+    && await page.locator('[data-cp-stage-look="1"] .cp-stage-card').count() === 2
+    && await page.locator('#cbOutline .cp-stage-look-outline').count() === 17, stage.split('\n').slice(0, 5).join(' · '));
+
+  await page.waitForFunction(() => !cpqCount());
+  const article = articles[0], wrong = destination + '/другая_часть/' + article.root + '/чужой.jpg';
+  const old = destination + '/' + article.root + '/старый_кадр.jpg';
+  addFile(wrong);
+  addFile(old);
+  FILES.set(source + '/' + article.root + '/' + article.file, Buffer.from('переснятый кадр'));
+  const sentFolder = await page.evaluate(async ({ root, destination, article }) => {
+    const op = { stage: 'retouch', root, destination, article: article.root, code: '760000' };
+    await cpRunArticleSend(op, CP.shoot);
+    return op.sentFolder;
+  }, { root, destination, article });
+  check('Ретушь: повторная отправка из очереди заменяет комплект в точном образе и сохраняет соседнюю папку',
+    sentFolder === destination && FILES.get(destination + '/' + article.root + '/' + article.file)?.toString() === 'переснятый кадр'
+    && !FILES.has(old) && FILES.get(wrong)?.toString() === wrong);
+  await page.close();
+}
+
 async function downloadReliabilityChecks(ctx, base) {
   const page = await ctx.newPage(), errors = [];
   page.on('pageerror', e => errors.push(e.message));
@@ -1024,6 +1103,7 @@ async function articleFolderChecks(ctx, base) {
   if (process.env.CP_ARTICLE_ONLY) {
     await downloadReliabilityChecks(ctx, base);
     await retouchTransferChecks(ctx, base);
+    await retouchLookChecks(ctx, base);
     await stageWorkflowChecks(ctx, base);
     await articleFolderChecks(ctx, base);
     await browser.close(); srv.close();
@@ -4316,6 +4396,7 @@ async function articleFolderChecks(ctx, base) {
 
   await downloadReliabilityChecks(ctx, base);
   await retouchTransferChecks(ctx, base);
+  await retouchLookChecks(ctx, base);
   await stageWorkflowChecks(ctx, base);
   await articleFolderChecks(ctx, base);
   await browser.close(); srv.close();

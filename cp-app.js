@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.132';
+var CP_VERSION = '2.0.133';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1444,13 +1444,13 @@ function cpDoAction(status, pids, cardId) {
   var m0 = cpMeta();
   var fresh = card && card.cpArticleDir ? pids.slice() : pids.filter(function (pid) { return !(m0.status[pid] && m0.status[pid].s === 'retouch'); });
   if (!fresh.length) { cbToast('Уже на ретуши — повторно не отправляю'); return; }
-  var going = cpGoingFrom('retouch');
+  var going = cpGoingFrom('retouch', cardId);
   fresh = fresh.filter(function (pid) { var p = cbPhotoById(pid); return !(p && p.disk && going[p.disk]); });
   if (!fresh.length) { cbToast('Уже копируется на ретушь — статус появится, когда файлы будут на месте'); return; }
   cpRetouchCopy(fresh, card, 'Копирую на ретушь', { s: 'retouch', card: cardId || null, by: cpActor() }).then(function (r) {
     var ok = r.okPids || [];
     if (ok.length) {
-      cpRetouchMark(ok, cardId);
+      cpRetouchMark(ok, cardId, r.folder);
       extra.folder = CPDisk.showPath(r.folder);
       extra.copied = r.done;
       if (r.exists) extra.existed = r.exists;
@@ -1467,13 +1467,16 @@ function cpDoAction(status, pids, cardId) {
 }
 
 /** Что уже едет в очереди за статусом s: {путь исходника: true}. */
-function cpGoingFrom(s) {
+function cpGoingFrom(s, cardId) {
   if (typeof CPQ === 'undefined') return {};
-  return CPQ.pendingFrom(function (op) { return op.after && op.after.type === 'st' && op.after.s === s; });
+  return CPQ.pendingFrom(function (op) {
+    var a = op.after;
+    return a && a.type === 'st' && a.s === s && (!cardId || !a.card || a.card === cardId);
+  });
 }
 
 /** Статус «на ретуши» кадрам, чьи копии уже в папке ретуши, и их карточке. */
-function cpRetouchMark(pids, cardId) {
+function cpRetouchMark(pids, cardId, folder) {
   var m0 = cpMeta();
   if (cardId && m0.cardStatus[cardId] && m0.cardStatus[cardId].s === 'retouch') {
     cpSetStatus(pids, 'retouch', null);
@@ -1484,7 +1487,7 @@ function cpRetouchMark(pids, cardId) {
     var codes = [];
     var cards = cardId ? [cbCardById(cardId)] : App.cards.filter(function (c) { return pids.some(function (pid) { return cpCardPids(c).indexOf(pid) !== -1; }); });
     cards.forEach(function (c) { if (c && c.cpArticle && c.cpArticle.indexOf(',') === -1 && codes.indexOf(c.cpArticle) === -1) codes.push(c.cpArticle); });
-    cpStageNote('retouch', CP.shoot.name, cpRetouchBase(CP.shoot.path, CP.shoot.name), codes);
+    cpStageNote('retouch', CP.shoot.name, folder || cpRetouchBase(CP.shoot.path, CP.shoot.name), codes);
   }
 }
 
@@ -1498,101 +1501,102 @@ function cpRetouchMark(pids, cardId) {
    Что не скопировалось — копится в CP.retouchMissing, в строке съёмки
    появляется «не скопировано на ретушь: N — докопировать». */
 
-function cpRetouchRel(p, card, shootPath) {
-  var rel = p.disk.indexOf(shootPath + '/') === 0 ? p.disk.slice(shootPath.length + 1) : p.name;
-  var c = card && card.cpArticleDir ? card : App.cards.filter(function (x) {
-    return x.cpArticleDir && cpCardPids(x).indexOf(p.id) !== -1;
-  })[0];
-  if (!c) return rel;
-  var d = c.cpArticleDir;
-  return rel.indexOf(d + '/') === 0 ? rel : d + '/' + p.name;
+function cpRetouchOwner(photo) {
+  var cards = App.cards.filter(function (card) {
+    return card.cpArticleDir && cpCardPids(card).indexOf(photo.id) !== -1;
+  });
+  if (!cards.length) return null;
+  var root = CP.shoot.path.replace(/\/+$/, '') + '/';
+  var own = cards.find(function (card) { return photo.disk.indexOf(root + card.cpArticleDir + '/') === 0; });
+  return own || (cards.every(function (card) { return card.cpArticleDir === cards[0].cpArticleDir; }) ? cards[0] : null);
 }
 
-/* after — {s, by, card | cards: {кадр: карточка}}: статус, который кадры получат, когда копия подтвердится.
-   В ответе okPids — кадры, чья копия уже на месте (скопирована сейчас или была); остальные — в очереди. */
+function cpRetouchRel(p, card, shootPath) {
+  var rel = p.disk.indexOf(shootPath + '/') === 0 ? p.disk.slice(shootPath.length + 1) : p.name;
+  var owner = card || cpRetouchOwner(p);
+  var dir = owner && (owner.cpArticleDir || cpCardArtDirByPhotos(owner));
+  return dir && rel.indexOf(dir + '/') !== 0 ? dir + '/' + p.name : rel;
+}
+
+/* Отправляем в папку каждой выбранной карточки. Один кадр может входить
+   в два артикула одного образа, поэтому результат считаем по месту назначения. */
 function cpRetouchCopy(pids, card, label, after) {
-  var files = pids.map(function (pid) { return cbPhotoById(pid); }).filter(function (p) { return p && p.disk && !p.missing; });
-  var shootPath = CP.shoot.path, shootName = CP.shoot.name;
-  var ready = typeof cpEnsureSettings === 'function' ? cpEnsureSettings() : Promise.resolve();
-  var folder = '', byFrom = {}, items = null;
-  /* что записать в отбор, когда копии из очереди доедут: статус этим кадрам (CPQ.after.st) */
-  var afterFor = function (list) {
-    if (!after) return undefined;
-    var a = { type: 'st', s: after.s, by: after.by || cpActor(), map: {} };
-    if (after.card) a.card = after.card;
-    list.forEach(function (it) {
-      var pid = byFrom[it.from];
-      a.map[it.from] = pid;
-      if (after.cards && after.cards[pid]) (a.cards = a.cards || {})[pid] = after.cards[pid];
+  var shoot = CP.shoot, folder = '', items = null;
+  var groups = (after && after.groups) || [{ card: card, pids: pids || [] }];
+  var plan = groups.map(function (group) {
+    var photos = Array.from(new Set(group.pids)).map(cbPhotoById).filter(function (p) { return p && p.disk && !p.missing; });
+    var owner = group.card;
+    var selected = new Set(photos.map(function (p) { return p.id; }));
+    var full = owner && owner.cpArticleDir && cpCardPids(owner).every(function (pid) { return selected.has(pid); });
+    return { card: owner, photos: photos, full: full };
+  });
+  var count = plan.reduce(function (n, group) { return n + group.photos.length; }, 0);
+  function enqueue(left) {
+    if (!left.length) return 0;
+    var pending = new Map();
+    left.forEach(function (item) {
+      var list = pending.get(item.card) || [];
+      list.push(item);
+      pending.set(item.card, list);
     });
-    return a;
-  };
-  cbBusyShow(label + ': ' + files.length + ' кадр(ов)...', 0.2);
-  return ready.then(function () {
-    folder = cpRetouchBase(shootPath, shootName);
-    /* какие папки артикулов уже лежат в 03 и с какими буквами (несколько запросов, без файлов): копия ляжет
-       в папку с буквой ретушёра, а не рядом с ней */
-    return typeof cpRtRefresh === 'function' ? cpRtRefresh().then(null, function () { return null; }) : null;
+    pending.forEach(function (list, cardId) {
+      CPQ.add(shoot, { kind: 'copy', label: 'На ретушь: ' + list.length + ' кадр(ов)', items: list, dirs: [folder],
+        after: after ? { type: 'st', s: after.s, by: after.by || cpActor(), card: cardId,
+          map: Object.fromEntries(list.map(function (item) { return [item.from, item.pid]; })) } : undefined });
+    });
+    return left.length;
+  }
+  cbBusyShow(label + ': ' + count + ' кадр(ов)...', 0.2);
+  return cpEnsureSettings().then(function () {
+    folder = cpRetouchBase(shoot.path, shoot.name);
+    return cpRtRefresh().catch(function () { return null; });
   }).then(function () {
-    /* папка съёмки в 03 уже есть с номером очереди («1_…») — кладём в неё, а не рядом */
-    if (typeof cpRtRootOf === 'function' && CP.shoot && CP.shoot.path === shootPath) folder = cpRtRootOf(shootPath, folder);
-    var used = {};
-    items = files.map(function (p) {
-      var target = folder + '/' + cpRetouchRel(p, card, shootPath);
-      /* папка артикула с буквой ретушёра: есть — в неё; нет, а у карточки буква стоит — создаётся сразу с буквой */
-      if (typeof cpRtCopyPath === 'function') target = cpRtCopyPath(target, shootPath);
-      /* два разных файла с одним именем в одну папку — второму суффикс, чтобы не потерялся */
-      if (used[target] && used[target] !== p.disk) {
-        var dot = target.lastIndexOf('.'), n = 2;
-        var stem = dot > target.lastIndexOf('/') ? target.slice(0, dot) : target, ext = stem === target ? '' : target.slice(dot);
-        while (used[stem + '_' + n + ext]) n++;
-        target = stem + '_' + n + ext;
-      }
-      used[target] = p.disk;
-      byFrom[p.disk] = p.id;
-      var owner = card || (after && after.cards && cbCardById(after.cards[p.id]));
-      var full = owner && owner.cpArticleDir && cpCardPids(owner).every(function (id) { return files.some(function (f) { return f.id === id; }); });
-      return { from: p.disk, path: target, articleRoot: full ? cpStageArticleRoot(folder, target, owner) : '' };
+    if (CP.shoot === shoot) folder = cpRtRootOf(shoot.path, folder);
+    var used = new Map();
+    items = plan.flatMap(function (group) {
+      return group.photos.map(function (photo) {
+        var target = folder + '/' + cpRetouchRel(photo, group.card, shoot.path);
+        target = cpRtCopyPath(target, shoot.path, false, group.card);
+        /* Два разных файла с одним именем сохраняем по отдельности внутри карточки. */
+        if (used.has(target) && used.get(target) !== photo.disk) {
+          var dot = target.lastIndexOf('.');
+          var end = dot > target.lastIndexOf('/') ? dot : target.length;
+          var stem = target.slice(0, end), ext = target.slice(end), n = 2;
+          while (used.has(stem + '_' + n + ext)) n++;
+          target = stem + '_' + n + ext;
+        }
+        used.set(target, photo.disk);
+        return { from: photo.disk, path: target, pid: photo.id, card: group.card && group.card.id,
+          articleRoot: group.full ? cpStageArticleRoot(folder, target, group.card) : '' };
+      });
     });
     return cpCopyOnDisk(items, [folder], label);
   }).then(function (r) {
     cbBusyHide();
-    r.folder = folder;
-    if (CP.shoot && CP.shoot.path === shootPath) {
+    var left = r.failedItems || [], missed = new Set(left);
+    var passed = items.filter(function (item) { return !missed.has(item); });
+    var byCard = Object.create(null);
+    passed.forEach(function (item) {
+      if (item.card) (byCard[item.card] = byCard[item.card] || new Set()).add(item.pid);
+    });
+    if (CP.shoot === shoot) {
       var miss = CP.retouchMissing = CP.retouchMissing || {};
-      files.forEach(function (p) { delete miss[p.id]; });
-      (r.failedFrom || []).forEach(function (f) { if (byFrom[f]) miss[byFrom[f]] = true; });
+      items.forEach(function (item) { delete miss[item.pid]; });
+      cpRtCopied(passed.map(function (item) { return item.path; }), shoot.path);
       cpUpdateStatusLine();
-      /* папки, куда легли копии, — в список папок артикулов в 03: букву, поставленную следом, папка получит сразу */
-      if (typeof cpRtCopied === 'function') {
-        var bad = {};
-        (r.failedFrom || []).forEach(function (f) { bad[f] = true; });
-        cpRtCopied(items.filter(function (it) { return !bad[it.from]; }).map(function (it) { return it.path; }), shootPath);
-      }
     }
     if (r.failed.length && window.console) console.error('[CP] retouch copy failed', r.failed);
-    /* не скопированное — в очередь: переносим, пока не перенесём (cp-queue.js) */
-    var left = (r.failedFrom || []).map(function (f) { return items.filter(function (it) { return it.from === f; })[0]; }).filter(Boolean);
-    var bad = {};
-    (r.failedFrom || []).forEach(function (f) { bad[f] = true; });
-    r.okPids = files.filter(function (p) { return !bad[p.disk]; }).map(function (p) { return p.id; });
-    if (left.length && typeof CPQ !== 'undefined') {
-      CPQ.add({ path: shootPath, name: shootName }, { kind: 'copy', label: 'На ретушь: ' + left.length + ' кадр(ов)', items: left, dirs: [folder], after: afterFor(left) });
-      r.queued = left.length;
-      /* за ними следит очередь — «докопировать» в строке съёмки не нужно */
-      left.forEach(function (it) { if (CP.retouchMissing) delete CP.retouchMissing[byFrom[it.from]]; });
-      cpUpdateStatusLine();
-    }
+    r.folder = folder;
+    r.queued = enqueue(left);
+    r.okPids = Array.from(new Set(passed.map(function (item) { return item.pid; })));
+    r.okByCard = byCard;
     return r;
   }, function (e) {
     cbBusyHide();
-    if (items && items.length && typeof CPQ !== 'undefined') {
-      CPQ.add({ path: shootPath, name: shootName }, { kind: 'copy', label: 'На ретушь: ' + items.length + ' кадр(ов)', items: items, dirs: [folder], err: (e && e.message) || '', after: afterFor(items) });
-      return { done: 0, exists: 0, failed: [], folder: folder, queued: items.length, okPids: [] };
-    }
-    if (CP.shoot && CP.shoot.path === shootPath) {
+    if (items && items.length) return { done: 0, exists: 0, failed: [], folder: folder, queued: enqueue(items), okPids: [], okByCard: {} };
+    if (CP.shoot === shoot) {
       var miss = CP.retouchMissing = CP.retouchMissing || {};
-      files.forEach(function (p) { miss[p.id] = true; });
+      plan.forEach(function (group) { group.photos.forEach(function (photo) { miss[photo.id] = true; }); });
       cpUpdateStatusLine();
     }
     throw e;
@@ -1673,7 +1677,7 @@ function cpStageCopyBatch(items, dirs) {
  * ограничено время). Возвращает {done, exists, failed:[...]}.
  */
 function cpCopyOnDisk(items, dirs, label) {
-  var res = { done: 0, exists: 0, failed: [] };
+  var res = { done: 0, exists: 0, failed: [], failedItems: [] };
   var total = items.length;
   if (!total) return Promise.resolve(res);
   function progress() {
@@ -1690,16 +1694,21 @@ function cpCopyOnDisk(items, dirs, label) {
       }, function (e) {
         res.failed.push(e && e.message || 'Не удалось заменить папку артикула');
         res.failedFrom = (res.failedFrom || []).concat(groups[root].map(function (x) { return x.from; }));
+        res.failedItems.push.apply(res.failedItems, groups[root]);
       });
     });
   }, Promise.resolve());
   return cpqChunks(grouped.loose, CPQ.copyChunk).reduce(function (chain, chunk, ci) {
     return chain.then(function () {
       return cpStageCopyBatch(chunk, ci === 0 ? dirs : []).then(function (out) {
-        (out.results || []).forEach(function (x) {
+        out.results.forEach(function (x, i) {
           if (x.status === 'done') res.done++;
           else if (x.status === 'exists') res.exists++;
-          else { res.failed.push(x.from.split('/').pop() + ': ' + (x.error || 'ошибка')); (res.failedFrom = res.failedFrom || []).push(x.from); }
+          else {
+            res.failed.push(x.from.split('/').pop() + ': ' + (x.error || 'ошибка'));
+            (res.failedFrom = res.failedFrom || []).push(x.from);
+            res.failedItems.push(chunk[i]);
+          }
         });
         progress();
       });
