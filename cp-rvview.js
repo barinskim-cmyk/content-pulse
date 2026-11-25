@@ -52,9 +52,10 @@ function cpRvvNotes(ver) {
 }
 
 /** Карточки, по которым просмотр не завершён: {site: [id], rework: [id]}. */
-function cpRvvPending() {
+function cpRvvPending(onlyCard) {
   var rv = cpRv(), out = { site: [], rework: [] };
   App.cards.forEach(function (c) {
+    if (onlyCard && c.id !== onlyCard) return;
     var last = cpLastRv(rv[c.id]);
     if (!last || last.status !== 'review') return;
     var n = cpRvvCounts(last);
@@ -65,9 +66,9 @@ function cpRvvPending() {
 }
 
 /** Завершить просмотр: с замечаниями — на доработку, готовые — на сайт (по способам). */
-function cpRvvFinish() {
+function cpRvvFinish(onlyCard) {
   if (!CP.shoot) return;
-  var rv = cpRv(), pend = cpRvvPending();
+  var rv = cpRv(), pend = cpRvvPending(onlyCard);
   if (!pend.site.length && !pend.rework.length) return;
   pend.rework.forEach(function (id) {
     var last = cpLastRv(rv[id]);
@@ -166,15 +167,15 @@ function cpRvvOpenVer(ver, i) {
   cpRvvOpen(id, i);
 }
 
-function cpRvvOpen(id, i) {
+function cpRvvOpen(id, i, onlyCard) {
   var last = cpLastRv(cpRv()[id]);
   if (!last || !(last.files || []).length) return;
   var ro = last.status !== 'review';
   /* на проверке — листаются все карточки на проверке; иначе (на доработке, на сайте) — только эта, без кнопок */
-  var list = ro ? last.files.map(function (f, k) { return { id: id, i: k }; }) : cpRvvList();
+  var list = ro || onlyCard ? last.files.map(function (f, k) { return { id: id, i: k }; }) : cpRvvList();
   var k = 0;
   list.forEach(function (x, n) { if (x.id === id && x.i === (i || 0)) k = n; });
-  CP.rvv = { list: list, k: k, ro: ro, seen: {}, asked: {}, bar: '' };
+  CP.rvv = { list: list, k: k, ro: ro, onlyCard: onlyCard ? id : '', seen: {}, asked: {}, bar: '' };
   document.getElementById('cpRvv').classList.add('cp-open');
   document.getElementById('cpRvvBody').classList.remove('cp-full');
   cpRvvBar('');
@@ -343,7 +344,7 @@ function cpRvvClose() {
   document.getElementById('cpRvvImg').removeAttribute('src');
   document.getElementById('cpRvvBar').classList.remove('cp-open');
   if (!v) return;
-  if (!v.ro) cpRvvFinish();
+  if (!v.ro) cpRvvFinish(v.onlyCard);
   cbRenderCards();
   cbRenderOutline();
 }

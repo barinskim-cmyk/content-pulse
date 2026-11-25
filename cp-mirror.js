@@ -291,6 +291,9 @@ function cpMirrorRvFromDisk(m, c, art, shootName, letterHint, now, rows, rowDone
   if (((m.cardStatus || {})[c.id] || {}).s === 'reshoot') return false;
   var rv = m.rv || {}, lst = rv[c.id] || [], last = lst[lst.length - 1];
   var current = last && last.dir, saved = current && dirs[current], replacement = false;
+  var restoredDir = last && last.status === 'rework' && current && !saved && /_доработка$/i.test(current)
+    ? current.replace(/_доработка$/i, '') : '';
+  var restored = restoredDir && dirs[restoredDir] && !cpMirrorBusy(dirs[restoredDir], 'up');
   if (saved && !/_доработка$/i.test(current) && !cpMirrorBusy(saved, 'up')) {
     var old = new Map((last.files || []).map(function (f) { return [f.path, f]; }));
     replacement = saved.files.some(function (f) {
@@ -301,13 +304,14 @@ function cpMirrorRvFromDisk(m, c, art, shootName, letterHint, now, rows, rowDone
     });
   }
   if (!replacement && last && last.status === 'review') return false;
-  var newDir = replacement ? current : Object.keys(dirs).find(function (d) {
+  var newDir = restored ? restoredDir : replacement ? current : Object.keys(dirs).find(function (d) {
     return !/_доработка$/i.test(d) && !cpMirrorBusy(dirs[d], 'up') && dirs[d].files.some(function (f) { return !knownAny[f.path]; });
   });
   if (!newDir) return false;
   var bd = dirs[newDir], path = cpReviewVersionPath(cpReviewRoot(), newDir) || {};
   var day = path.date || cpIsoDayOf(bd.mod) || cpToday(), key = '04|' + newDir + '|' + day;
   if (replacement) key += '|' + cpHash(JSON.stringify(bd.files.map(function (f) { return [f.path, f.md5 || f.modified || f.size]; }).sort()));
+  if (restored) key += '|v' + (lst.length + 1);
   if (last && /^(review|rework)$/.test(last.status)) last.status = 'replaced';
   var ver = { v: lst.length + 1, batch: 'Диск', letter: path.letter || bd.letter || art.letter || letterHint || '', n: path.n || '', date: day, dropDate: day, by: 'Диск', ts: now,
     files: bd.files.slice(), status: 'review', dir: newDir, byArt: true, key: key };
@@ -400,7 +404,7 @@ function cpMirrorDataApply(data, d, ph, letters) {
     var dl = ph.retouch[code];
     if (!dl || letters.indexOf(dl) === -1) return;
     var cs = cards.filter(function (c) { return cpRtCardCode(c) === code; });
-    if (!cs.length || (base[code] && base[code].l === dl)) return;
+    if (!cs.length || cpRtDistinctSourceFolders(cs) || (base[code] && base[code].l === dl)) return;
     cs.forEach(function (c) {
       if (letterOf(c) === dl && (c.tags || []).filter(function (t) { return letters.indexOf(t) !== -1; }).length === 1) return;
       c.tags = (c.tags || []).filter(function (t) { return letters.indexOf(t) === -1; });
@@ -885,6 +889,10 @@ function cpRtDirTarget(d, letter) { return d.parent + '/' + (letter ? letter + '
 function cpRtCardCode(card) { return card.cpArticle || cpArtCode(null, card.title); }
 function cpRtCards(code) { return App.cards.filter(function (c) { return cpRtCardCode(c) === code; }); }
 
+function cpRtDistinctSourceFolders(cards) {
+  return new Set(cards.map(function (c) { return c.cpArticleDir; }).filter(Boolean)).size > 1;
+}
+
 /** Путь в 03 с учётом буквы: папка артикула уже переименована (Y_74595_модель) — путь ведёт в неё, а не рядом. */
 function cpRtLetteredPath(target, shootPath) { return cpRtCopyPath(target, shootPath, true); }
 
@@ -984,7 +992,7 @@ function cpRtDecide(dirs, recs, letters, skip) {
   Object.keys(dirs).forEach(function (code) {
     if (skip && skip[code]) return;
     var cards = cpRtCards(code);
-    if (!cards.length) return;
+    if (!cards.length || cpRtDistinctSourceFolders(cards)) return;
     var list = dirs[code];
     var diskL = (list.filter(function (d) { return d.letter; })[0] || {}).letter || '';
     var b = base[code], bl = b ? b.l : undefined, rec = recs && recs[code];
@@ -1206,7 +1214,7 @@ function cpRtLetterPush() {
     var b = base[code];
     if (!b) return;   /* артикул ещё не сверялся — решит сверка */
     var cards = cpRtCards(code);
-    if (!cards.length) return;
+    if (!cards.length || cpRtDistinctSourceFolders(cards)) return;
     var progL = cpRtProgLetter(cards, b.l);
     if (cpRtSetCards(cards, progL, letters)) aligned = true;   /* остальные карточки артикула — та же буква */
     if (progL === b.l && known[code].every(function (d) { return d.letter === progL; })) return;

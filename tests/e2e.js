@@ -457,6 +457,89 @@ async function retouchTransferChecks(ctx, base) {
   await page.close();
 }
 
+async function stageWorkflowChecks(ctx, base) {
+  const page = await ctx.newPage(), errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  const cat = 'disk:/Панели этапов', name = '2026-11-25_СК_ПАНЕЛИ', a = '660101', b = '660102';
+  const source = cat + '/01_ИСХОДНИКИ/' + name, rt = cat + '/03_РЕТУШЬ', rv = cat + '/04_ОТРЕТУШИРОВАНО', site = cat + '/05_САЙТ';
+  const retouch = rt + '/' + name + '/Бренд/', batch = '25.11.26/Y/2/' + name + '/Бренд/';
+  const review = rv + '/' + batch + 'Y_' + a, other = rv + '/' + batch + 'Y_' + b;
+  const files = [source + '/Бренд/' + a + '/исходник-а.jpg', source + '/Бренд/' + b + '/исходник-б.jpg',
+    retouch + 'Y_' + a + '/на-ретушь-а.jpg', retouch + 'Y_' + b + '/на-ретушь-б.jpg',
+    review + '/1.tif', review + '/2.tif', other + '/1.tif'];
+  for (const file of files) {
+    const parts = file.split('/');
+    for (let i = 2; i < parts.length; i++) DIRS.add(parts.slice(0, i).join('/'));
+    FILES.set(file, Buffer.from('old ' + file));
+  }
+  DIRS.add(site);
+  await page.goto(base + '#access_token=TESTTOKEN&token_type=bearer');
+  await page.waitForFunction(() => window.CP && CP.booted);
+  await page.evaluate(async ({ cat, source, name, rt, rv, site }) => {
+    await cpEnsureSettings();
+    await cpDictReady();
+    CP.dict = cpParseDict('[Ретушёры: один]\nY\nK');
+    CP.archive = cat;
+    cpSet('cp_catalog', cat);
+    CP.catalogList = [rt, rv, site].map(path => ({ path, name: cpFolderBase(path) }));
+    Object.assign(CP.settings, { retouch: rt, retouched: rv, site });
+    await cpOpenShootNow(source, name);
+  }, { cat, source, name, rt, rv, site });
+  await page.click('[data-cp-shoot-stage="retouch"]');
+  await page.waitForFunction(() => CP_SHOOT_VIEW.cards?.length === 2);
+  check('открытая ретушь возвращает правый список карточек с галочками, буквами и скачиванием',
+    await page.locator('#cbOutline').isVisible() && await page.locator('[data-cp-stage-check]').count() === 2);
+  await page.click('[data-cp-stage-all]');
+  check('в ретуши можно отметить все видимые карточки', await page.locator('[data-cp-stage-check]:checked').count() === 2);
+  await page.locator('[data-cp-stage-check="1"]').uncheck();
+  await page.click('[data-cp-stage-letter="K"]');
+  await page.waitForSelector('[data-cp-stage-letter="K"][aria-pressed="true"]');
+  check('буква меняется на выбранной карточке и в её физической папке 03', DIRS.has(retouch + 'K_' + a) && DIRS.has(retouch + 'Y_' + b));
+  await page.click('[data-cp-stage-download]');
+  await page.waitForFunction(() => Object.values(cpMeta().rtdl || {}).some(x => x.l === 'K') && !CP_SHOOT_VIEW.working);
+  const zipped = zipVersions(name).flatMap(([, names]) => names);
+  check('ZIP берёт только отмеченные файлы из 03 и записывает, кто скачал', zipped.join() === name + '/Бренд/K_' + a + '/на-ретушь-а.jpg', zipped.join());
+  await page.waitForSelector('[data-cp-stage-letter="K"][aria-pressed="true"]');
+  await page.click('[data-cp-stage-letter="K"]');
+  await page.waitForSelector('[data-cp-stage-letter="K"][aria-pressed="false"]');
+  check('повторное нажатие буквы снимает назначение в 03', DIRS.has(retouch + a) && !DIRS.has(retouch + 'K_' + a));
+  await page.click('[data-cp-shoot-stage="review"]');
+  const card = page.locator('[data-cp-stage-code="' + a + '"]');
+  await card.locator('[data-cp-stage-review="inspect"]').waitFor();
+  check('в боковой панели 04 видны статусы карточек, решения остаются на карточке',
+    /На проверке/.test(await page.locator('#cbOutline').innerText()) && await page.locator('#cbOutline input,#cbOutline [data-cp-stage-download],#cbOutline [data-cp-stage-review]').count() === 0);
+  await page.click('[data-cp-stage-submit]');
+  check('сдать комплект можно из открытой вкладки 04', await page.locator('#cpAccept').isVisible());
+  await page.click('[data-cp-acc="close"]');
+  await page.evaluate(code => {
+    const c = App.cards.find(x => x.cpArticle === code);
+    cpLastRv(cpRv()[c.id]).ready = { via: 'viewer_ask' };
+  }, b);
+  await card.locator('[data-cp-stage-review="inspect"]').click();
+  check('просмотр в 04 ограничен кадрами одной карточки', await page.evaluate(() => CP.rvv.list.length === 2 && new Set(CP.rvv.list.map(x => x.id)).size === 1));
+  await page.click('#cpRvv [data-rvv="close"]');
+  page.once('dialog', dialog => dialog.accept('Исправить блик'));
+  await card.locator('[data-cp-stage-review="rework"]').click();
+  await card.getByText('Исправить блик', { exact: true }).waitFor();
+  check('решение по карточке показывает замечание и статус доработки', FILES.has(review + '_доработка/1.tif') && /На доработке/.test(await page.locator('#cbOutline').innerText()));
+  check('ручное снятие суффикса доработки возвращает даже одноимённые файлы на проверку', await page.evaluate(({ a, review }) => {
+    const m = cpClone(cpMeta()), c = App.cards.find(x => x.cpArticle === a), last = cpLastRv(m.rv[c.id]);
+    const files = last.files.map(f => ({ ...f, path: review + '/' + f.name }));
+    const known = Object.fromEntries(files.map(f => [f.path, true]));
+    return cpMirrorRvFromDisk(m, c, { byDir: { [review]: { files } } }, CP.shoot.name, 'Y', new Date().toISOString(), [], {}, known)
+      && cpLastRv(m.rv[c.id]).status === 'review' && last.status === 'replaced';
+  }, { a, review }));
+  await card.locator('[data-cp-stage-replace]').setInputFiles({ name: '1.tif', mimeType: 'image/tiff', buffer: Buffer.from('fixed') });
+  await card.locator('[data-cp-stage-review="approve"]').waitFor();
+  check('пересдача кадра возвращает карточку на проверку и сохраняет второй кадр', FILES.get(review + '/1.tif')?.toString() === 'fixed' && FILES.has(review + '/2.tif'));
+  await card.locator('[data-cp-stage-review="approve"]').click();
+  await card.getByText('На сайте', { exact: true }).waitFor();
+  check('на сайт копируется одна выбранная карточка, обе версии остаются в 04', FILES.has(site + '/' + batch + 'Y_' + a + '/1.tif')
+    && !FILES.has(site + '/' + batch + 'Y_' + b + '/1.tif') && FILES.has(review + '/1.tif') && FILES.has(other + '/1.tif'));
+  check('панели этапов работают без ошибок страницы', !errors.length, errors.join(' | '));
+  await page.close();
+}
+
 async function articleFolderChecks(ctx, base) {
   const page = await ctx.newPage();
   const errors = [];
@@ -864,6 +947,7 @@ async function articleFolderChecks(ctx, base) {
   await ctx.addInitScript(() => { window.cpNoMirrorAll = true; });
   if (process.env.CP_ARTICLE_ONLY) {
     await retouchTransferChecks(ctx, base);
+    await stageWorkflowChecks(ctx, base);
     await articleFolderChecks(ctx, base);
     await browser.close(); srv.close();
     process.exit(results.some(r => !r[1]) ? 1 : 0);
@@ -4154,6 +4238,7 @@ async function articleFolderChecks(ctx, base) {
   }
 
   await retouchTransferChecks(ctx, base);
+  await stageWorkflowChecks(ctx, base);
   await articleFolderChecks(ctx, base);
   await browser.close(); srv.close();
   const failed = results.filter(r => !r[1]);

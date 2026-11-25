@@ -291,6 +291,7 @@ function cpqDone(ent) {
     if (op.kind === 'stage-trash' && CP.shoot && CP.shoot.path === ent.shoot.path && CP_SHOOT_VIEW.key === op.stage) {
       cpShowShootStage(op.stage, true);
     }
+    if (op.after && op.after.type === 'rv-rework' && CP.shoot && CP.shoot.path === ent.shoot.path) cpRefreshShootReview(ent.shoot.name);
     if (op.tries) cbToast('Перенеслось: ' + op.label);
   });
 }

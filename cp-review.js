@@ -597,6 +597,7 @@ function cpReviewPresent(shootName, dir) {
     if (!(w[low] || []).includes(path)) w[low] = (w[low] || []).concat([path]);
     if (typeof cpStageNote === 'function') cpStageNote('review', shootName, path);
   });
+  if (typeof cpRefreshShootReview === 'function') cpRefreshShootReview(shootName, dir);
   if (CP.shoots) cpRenderShoots();
   [4000, 15000].forEach(function (ms) {
     setTimeout(function () { if (typeof cpScanStages === 'function' && CP.shoots) cpScanStages(); }, ms);
@@ -776,7 +777,14 @@ function cpRvApplyApproved(m, id, from, to, who, ts, date, via) {
   m.delivered[id] = rec;
   /* у артикула бывает две карточки — сдан артикул целиком (только в открытой съёмке: нужны карточки) */
   var card = CP.shoot && typeof cbCardById === 'function' ? cbCardById(id) : null;
-  if (card && typeof cpArtKey === 'function') App.cards.forEach(function (c) { if (c.id !== id && cpArtKey(c) === cpArtKey(card) && !m.delivered[c.id]) m.delivered[c.id] = rec; });
+  if (card && typeof cpArtKey === 'function') {
+    var folder = card.cpArticleDir || cpCardArtDirByPhotos(card);
+    App.cards.forEach(function (c) {
+      if (c.id === id || cpArtKey(c) !== cpArtKey(card) || m.delivered[c.id]) return;
+      var other = c.cpArticleDir || cpCardArtDirByPhotos(c);
+      if (!folder || !other || folder === other) m.delivered[c.id] = rec;
+    });
+  }
 }
 
 CPQ.after['rv-approve'] = function (op, m, shoot) {
@@ -804,7 +812,7 @@ cpRvRework = function (id, note) {
   var to = from.replace(/_доработка$/i, '') + '_доработка';
   /* метка «переименовывает программа» едет с папкой — зеркало не примет это за доработку руками (cp-mirror.js) */
   var step = from && from !== to ? CPDisk.proxyProps(from, { cp_mv: String(Date.now()) }).catch(function () { }).then(function () { return cpStageMoveExact(from, to).then(function () { return to; }); }) : Promise.resolve(from);
-  step.then(function (dir) {
+  return step.then(function (dir) {
     if (dir && dir !== from) {
       last.files.forEach(function (f) { if (f.path.indexOf(from + '/') === 0) f.path = dir + f.path.slice(from.length); });
       last.dir = dir;
@@ -827,6 +835,7 @@ function cpRvReworkDone(card, id, last) {
     cpEvent('rt_rework', [], { card: card ? card.title : id, note: last.note || '' });
     cbRenderCards();
     cbRenderOutline();
+    if (typeof cpRefreshShootReview === 'function') cpRefreshShootReview(CP.shoot.name);
     return cpOutputAppend([cpOutputRow(last, CP.shoot.name, card, 'доработка' + (last.note ? ': ' + last.note : ''))]);
 }
 
@@ -1759,10 +1768,14 @@ function cpStageZipName(groups, entry, who, letters, type) {
 document.getElementById('cpPanel').addEventListener('click', function (e) {
   if (!e.target.closest('[data-cp-stdl]') || !CP.sel || !CP.sel.stage || !CP.sel.stageFiles) return;
   e.preventDefault();
-  var sel = CP.sel, entries = [], got = [];
+  var sel = CP.sel;
+  cpDownloadStageFiles(sel, cpStagePool(sel).filter(function (x) { return cpStageOk(sel, x.f); }));
+});
+
+function cpDownloadStageFiles(sel, selected) {
+  var entries = [], got = [];
   var rt = sel.stage === 'retouch', who = rt ? (sel.who || '') : '';
   if (rt && !who && typeof cpRetoucherTags === 'function' && cpRetoucherTags().length) { cbToast('Отметьте вверху свою букву — без неё из папки ретуши не скачать'); return; }
-  var selected = cpStagePool(sel).filter(function (x) { return cpStageOk(sel, x.f); });
   var names = Object.create(null), letters = who ? cpRetoucherTags() : [], type = who ? cpShootType(sel.name) : null;
   var archiveNames = selected.map(function (x) {
     var name = cpStageZipName(sel.stageFiles, x, who, letters, type);
@@ -1776,10 +1789,10 @@ document.getElementById('cpPanel').addEventListener('click', function (e) {
   });
   if (!entries.length) { cbToast('Нечего скачивать'); return; }
   var name = CPDisk.safeName(sel.name);
-  cpExportBundle(name, entries, cpStageLabel(sel.stage) + ': файлов ' + entries.length + '.' + (rt ? ' После скачивания файлы отмечаются как скачанные' + (who ? ' (' + who + ')' : '') + '.' : ''))
+  return cpExportBundle(name, entries, cpStageLabel(sel.stage) + ': файлов ' + entries.length + '.' + (rt ? ' После скачивания файлы отмечаются как скачанные' + (who ? ' (' + who + ')' : '') + '.' : ''))
     .then(function (r) { return rt ? cpStageMarkTaken(sel, got, who, name, r) : null; })
     .catch(function (err) { cpHandleError(err, 'Скачивание'); });
-});
+}
 
 /** Скачали из папки ретуши: запись у каждого файла, буква — карточкам, событие в журнал. */
 function cpStageMarkTaken(sel, files, who, name, r) {
@@ -1835,7 +1848,7 @@ function cpStageMarkTaken(sel, files, who, name, r) {
         return rn;
       });
     }).then(function (rn) {
-      if (CP.sel !== sel) return;
+      if (CP.sel !== sel) return rn;
       sel.againTaken = false;
       /* пути в 03 поменялись — поправить их в панели на месте (выбранная буква и галки остаются) */
       if (rn && rn.ok.length) rn.ok.forEach(function (x) {
@@ -1851,6 +1864,7 @@ function cpStageMarkTaken(sel, files, who, name, r) {
       cpRenderPanel();
       cbToast('Скачано из папки ретуши: файлов ' + files.length + (who ? ' — отмечено за ' + who : '') + '. В списке осталось то, что ещё не забрали.'
         + (rn && rn.bad.length ? ' Папки в ретуши не переименованы под букву: ' + rn.bad.length + '.' : ''));
+      return rn;
     });
   }, function (e) {
     if (window.console) console.error('[CP] отметка «скачано» не записалась', e && (e.body || e.message || e));

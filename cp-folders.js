@@ -383,7 +383,7 @@ setInterval(function () {
   var shelf = document.getElementById('cpShelf');
   if (!CP.shoot || document.hidden || !shelf || shelf.classList.contains('cp-open')) return;
   if (CP_SHOOT_VIEW.key === 'source') cpArticleRefresh(CP.shoot.path);
-  else if (!CP_SHOOT_VIEW.loading && !CP_SHOOT_VIEW.checking && !CP.lb) cpShowShootStage(CP_SHOOT_VIEW.key, true, false, true);
+  else if (!CP_SHOOT_VIEW.loading && !CP_SHOOT_VIEW.checking && !CP_SHOOT_VIEW.working && !CP.lb && !CP.rvv) cpShowShootStage(CP_SHOOT_VIEW.key, true, false, true);
 }, CP_ARTICLE_SYNC_MS);
 
 function cpConfirmArticleLeave() {
@@ -453,9 +453,11 @@ function cpPlaceShootStages() {
   var css = document.createElement('style');
   css.textContent = '#cpShootStageRow[hidden],#cpShootStageView[hidden]{display:none}'
     + '#cpShootStageRow:not([hidden])+.cb-main{height:calc(100vh - 52px - var(--cp-shoot-stage-height,0px))}'
-    + 'body.cp-viewing-stage .cb-tray,body.cp-viewing-stage .cb-resizer,body.cp-viewing-stage #cbOutline,body.cp-viewing-stage .cb-strip,body.cp-viewing-stage #cbWork>.cb-tabs,body.cp-viewing-stage #cbTabCards,body.cp-viewing-stage #cbTabConts,body.cp-viewing-stage #cbBtnAdd{display:none!important}'
+    + 'body.cp-viewing-stage :is(.cb-tray,#cbResizer,#cbStripTray,#cbWork>.cb-tabs,#cbTabCards,#cbTabConts,#cbBtnAdd),body.cp-viewing-stage:not(.cp-stage-workflow) :is(#cbOutline,#cbOutlineResizer,#cbStripOutline){display:none!important}'
     + '.cp-stage-view-head,.cp-stage-card small{color:#a3a09a}.cp-stage-view-head{display:flex;gap:8px;align-items:flex-start;margin-bottom:12px}'
     + '.cp-stage-view-head details{flex:1;margin:0}.cp-stage-card .cb-card-head strong{color:#e7c9a8;font-weight:700}'
+    + '.cp-stage-workflow .cb-outline-item small{display:block;margin:3px 0 0;color:#a3a09a;white-space:normal}.cp-stage-workflow .cp-obar-l button[aria-pressed=true]{border-color:#C9956B;color:#e7c9a8}'
+    + '.cp-stage-review-actions:not(:empty){display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:10px}.cp-stage-review-actions p{flex-basis:100%;margin:0 0 4px;color:#e7c9a8;overflow-wrap:anywhere}'
     + '.cp-stage-card .cb-slot{border-radius:0;padding:0}.cp-stage-card button.cb-slot:hover,.cp-stage-card button.cb-slot:focus-visible{outline:2px solid #C9956B;outline-offset:-2px}'
     + '.cp-stage-card button.cb-slot:focus-visible img{opacity:.85}.cp-stage-card .cb-slot-tag{pointer-events:none}';
   document.head.appendChild(css);
@@ -467,13 +469,54 @@ function cpPlaceShootStages() {
   });
   view.addEventListener('click', function (e) {
     if (e.target.closest('[data-cp-stage-refresh]')) cpShowShootStage(CP_SHOOT_VIEW.key, true);
+    if (e.target.closest('[data-cp-stage-submit]') && !CP.readOnly) cpAcceptOpen(CP.shoot.path, CP.shoot.name);
+    var action = e.target.closest('[data-cp-stage-review]');
+    if (action) cpShootStageReviewAction(action);
     var file = e.target.closest('[data-cp-stage-preview]');
     if (file) cpPreviewShootStageFile(+file.getAttribute('data-cp-stage-preview'));
   });
   view.addEventListener('change', function (e) {
+    if (e.target.matches('[data-cp-stage-replace]')) {
+      var mode = CP_SHOOT_VIEW, shoot = CP.shoot, input = e.target, card = mode.cards[+input.closest('article').dataset.cpStageRow];
+      var review = card && cpShootStageReview(card);
+      var files = Array.from(input.files || []).map(function (file) { return { file: file, rel: file.name }; });
+      input.value = '';
+      if (review && files.length && !CP.readOnly && !mode.working) {
+        mode.working = true;
+        cpRvCardUpload(review.id, files).finally(function () {
+          mode.working = false;
+          if (CP.shoot === shoot && CP_SHOOT_VIEW === mode) cpRefreshShootReview(shoot.name);
+        });
+      }
+      return;
+    }
     if (!e.target.matches('[data-cp-stage-article]')) return;
     CP_SHOOT_VIEW.filter = e.target.value;
     cpRenderShootStage();
+  });
+  var outline = document.getElementById('cbOutline');
+  outline.addEventListener('change', function (e) {
+    var check = e.target.closest('[data-cp-stage-check]'), mode = CP_SHOOT_VIEW;
+    if (!check) return;
+    var card = mode.cards[+check.dataset.cpStageCheck];
+    if (check.checked) mode.checked.add(card.id); else mode.checked.delete(card.id);
+    cpRenderShootStageOutline();
+    outline.querySelector('[data-cp-stage-check="' + card.index + '"]')?.focus({ preventScroll: true });
+  });
+  outline.addEventListener('click', function (e) {
+    var button = e.target.closest('[data-cp-stage-nav],[data-cp-stage-all],[data-cp-stage-letter],[data-cp-stage-download]');
+    if (!button) return;
+    e.preventDefault();
+    var mode = CP_SHOOT_VIEW, data = button.dataset;
+    if (data.cpStageNav !== undefined) {
+      view.querySelector('[data-cp-stage-row="' + data.cpStageNav + '"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else if (data.cpStageAll !== undefined) {
+      var cards = cpShootStageVisible().filter(function (card) { return card.files.length; });
+      var all = cards.every(function (card) { return mode.checked.has(card.id); });
+      cards.forEach(function (card) { if (all) mode.checked.delete(card.id); else mode.checked.add(card.id); });
+      cpRenderShootStageOutline();
+    } else if (data.cpStageLetter !== undefined) cpSetShootStageLetter(data.cpStageLetter);
+    else cpDownloadShootStage();
   });
 })();
 
@@ -503,15 +546,16 @@ function cpShowShootStage(key, refresh, opening, quiet) {
   var shoot = CP.shoot, selected = cbCardById(CP.activeCard), previous = CP_SHOOT_VIEW;
   var root = key === 'source' ? '' : cpShootStageRoot(key);
   var mode = { key: key, chosen: previous.key === 'source' && selected ? selected.cpArticle || cpSixCode(selected.title) : previous.chosen,
-    filter: key === previous.key ? previous.filter : '', files: [], cards: [], loading: !!root, pending: [] };
+    filter: key === previous.key ? previous.filter : '', checked: key === previous.key ? new Set(previous.checked) : new Set(), files: [], cards: [], loading: !!root, pending: [] };
   function show() {
     cpDisposeShootStage();
     CP_SHOOT_VIEW = mode;
     document.body.classList.toggle('cp-viewing-stage', key !== 'source');
+    document.body.classList.toggle('cp-stage-workflow', key === 'retouch' || key === 'review');
     var view = document.getElementById('cpShootStageView');
     view.hidden = key === 'source';
     cpRenderShootStageTabs();
-    if (key === 'source') view.replaceChildren();
+    if (key === 'source') { view.replaceChildren(); cbRenderOutline(); }
     else cpRenderShootStage();
   }
   function stillHere() { return CP_SHOOT_VIEW === (quiet ? previous : mode) && CP.shoot === shoot; }
@@ -538,15 +582,19 @@ function cpShowShootStage(key, refresh, opening, quiet) {
     if (!stillHere()) return;
     var sel = { path: shoot.path, name: shoot.name, stage: stageKey, stageFiles: stageFiles, data: cbProjectData() };
     cpStageTagIndex(sel);
+    mode.stageFiles = stageFiles;
     var letters = cpRetoucherTags(), type = cpShootType(shoot.name), cards = new Map(), seen = new Set();
     function cardFor(article, parent, code) {
       var keyPath = cpStageKey((parent ? parent + '/' : '') + 'file', letters).segs.map(function (seg) {
         return seg.replace(/_доработка$/i, '');
       }).join('/');
       var id = keyPath.toLowerCase() + '\n' + code;
-      if (!cards.has(id)) cards.set(id, { code: code, rel: keyPath, files: [], tags: new Set(), statuses: new Set() });
+      if (!cards.has(id)) cards.set(id, { id: id, code: code, rel: keyPath, files: [], dirs: new Map(), tags: new Set(), statuses: new Set() });
       var card = cards.get(id);
-      if (article && article.letter) card.tags.add(article.letter);
+      if (article) {
+        card.dirs.set(article.path, article);
+        if (article.letter) card.tags.add(article.letter);
+      }
       if (article && /_доработка$/i.test(article.bare)) card.statuses.add('На доработке');
       return card;
     }
@@ -569,14 +617,18 @@ function cpShowShootStage(key, refresh, opening, quiet) {
           photo: { disk: file.path, name: file.name, size: file.size, preview: file.preview } };
         mode.files.push(meta);
         card.files.push(meta);
-        if (file.cpTook && file.cpTook.l) card.tags.add(file.cpTook.l);
-        (file.cpTags || []).filter(function (tag) { return letters.indexOf(tag) !== -1; }).forEach(function (tag) { card.tags.add(tag); });
+        if (!article || key !== 'retouch') {
+          if (file.cpTook && file.cpTook.l) card.tags.add(file.cpTook.l);
+          (file.cpTags || []).filter(function (tag) { return letters.indexOf(tag) !== -1; }).forEach(function (tag) { card.tags.add(tag); });
+        }
         if (file.cpStageStatus) card.statuses.add(file.cpStageStatus);
       });
     });
     mode.cards = Array.from(cards.values()).sort(function (a, b) {
       return a.code.localeCompare(b.code, 'ru', { numeric: true }) || a.rel.localeCompare(b.rel, 'ru', { numeric: true });
     });
+    mode.cards.forEach(function (card, i) { card.index = i; });
+    if (key === 'review' && !CP.rvv && !CP.readOnly) cpIndexShootStageReview(mode, shoot);
     mode.loading = false;
     mode.signature = JSON.stringify(mode.cards.map(function (card) {
       return [card.rel, card.code, Array.from(card.tags), Array.from(card.statuses), card.files.map(function (item) {
@@ -585,8 +637,9 @@ function cpShowShootStage(key, refresh, opening, quiet) {
       })];
     }));
     if (!quiet) cpRenderShootStage();
-    else if (!CP.lb && previous.signature !== mode.signature) {
+    else if (!CP.lb && !CP.rvv && !previous.working && previous.signature !== mode.signature) {
       mode.filter = previous.filter;
+      mode.checked = new Set(previous.checked);
       var work = document.getElementById('cbWork'), scroll = work.scrollTop;
       show();
       work.scrollTop = scroll;
@@ -608,22 +661,25 @@ function cpRenderShootStage() {
     + '<div class="cp-view-controls"><label>Артикул <select data-cp-stage-article><option value="">Все карточки</option>'
     + codes.map(function (code) { return '<option' + (mode.filter === code ? ' selected' : '') + '>' + cbEsc(code) + '</option>'; }).join('')
     + '</select></label></div></details>';
+  if (mode.key === 'review' && !CP.readOnly) h += '<button type="button" class="cb-primary" data-cp-stage-submit>Сдать ретушь</button>';
   h += '<button type="button" data-cp-stage-refresh>Обновить</button></div>';
+  cpRenderShootStageOutline();
   if (mode.loading) { view.innerHTML = h + '<p role="status">Читаю папки на Диске…</p>'; return; }
   if (mode.error) { view.innerHTML = h + '<p role="alert">' + cbEsc(mode.error) + '</p>'; return; }
   if (!mode.cards.length) { view.innerHTML = h + '<p>На этом этапе у съёмки пока нет файлов.</p>'; return; }
   if (mode.observer) mode.observer.disconnect();
-  var visible = mode.cards.filter(function (card) { return !mode.filter || card.code === mode.filter; });
+  var visible = cpShootStageVisible();
   view.innerHTML = h + visible.map(function (card) {
     var parent = card.rel.split('/').slice(0, -1).join('/');
-    var status = CP_STAGE_STATUS_ORDER.find(function (s) { return card.statuses.has(s); }) || CP_SHOOT_STAGE_STATUS[mode.key];
-    return '<article class="cb-card cp-stage-card" data-cp-stage-code="' + cbEsc(card.code) + '"><header class="cb-card-head">'
+    return '<article class="cb-card cp-stage-card" data-cp-stage-row="' + card.index + '" data-cp-stage-code="' + cbEsc(card.code) + '"><header class="cb-card-head">'
       + '<b>' + cbEsc(card.code || card.rel || 'Кадры съёмки') + '</b>'
       + (card.code && parent ? '<small>' + cbEsc(parent) + '</small>' : '')
       + '<span class="cb-spacer"></span>'
       + (card.tags.size ? '<b title="Ретушёры">' + cbEsc(Array.from(card.tags).sort().join(' · ')) + '</b>' : '')
-      + '<strong>' + cbEsc(status) + '</strong></header><div class="cp-stage-card-page"></div></article>';
+      + '<strong>' + cbEsc(cpShootStageCardStatus(card)) + '</strong></header>'
+      + (mode.key === 'review' ? '<div class="cp-stage-review-actions"></div>' : '') + '<div class="cp-stage-card-page"></div></article>';
   }).join('');
+  if (mode.key === 'review') cpUpdateShootStageReviewCards();
   function loadCard(page, card) {
     Promise.all(card.files.filter(function (item) { return item.image; }).map(function (item) {
       return cpQueueStageThumb(mode, item);
@@ -648,6 +704,231 @@ function cpRenderShootStage() {
     if (mode.observer) { byPage.set(page, card); mode.observer.observe(page); }
     else loadCard(page, card);
   });
+}
+
+function cpShootStageVisible() {
+  var mode = CP_SHOOT_VIEW;
+  return (mode.cards || []).filter(function (card) { return !mode.filter || card.code === mode.filter; });
+}
+
+function cpShootStageSources(card, mode) {
+  var same = card.code ? cpRtCards(card.code) : [];
+  var dirOf = function (c) { return String(c.cpArticleDir || cpCardArtDirByPhotos(c) || '').replace(/_брак$/i, '').toLowerCase(); };
+  var exact = same.filter(function (c) { return dirOf(c) === card.rel.toLowerCase(); });
+  if (exact.length) return exact;
+  var peers = (mode || CP_SHOOT_VIEW).cards.filter(function (other) { return other.code === card.code; });
+  return same.length === 1 && peers.length === 1 ? same : [];
+}
+
+/* У одной карточки на экране могут быть кадры из нескольких дропов. Решение
+   применяется к той версии, чья папка записана в её последней сдаче. */
+function cpShootStageReview(card) {
+  var rv = cpRv();
+  var matches = cpShootStageSources(card).map(function (c) { return { id: c.id, version: cpLastRv(rv[c.id]) }; })
+    .filter(function (x) { return x.version && card.dirs.has(cpRvDirOf(x.version)); });
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function cpShootStageCardStatus(card) {
+  if (CP_SHOOT_VIEW.key === 'review') {
+    var review = cpShootStageReview(card);
+    if (review) {
+      var state = { review: 'На проверке', rework: 'На доработке', approved: 'На сайте' }[review.version.status];
+      if (state) return state;
+    }
+  }
+  return CP_STAGE_STATUS_ORDER.find(function (s) { return card.statuses.has(s); }) || CP_SHOOT_STAGE_STATUS[CP_SHOOT_VIEW.key];
+}
+
+function cpRenderShootStageOutline() {
+  var mode = CP_SHOOT_VIEW, host = document.getElementById('cbOutline');
+  if (mode.key !== 'retouch' && mode.key !== 'review') return;
+  var rt = mode.key === 'retouch', cards = cpShootStageVisible(), marked = cards.filter(function (card) { return mode.checked.has(card.id); });
+  var selectable = cards.filter(function (card) { return card.files.length > 0; });
+  var locked = CP.readOnly || mode.working;
+  var all = selectable.length && selectable.every(function (card) { return mode.checked.has(card.id); });
+  var html = '<div class="cb-outline-title">Карточки'
+    + (rt && selectable.length && !locked ? ' <a href="#" data-cp-stage-all>' + (all ? 'снять все' : 'отметить все') + '</a>' : '') + '</div>';
+  if (!cards.length) html += '<div class="cb-outline-empty">' + (mode.loading ? 'Читаю папки…' : 'Карточек пока нет') + '</div>';
+  html += cards.map(function (card) {
+    var name = card.code || card.rel || 'Кадры съёмки';
+    var parent = cpParentDir('/' + card.rel).slice(1);
+    var label = rt ? (Array.from(card.tags).sort().join(' · ') || 'Без ретушёра') : cpShootStageCardStatus(card);
+    var downloaded = rt && card.files.length && card.files.every(function (item) { return item.file.cpTook && !item.file.cpTook.folder && !item.file.cpTook.done; });
+    return '<div class="cp-oi">' + (rt ? '<input type="checkbox" class="cp-oi-ck" data-cp-stage-check="' + card.index + '" aria-label="Отметить ' + cbEsc(name) + '"'
+      + (mode.checked.has(card.id) ? ' checked' : '') + (locked || !card.files.length ? ' disabled' : '') + '>' : '')
+      + '<button type="button" class="cb-outline-item" data-cp-stage-nav="' + card.index + '" title="' + cbEsc(card.rel || name) + '">'
+      + '<span class="cb-outline-num">' + (card.index + 1) + '.</span>' + cbEsc(name) + '<span class="cb-outline-count">' + card.files.length + '</span>'
+      + '<small>' + cbEsc((card.code && parent ? parent + ' · ' : '') + label + (downloaded ? ' · скачано' : '')) + '</small></button></div>';
+  }).join('');
+  if (rt && marked.length) {
+    html += '<div class="cp-obar"><div class="cp-obar-n">Отмечено: ' + marked.length + '</div><div class="cp-obar-l">'
+      + cpRetoucherTags().map(function (letter) {
+        var on = marked.every(function (card) { return card.tags.size === 1 && card.tags.has(letter); });
+        return '<button type="button" data-cp-stage-letter="' + cbEsc(letter) + '" aria-pressed="' + on + '"'
+          + (locked ? ' disabled' : '') + ' title="' + (on ? 'Снять букву ' : 'Назначить ') + cbEsc(letter) + '">' + cbEsc(letter) + '</button>';
+      }).join('') + '</div><button type="button" class="cb-primary" data-cp-stage-download' + (locked ? ' disabled' : '') + '>Скачать отмеченные</button></div>';
+  }
+  if (host.cpStageOutlineHTML !== html) {
+    host.innerHTML = html;
+    host.cpStageOutlineHTML = html;
+  }
+}
+
+cbRenderOutline = (function (orig) {
+  return function () {
+    if (CP_SHOOT_VIEW.key === 'retouch' || CP_SHOOT_VIEW.key === 'review') {
+      cpRenderShootStageOutline();
+      if (CP_SHOOT_VIEW.key === 'review') cpUpdateShootStageReviewCards();
+      return;
+    }
+    document.getElementById('cbOutline').cpStageOutlineHTML = '';
+    return orig.apply(this, arguments);
+  };
+})(cbRenderOutline);
+
+function cpSetShootStageLetter(tag) {
+  var mode = CP_SHOOT_VIEW, shoot = CP.shoot, letters = cpRetoucherTags();
+  var cards = cpShootStageVisible().filter(function (card) { return mode.checked.has(card.id); });
+  if (mode.key !== 'retouch' || mode.working || CP.readOnly || !cards.length || letters.indexOf(tag) === -1) return;
+  var letter = cards.every(function (card) { return card.tags.size === 1 && card.tags.has(tag); }) ? '' : tag;
+  var moves = cards.flatMap(function (card) {
+    return Array.from(card.dirs.values()).filter(function (dir) { return dir.letter !== letter; }).map(function (dir) {
+      return { code: dir.code, from: dir.path, to: cpRtDirTarget(dir, letter), letter: letter, card: card };
+    });
+  });
+  if (CP.rtPushing) { cbToast('Дождитесь завершения назначения ретушёра.'); return; }
+  mode.working = CP.rtPushing = true;
+  cbBusyShow(letter ? 'Назначаю ретушёра ' + letter + '…' : 'Снимаю букву ретушёра…', 0.5);
+  cpRtMove(moves).then(function (result) {
+    if (CP.shoot !== shoot) return;
+    var m = cpMeta(), ts = new Date().toISOString(), updated = 0;
+    cards.forEach(function (card) {
+      if (moves.some(function (move) { return move.card === card && result.ok.indexOf(move) === -1; })) return;
+      var source = cpShootStageSources(card);
+      if (!source.length && !card.dirs.size) return;
+      cpRtSetCards(source, letter, letters);
+      if (card.code && mode.cards.filter(function (c) { return c.code === card.code; }).length === 1) {
+        (m.rtLetter = m.rtLetter || {})[card.code] = { l: letter, ts: ts };
+      }
+      updated++;
+    });
+    result.ok.forEach(function (move) {
+      ((CP.rtDirs || {})[move.code] || []).forEach(function (dir) {
+        if (dir.path === move.from) { dir.path = move.to; dir.letter = letter; }
+      });
+    });
+    if (updated) cpEvent(letter ? 'card_tag' : 'card_untag', [], { tag: tag, note: 'Карточек обновлено: ' + updated });
+    var unconfirmed = moves.length - result.ok.length;
+    cbToast((letter ? 'Назначено ' + letter : 'Буква снята') + ' · карточек ' + updated
+      + (unconfirmed ? ' · не подтвердилось переименование папок ' + unconfirmed : ''));
+  }).catch(function (e) { cpHandleError(e, 'Назначение ретушёра'); }).finally(function () {
+    mode.working = CP.rtPushing = false;
+    cbBusyHide();
+    if (CP_SHOOT_VIEW === mode && CP.shoot === shoot) cpShowShootStage('retouch', true);
+  });
+}
+
+function cpDownloadShootStage() {
+  var mode = CP_SHOOT_VIEW, shoot = CP.shoot, letters = cpRetoucherTags();
+  var cards = cpShootStageVisible().filter(function (card) { return mode.checked.has(card.id); });
+  if (mode.key !== 'retouch' || mode.working || CP.readOnly || !cards.length) return;
+  var who = letters.find(function (letter) {
+    return cards.every(function (card) { return card.tags.size === 1 && card.tags.has(letter); });
+  }) || '';
+  if (letters.length && !who) { cbToast('Назначьте одну букву отмеченным карточкам.'); return; }
+  var sel = { path: shoot.path, name: shoot.name, stage: 'retouch', stageFiles: mode.stageFiles, who: who, data: cbProjectData(), againTaken: true };
+  var selected = new Set();
+  cards.forEach(function (card) {
+    var ids = cpShootStageSources(card).map(function (c) { return c.id; });
+    card.files.forEach(function (item) { item.file.cpCards = ids; selected.add(item.file.path); });
+  });
+  mode.working = true;
+  cpRenderShootStageOutline();
+  cpFlushSave().then(function () {
+    if (CP_SHOOT_VIEW !== mode || CP.shoot !== shoot) return;
+    return cpDownloadStageFiles(sel, cpStagePool(sel).filter(function (entry) { return selected.has(entry.f.path); }));
+  }).finally(function () {
+    mode.working = false;
+    if (CP_SHOOT_VIEW === mode && CP.shoot === shoot) cpShowShootStage('retouch', true);
+  });
+}
+
+function cpUpdateShootStageReviewCards() {
+  var mode = CP_SHOOT_VIEW;
+  document.querySelectorAll('#cpShootStageView [data-cp-stage-row]').forEach(function (node) {
+    var card = mode.cards[+node.dataset.cpStageRow], box = node.querySelector('.cp-stage-review-actions');
+    if (!card || !box) return;
+    var review = cpShootStageReview(card), ver = review && review.version;
+    var html = '';
+    if (ver) {
+      if (ver.status === 'rework' && ver.note) html += '<p>' + cbEsc(ver.note) + '</p>';
+      if ((ver.files || []).length) html += '<button type="button" data-cp-stage-review="inspect">' + (ver.status === 'review' ? 'Проверить' : 'Посмотреть') + '</button>';
+      var pending = Object.values(CPQ.ops).some(function (entry) {
+        return CP.shoot.path === entry.shoot.path && entry.op.after && entry.op.after.id === review.id && /^rv-(approve|rework)$/.test(entry.op.after.type);
+      });
+      if (pending) html += '<small>В очереди</small>';
+      else if (!CP.readOnly && /^(review|rework)$/.test(ver.status)) {
+        html += '<button type="button" data-cp-stage-review="replace">Заменить кадры</button><input type="file" multiple hidden data-cp-stage-replace>';
+        if (ver.status === 'review') html += '<button type="button" class="cb-primary" data-cp-stage-review="approve">На сайт</button>'
+          + '<button type="button" data-cp-stage-review="rework">На доработку</button>';
+      }
+    }
+    var status = cpShootStageCardStatus(card), label = node.querySelector('.cb-card-head strong');
+    if (label.textContent !== status) label.textContent = status;
+    if (box.cpReviewHTML !== html) { box.innerHTML = html; box.cpReviewHTML = html; }
+  });
+}
+
+function cpShootStageReviewAction(button) {
+  var mode = CP_SHOOT_VIEW, card = mode.cards[+button.closest('article').dataset.cpStageRow];
+  var review = card && cpShootStageReview(card), action = button.dataset.cpStageReview;
+  if (!review || mode.key !== 'review') return;
+  if (action === 'inspect') { cpRvvOpen(review.id, 0, true); return; }
+  if (CP.readOnly || mode.working) return;
+  if (action === 'replace') { button.parentNode.querySelector('[data-cp-stage-replace]').click(); return; }
+  if (review.version.status !== 'review') return;
+  mode.working = true;
+  var pending = action === 'approve' ? cpRvApprove([review.id], 'card') : cpRvRework(review.id);
+  Promise.resolve(pending).finally(function () {
+    mode.working = false;
+    if (CP_SHOOT_VIEW === mode) {
+      cpRenderShootStageOutline();
+      cpUpdateShootStageReviewCards();
+      if (action === 'rework' && review.version.status === 'rework') cpRefreshShootReview(CP.shoot.name);
+    }
+  });
+}
+
+/* Читаем ручные сдачи из уже загруженных папок 04. Если один артикул лежит
+   в нескольких дропах, версия должна быть привязана к конкретной папке. */
+function cpIndexShootStageReview(mode, shoot) {
+  var m = cpMeta(), rv = m.rv || {}, known = {}, now = new Date().toISOString(), rows = [], logged = {};
+  Object.values(rv).forEach(function (versions) { versions.forEach(function (version) {
+    (version.files || []).forEach(function (file) { known[file.path] = true; });
+  }); });
+  var indexed = cpMirrorArts(mode.stageFiles.map(function (group) { return { path: group.root, files: group.files }; }), cpRetoucherTags(), cpShootType(shoot.name));
+  var changed = false;
+  mode.cards.forEach(function (card) {
+    var src = cpShootStageSources(card, mode), art = indexed[card.code];
+    if (!art || src.length !== 1) return;
+    var c = src[0], last = cpLastRv(rv[c.id]), own = last && cpRvDirOf(last).replace(/_доработка$/i, '');
+    var dirs = Object.keys(art.byDir).filter(function (dir) { return card.dirs.has(dir); });
+    if (dirs.length > 1) dirs = dirs.filter(function (dir) { return dir.replace(/_доработка$/i, '') === own; });
+    if (!dirs.length) return;
+    var matching = { letter: art.letter, byDir: Object.fromEntries(dirs.map(function (dir) { return [dir, art.byDir[dir]]; })) };
+    if (cpMirrorReworkByHand(m, c, matching, shoot.name, now, rows, logged)) changed = true;
+    else if (cpMirrorRvFromDisk(m, c, matching, shoot.name, cpCardLetter(c), now, rows, logged, known)) changed = true;
+  });
+  if (changed) cbMarkDirty();
+  if (rows.length) cpOutputAppend(rows);
+}
+
+function cpRefreshShootReview(shootName, dirs) {
+  var mode = CP_SHOOT_VIEW;
+  if (!CP.shoot || CP.shoot.name !== shootName || mode.key !== 'review') return;
+  mode.roots = Array.from(new Set((mode.roots || []).concat(dirs || [])));
+  if (!mode.working && !mode.loading && !CP.lb && !CP.rvv) cpShowShootStage('review', true, false, true);
 }
 
 function cpShootStageCardPages(card) {
@@ -797,11 +1078,12 @@ CPQ.redraw['stage-trash'] = true;
 function cpResetShootStage() {
   cpDisposeShootStage();
   CP_SHOOT_VIEW = { key: 'source', chosen: '' };
-  document.body.classList.remove('cp-viewing-stage');
+  document.body.classList.remove('cp-viewing-stage', 'cp-stage-workflow');
   var view = document.getElementById('cpShootStageView');
   view.hidden = true;
   view.replaceChildren();
   cpRenderShootStageTabs();
+  if (CP.shoot) cbRenderOutline();
 }
 
 CP.openedHooks.push(function (path, stage) {
