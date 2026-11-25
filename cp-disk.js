@@ -95,6 +95,19 @@ var CPDisk = (function () {
     return out.length ? '?' + out.join('&') : '';
   }
 
+  /* Ограничиваем и получение ответа, и чтение тела, и паузы перед повтором. */
+  function withDeadline(url, ms, run) {
+    if (!ms) return run(null);
+    var controller = new AbortController(), timer;
+    var timeout = new Promise(function (_, reject) {
+      timer = setTimeout(function () {
+        reject(new DiskError(0, 'нет ответа за ' + Math.round(ms / 1000) + ' с', url));
+        controller.abort();
+      }, ms);
+    });
+    return Promise.race([run(controller.signal), timeout]).finally(function () { clearTimeout(timer); });
+  }
+
   /**
    * fetch с повторами. opts: {method, body, auth (default true), as: 'json'|'blob'|'text'|'raw'}
    */
@@ -102,13 +115,15 @@ var CPDisk = (function () {
     opts = opts || {};
     var attempt = 0;
     var maxRetries = opts.retries === undefined ? MAX_RETRIES : opts.retries;
-    function run() {
+    function run(signal) {
+      if (signal && signal.aborted) return Promise.reject(new DiskError(0, 'время ожидания истекло', url));
       var headers = {};
       if (opts.auth !== false && token) headers['Authorization'] = 'OAuth ' + token;
       if (opts.contentType) headers['Content-Type'] = opts.contentType;
       /* списки папок — всегда свежие: браузер не должен отдавать старый ответ из кэша
          (Маша, 06.11: загрузила в 04 — съёмка появилась только после Cmd+R) */
       var init = { method: opts.method || 'GET', headers: headers, body: opts.body };
+      if (signal) init.signal = signal;
       if (url.indexOf(API) === 0) init.cache = 'no-store';
       return fetch(url, init)
         .then(function (resp) {
@@ -126,21 +141,21 @@ var CPDisk = (function () {
             if (resp.status === 429) { BG.n429++; BG.slowUntil = Date.now() + 30000; }   /* Диск просит реже — фон идёт вдвое уже */
             if (RETRY[resp.status] && attempt < maxRetries) {
               var wait = backoff(attempt++, resp.headers.get('Retry-After'));
-              return sleep(wait).then(run);
+              return sleep(wait).then(function () { return run(signal); });
             }
             throw new DiskError(resp.status, body, url);
           });
         }, function (netErr) {
           /* сеть оборвалась или CORS — повторяем, потом сдаёмся */
-          if (attempt < maxRetries) return sleep(backoff(attempt++)).then(run);
+          if ((!signal || !signal.aborted) && attempt < maxRetries) return sleep(backoff(attempt++)).then(function () { return run(signal); });
           throw new DiskError(0, String(netErr && netErr.message || netErr), url);
         });
     }
-    return run();
+    return withDeadline(url, opts.timeout, run);
   }
 
-  function api(endpoint, params, method) {
-    return req(API + endpoint + qs(params), { method: method || 'GET' });
+  function api(endpoint, params, method, timeout) {
+    return req(API + endpoint + qs(params), { method: method || 'GET', timeout: timeout });
   }
 
   /* ---------- общие диски ---------- */
@@ -191,7 +206,7 @@ var CPDisk = (function () {
       return api(ep(path), {
         path: path, limit: page, offset: offset, sort: 'name',
         preview_size: previewSize || null, preview_crop: previewSize ? 'false' : null
-      }).then(function (d) {
+      }, 'GET', 20000).then(function (d) {
         var emb = d._embedded || {};
         var items = emb.items || [];
         if (isVd(path)) items.forEach(function (it) { it.path = vdFix(path, it.path); });
@@ -393,7 +408,7 @@ var CPDisk = (function () {
 
   /** В Корзину Диска (не навсегда: Диск хранит её 30 дней). Через прослойку пачками по 50, без неё — по одному.
       Возвращает [{path, status: 'done'|'gone'|'failed', error}]. */
-  function trash(paths) {
+  function trash(paths, timeout) {
     paths = (paths || []).slice();
     if (!paths.length) return Promise.resolve([]);
     if (proxy) {
@@ -401,7 +416,7 @@ var CPDisk = (function () {
       for (var i = 0; i < paths.length; i += 50) chunks.push(paths.slice(i, i + 50));
       return chunks.reduce(function (p, ch) {
         return p.then(function () {
-          return proxyReq({ a: 'trash' }, { method: 'POST', body: { paths: ch }, as: 'json' }).then(function (r) { out = out.concat((r && r.results) || []); });
+          return proxyReq({ a: 'trash' }, { method: 'POST', body: { paths: ch }, as: 'json', timeout: timeout }).then(function (r) { out = out.concat((r && r.results) || []); });
         });
       }, Promise.resolve()).then(function () { return out; });
     }
@@ -453,14 +468,14 @@ var CPDisk = (function () {
     return proxyReq({ a: 'zippart' }, { method: 'POST', body: body, as: 'json' });
   }
 
-  /** Размер и тип файла на Диске. */
+  /** Свойства для проверки содержимого, идентичности и меток операций. */
   function meta(path) {
-    return api(ep(path), { path: path, fields: 'name,size,type' });
+    return api(ep(path), { path: path, fields: 'name,size,type,md5,sha256,modified,resource_id,custom_properties' }, 'GET', 15000);
   }
 
   /** Перенести на Диске [{from, path}] (папки назначения создаются). */
-  function proxyMove(items) {
-    return proxyReq({ a: 'move' }, { method: 'POST', body: { items: items }, as: 'json' });
+  function proxyMove(items, timeout) {
+    return proxyReq({ a: 'move' }, { method: 'POST', body: { items: items }, as: 'json', timeout: timeout });
   }
 
   /* ---------- общий файл отбора ---------- */
@@ -481,8 +496,10 @@ var CPDisk = (function () {
     opts = opts || {};
     var attempt = 0;
     var url = proxy + qs(params);
-    function run() {
+    function run(signal) {
+      if (signal && signal.aborted) return Promise.reject(new DiskError(0, 'время ожидания истекло', url));
       var init = { method: opts.method || 'GET', headers: { 'X-Disk-Token': token } };
+      if (signal) init.signal = signal;
       if (opts.body !== undefined) {
         init.body = JSON.stringify(opts.body);
         init.headers['Content-Type'] = 'application/json';
@@ -492,15 +509,15 @@ var CPDisk = (function () {
         return resp.text().then(function (body) {
           /* ответ прослойки виден в консоли целиком — по нему и разбираемся */
           if (window.console) console.warn('[CP] прослойка ' + (params.a || '') + ' ' + (params.path || '') + ' -> HTTP ' + resp.status + ': ' + String(body).slice(0, 500));
-          if (RETRY[resp.status] && attempt < 3) return sleep(backoff(attempt++)).then(run);
+          if (RETRY[resp.status] && attempt < 3) return sleep(backoff(attempt++)).then(function () { return run(signal); });
           throw new DiskError(resp.status, body, url);
         });
       }, function (netErr) {
-        if (attempt < 2) return sleep(backoff(attempt++)).then(run);
+        if ((!signal || !signal.aborted) && attempt < 2) return sleep(backoff(attempt++)).then(function () { return run(signal); });
         throw new DiskError(0, String(netErr && netErr.message || netErr), url);
       });
     }
-    return run();
+    return withDeadline(url, opts.timeout, run);
   }
 
   function proxyPreview(path, size) { return proxyReq({ a: 'preview', path: path, size: size || 'XL' }); }
@@ -525,12 +542,12 @@ var CPDisk = (function () {
   }
   /** items: [{from, path}], dirs: [папки создать заранее] -> {results:[{from, status}]} */
   /** Свойства папки (сводка съёмки): {cp_sum: '...'}; null — удалить ключ. */
-  function proxyProps(path, props) {
-    return proxyReq({ a: 'props' }, { method: 'POST', body: { path: path, props: props }, as: 'json' });
+  function proxyProps(path, props, timeout) {
+    return proxyReq({ a: 'props' }, { method: 'POST', body: { path: path, props: props }, as: 'json', timeout: timeout });
   }
 
-  function proxyCopy(items, dirs) {
-    return proxyReq({ a: 'copy' }, { method: 'POST', body: { items: items, dirs: dirs || [] }, as: 'json' });
+  function proxyCopy(items, dirs, timeout) {
+    return proxyReq({ a: 'copy' }, { method: 'POST', body: { items: items, dirs: dirs || [] }, as: 'json', timeout: timeout });
   }
 
   /** {data, rev}; data = null если отбора ещё нет. */

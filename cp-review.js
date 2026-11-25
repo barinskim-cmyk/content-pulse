@@ -269,19 +269,24 @@ function cpReviewRel(root, from) {
   return path ? path.rel : '';
 }
 
-/* Сначала проверенная копия в служебной папке, затем замена целевой.
-   При сбое установки прежняя папка возвращается на место. */
-function cpStageMoveExact(from, path) {
-  return CPDisk.proxyMove([{ from: from, path: path }]).then(function (out) {
+var CP_STAGE_MOVE_MS = 25000;
+
+function cpStageMoveExact(from, path, verify) {
+  function check(message) {
+    return Promise.all([cpArticleMeta(from), cpArticleMeta(path)]).then(function (state) {
+      if (!state[0] && state[1] && (!verify || verify(state[1]))) return;
+      throw { message: (message || 'Не удалось поставить папку на место') + ': ' + CPDisk.showPath(path), plain: true, conflict: !!(state[0] && state[1]) };
+    });
+  }
+  return CPDisk.proxyMove([{ from: from, path: path }], CP_STAGE_MOVE_MS).then(function (out) {
     var r = (out.results || [])[0];
     if (r && r.status === 'done') return;
-    return Promise.all([cpArticleMeta(from), cpArticleMeta(path)]).then(function (state) {
-      if (!state[0] && state[1]) return;
-      throw { message: (r && r.error || 'Не удалось поставить папку на место') + ': ' + CPDisk.showPath(path), plain: true, conflict: !!(state[0] && state[1]) };
-    });
-  });
+    return check(r && r.error);
+  }, function (e) { return check(e && e.message); });
 }
 
+/* Сначала проверенная копия в служебной папке, затем замена целевой.
+   При сбое установки прежняя папка возвращается на место. */
 var CP_STAGE_REPLACING = Object.create(null);
 function cpReplaceStageArticle(items, to, markDelivery, prepared) {
   if (!items.length) return Promise.reject({ message: 'В артикуле нет файлов', plain: true });
@@ -296,12 +301,9 @@ function cpReplaceStageArticle(items, to, markDelivery, prepared) {
       var parent = cpParentDir(to), key = cpHash(to + JSON.stringify(files.map(function (f) {
         return { from: f.from, rel: f.rel, digest: f.digest };
       })));
-      var staging = prepared || parent + '/_cp_new_' + key, backup = parent + '/_cp_old_' + key;
-      var exists = function (path) { return CPDisk.meta(path).then(function (m) { return m; }, function (e) { if (e && e.status === 404) return null; throw e; }); };
-      var clearBackup = function () {
-        return exists(backup).then(function (old) { if (old) return CPDisk.trash([backup]); }).catch(function () { });
-      };
-      return exists(to).then(function (current) {
+      /* У каждой замены своя резервная папка: фоновая уборка не затронет следующую попытку. */
+      var staging = prepared || parent + '/_cp_new_' + key, backup = parent + '/_cp_old_' + key + '_' + cpqId();
+      return cpArticleMeta(to).then(function (current) {
         if (!current || (current.custom_properties || {}).cp_stage_copy !== key) return { current: current, same: false };
         return CPDisk.walkPhotos(to, false, 4, true).then(function (existing) {
           var expected = Object.create(null);
@@ -312,11 +314,11 @@ function cpReplaceStageArticle(items, to, markDelivery, prepared) {
           return { current: current, same: same };
         });
       }).then(function (state) {
-        if (state.same) return clearBackup();
+        if (state.same) return;
         var ready = prepared ? Promise.resolve() : cpqChunks(files, CPQ.copyChunk).reduce(function (p, chunk) {
           return p.then(function () {
             var batch = chunk.map(function (f) { return { from: f.from, path: staging + f.rel }; });
-            return CPDisk.proxyCopy(batch, [staging]).then(function (out) {
+            return cpStageCopyBatch(batch, [staging]).then(function (out) {
               return cpPool(batch, 4, function (it, i) {
                 var r = (out.results || [])[i];
                 if (r && r.status === 'done') return Promise.resolve();
@@ -332,16 +334,28 @@ function cpReplaceStageArticle(items, to, markDelivery, prepared) {
           var props = { cp_stage_copy: key };
           if (markDelivery) props.cp_mv = String(Date.now());
           if (prepared) props.cp_up = String(Date.now());
-          return CPDisk.proxyProps(staging, props);
+          return CPDisk.proxyProps(staging, props, 15000).catch(function (e) {
+            return CPDisk.meta(staging).then(function (meta) {
+              var actual = meta.custom_properties || {};
+              if (!Object.keys(props).every(function (name) { return actual[name] === props[name]; })) throw e;
+            });
+          });
         }).then(function () {
           return (state.current ? cpStageMoveExact(to, backup) : Promise.resolve()).then(function () {
-            return cpStageMoveExact(staging, to).catch(function (e) {
-              return Promise.all([exists(to), exists(backup)]).then(function (state) {
-                if (!state[0] && state[1]) return cpStageMoveExact(backup, to);
+            return cpStageMoveExact(staging, to, function (meta) {
+              return meta.type === 'dir' && (meta.custom_properties || {}).cp_stage_copy === key;
+            }).catch(function (e) {
+              return Promise.all([cpArticleMeta(to), cpArticleMeta(backup)]).then(function (after) {
+                if (!after[0] && after[1]) return cpStageMoveExact(backup, to);
               }).then(function () { throw e; });
             });
           });
-        }).then(clearBackup);
+        }).then(function () {
+          if (state.current) CPDisk.trash([backup], 30000).then(function (results) {
+            var result = results[0];
+            if (!result || !/^(done|gone)$/.test(result.status)) throw new Error((result && result.error) || 'Корзина не подтвердилась');
+          }).catch(function (e) { if (window.console) console.warn('[CP] резервная папка осталась на Диске', backup, e.message); });
+        });
       }).then(function () { return files.map(function (file) { return file.md5; }); });
     });
   });

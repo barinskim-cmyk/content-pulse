@@ -21,7 +21,7 @@ var CP_SHOW_DL = false;
 
 /* Номер версии: каждая правка — новая версия (tools/release.py, CHANGELOG.md).
    Виден на витрине под названием — по нему понятно, куда откатываться. */
-var CP_VERSION = '2.0.129';
+var CP_VERSION = '2.0.130';
 
 var CP_CONFIG = {
   /* ClientID приложения на oauth.yandex.ru (не секрет). */
@@ -1642,35 +1642,66 @@ function cpStageCopyGroups(items) {
   return { groups: groups, loose: loose };
 }
 
+var CP_STAGE_COPY_MS = 75000;
+
+/** Если ответ потерялся, сверяем содержимое копии по контрольной сумме. */
+function cpStageCopyBatch(items, dirs) {
+  return CPDisk.proxyCopy(items, dirs, CP_STAGE_COPY_MS).then(function (out) {
+    return check((out && out.results) || [], 'Диск не ответил про файл');
+  }, function (e) {
+    if (e && e.status && e.status < 500) throw e;
+    return check([], e && e.message || 'Диск не подтвердил копирование');
+  });
+
+  function check(results, message) {
+    return cpPool(items, 4, function (item, i) {
+      var r = results[i] || { from: item.from, status: 'failed', error: message };
+      if (results[i] && r.error !== 'timeout') return Promise.resolve(r);
+      return Promise.all([CPDisk.meta(item.from), CPDisk.meta(item.path)]).then(function (state) {
+        var source = state[0], target = state[1], hash = source.md5 || source.sha256;
+        if (source.type === 'file' && target.type === 'file' && hash && hash === (target.md5 || target.sha256)) {
+          return { from: item.from, status: 'done' };
+        }
+        return r;
+      }, function () { return r; });
+    }).then(function (results) { return { results: results }; });
+  }
+}
+
 /**
  * Скопировать файлы на Диске (через прослойку, пачками по 50 — у функции
  * ограничено время). Возвращает {done, exists, failed:[...]}.
  */
 function cpCopyOnDisk(items, dirs, label) {
   var res = { done: 0, exists: 0, failed: [] };
+  var total = items.length;
+  if (!total) return Promise.resolve(res);
+  function progress() {
+    var confirmed = res.done + res.exists;
+    cbBusyShow(label + ': ' + confirmed + ' / ' + total, Math.max(0.02, confirmed / total));
+  }
   var grouped = cpStageCopyGroups(items), groups = grouped.groups;
+  progress();
   var replaced = Object.keys(groups).reduce(function (p, root) {
     return p.then(function () {
-      return cpReplaceStageArticle(groups[root], root, false).then(function () { res.done += groups[root].length; }, function (e) {
+      return cpReplaceStageArticle(groups[root], root, false).then(function () {
+        res.done += groups[root].length;
+        progress();
+      }, function (e) {
         res.failed.push(e && e.message || 'Не удалось заменить папку артикула');
         res.failedFrom = (res.failedFrom || []).concat(groups[root].map(function (x) { return x.from; }));
       });
     });
   }, Promise.resolve());
-  items = grouped.loose;
-  var chunks = [];
-  var CH = 50;
-  for (var i = 0; i < items.length; i += CH) chunks.push(items.slice(i, i + CH));
-  cbBusyShow(label + ': 0 / ' + items.length, 0.02);
-  return chunks.reduce(function (chain, chunk, ci) {
+  return cpqChunks(grouped.loose, CPQ.copyChunk).reduce(function (chain, chunk, ci) {
     return chain.then(function () {
-      return CPDisk.proxyCopy(chunk, ci === 0 ? dirs : []).then(function (out) {
+      return cpStageCopyBatch(chunk, ci === 0 ? dirs : []).then(function (out) {
         (out.results || []).forEach(function (x) {
           if (x.status === 'done') res.done++;
           else if (x.status === 'exists') res.exists++;
           else { res.failed.push(x.from.split('/').pop() + ': ' + (x.error || 'ошибка')); (res.failedFrom = res.failedFrom || []).push(x.from); }
         });
-        cbBusyShow(label + ': ' + Math.min(items.length, (ci + 1) * CH) + ' / ' + items.length, (ci + 1) / chunks.length);
+        progress();
       });
     });
   }, replaced).then(function () { return res; });

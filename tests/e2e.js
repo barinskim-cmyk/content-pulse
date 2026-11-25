@@ -73,6 +73,7 @@ let ZIPPART_FAIL_ONCE = null, ZIPPART_BAD = null;   /* ZIPPART_BAD — файл,
 const PROPS = new Map();   /* custom_properties папок (сводка съёмки) */
 let LIST_FAIL = null;   /* список этих папок Диск «не отдаёт» (403) — проверка сверки витрины */
 let LIST_SLOW = null;   /* {re, ms}: списки этих папок Диск отдаёт с задержкой — «Сайт» большой и читается долго */
+const TRANSFER_HOLD = {};
 let CLOUD_PUT_FAIL = null, UPLOAD_FAIL = null;   /* {re, n}: n раз «уронить» загрузку куска в Облако (по началу содержимого) / файла на Диск (по пути) */
 const RID_GEN = new Map();   /* путь -> поколение: файл убрали и положили заново — у новой копии другой resource_id */
 /* как на Яндекс Диске: перенос и переименование resource_id не меняют (RID_KEEP: новый путь -> id до переноса) */
@@ -95,6 +96,10 @@ async function route(r) {
   const q = Object.fromEntries(u.searchParams);
   const m = req.method();
   const json = (code, obj) => r.fulfill({ status: code, headers: { ...CORS, 'content-type': 'application/json' }, body: JSON.stringify(obj) });
+  const pauseTransfer = async (paths) => {
+    const hold = TRANSFER_HOLD[q.a];
+    if (hold && paths.some(p => hold.re.test(p))) { hold.hit = true; await hold.resume; }
+  };
   log.push(m + ' ' + u.pathname + ' ' + (q.path || q.p || ''));
   if (u.host === 'cloud-api.yandex.net') {
     if (req.headers()['authorization'] !== 'OAuth TESTTOKEN') return json(401, { message: 'no auth' });
@@ -113,6 +118,10 @@ async function route(r) {
     if (pn === '/v1/disk/resources' && m === 'GET') {
       if (LIST_SLOW && LIST_SLOW.re.test(p)) await new Promise(res => setTimeout(res, LIST_SLOW.ms));
       if (LIST_FAIL && LIST_FAIL.test(p)) return json(403, { error: 'тест: Диск не отдал список' });
+      if (q.fields && (DIRS.has(p) || FILES.has(p))) {
+        const data = vmeta(p);
+        return json(200, Object.fromEntries(q.fields.split(',').filter(k => k in data).map(k => [k, data[k]])));
+      }
       if (DIRS.has(p)) {
         const kids = [...DIRS, ...FILES.keys()].filter(x => x !== p && x.slice(0, x.lastIndexOf('/')) === p && !(FRESH.has(x) && Date.now() - FRESH.get(x) < 3000)).sort();
         const off = +q.offset || 0, lim = +q.limit || 20;
@@ -172,6 +181,7 @@ async function route(r) {
     }
     if (q.a === 'trash' && m === 'POST') {
       const b = JSON.parse(req.postData() || '{}');
+      await pauseTransfer(b.paths || []);
       return json(200, { results: (b.paths || []).map(p => {
         TRASHED.push(p);
         const pre = p + '/'; let any = false;
@@ -182,7 +192,7 @@ async function route(r) {
     }
     if (q.a === 'move' && m === 'POST') {
       const b = JSON.parse(req.postData() || '{}');
-      return json(200, { results: (b.items || []).map(it => {
+      const results = (b.items || []).map(it => {
         if (FAIL_MOVE && FAIL_MOVE.test(it.from)) return { from: it.from, status: 'failed', error: 'тест: Диск не ответил' };
         if (FILES.has(it.path) || DIRS.has(it.path)) return { from: it.from, status: 'exists' };
         if (DIRS.has(it.from)) {   /* папка целиком: всё внутри едет с ней */
@@ -198,7 +208,9 @@ async function route(r) {
         const parts = it.path.split('/'); for (let i = 2; i < parts.length; i++) DIRS.add(parts.slice(0, i).join('/'));
         RID_KEEP.set(it.path, ridOf(it.from)); FILES.set(it.path, FILES.get(it.from)); FILES.delete(it.from); MOVED.push(it.from + ' -> ' + it.path);
         return { from: it.from, status: 'done' };
-      }) });
+      });
+      await pauseTransfer((b.items || []).map(it => it.path));
+      return json(200, { results }).catch(() => {});
     }
     if (q.a === 'file') {
       if (process.env.FAIL_STATE_DL && /_contentpulse\.json$/.test(q.path)) return json(502, { error: 'fail' });
@@ -340,7 +352,8 @@ async function route(r) {
         }
         FILES.set(it.path, FILES.get(it.from)); return { from: it.from, status: 'done' };
       });
-      return json(200, { results });
+      await pauseTransfer((b.items || []).map(it => it.path));
+      return json(200, { results }).catch(() => {});
     }
     return json(400, { error: 'bad' });
   }
@@ -380,6 +393,69 @@ async function route(r) {
 
 let FAIL_COPY = null;   /* копирование этих путей «падает» — проверка очереди переносов */
 let FAIL_MOVE = null;   /* перенос этих путей «падает» */
+
+async function retouchTransferChecks(ctx, base) {
+  const page = await ctx.newPage();
+  const root = 'disk:/Зависание', name = '2026-11-25_СК_ТЕСТ', code = '071234';
+  const source = root + '/01_ИСХОДНИКИ/' + name, targetRoot = root + '/03_РЕТУШЬ', target = targetRoot + '/' + name + '/' + code;
+  const srcFile = source + '/' + code + '/кадр.jpg', dstFile = target + '/кадр.jpg';
+  for (const dir of [source + '/' + code, target]) {
+    const parts = dir.split('/');
+    for (let i = 2; i <= parts.length; i++) DIRS.add(parts.slice(0, i).join('/'));
+  }
+  FILES.set(srcFile, Buffer.from('new files'));
+  FILES.set(dstFile, Buffer.from('old files'));
+  for (let offset = 1; offset <= 8; offset++) {
+    const dir = source + '/' + String(+code + offset).padStart(6, '0');
+    DIRS.add(dir);
+    FILES.set(dir + '/другой.jpg', Buffer.from('file ' + offset));
+  }
+  await page.goto(base + '#access_token=TESTTOKEN&token_type=bearer');
+  await page.waitForFunction(() => window.CP && CP.booted);
+  await page.evaluate(async ({ source, name, targetRoot }) => {
+    await cpEnsureSettings();
+    CP.settings.retouch = targetRoot;
+    await cpOpenShootNow(source, name);
+  }, { source, name, targetRoot });
+  await page.waitForFunction(() => App.cards.length === 9 && App.cards.every(c => cpCardPids(c).length));
+  await page.evaluate(() => {
+    CP.checked = Object.fromEntries(App.cards.map(c => [c.id, true]));
+    cbRenderOutline();
+  });
+  const send = () => page.click('[data-cp-batch="retouch"]');
+  const finish = () => page.waitForFunction(code => {
+    const card = App.cards.find(c => c.cpArticle === code);
+    return !cpBusyNow() && !cpqCount() && cpMeta().cardStatus[card.id]?.s === 'retouch';
+  }, code, { timeout: 5000 });
+  function hold(action, re) {
+    let release;
+    const resume = new Promise(resolve => { release = resolve; });
+    return TRANSFER_HOLD[action] = { re, resume, hit: false, release() { delete TRANSFER_HOLD[action]; release(); } };
+  }
+  const cleanup = hold('trash', /^disk:\/Зависание\/.*\/_cp_old_/);
+  try {
+    await send();
+    await finish();
+    check('баннер ретуши закрывается, пока прежняя папка ещё ждёт Корзину', FILES.get(dstFile).equals(FILES.get(srcFile))
+      && cleanup.hit && [...DIRS].some(p => cleanup.re.test(p)));
+  } finally { cleanup.release(); }
+  FILES.set(srcFile, Buffer.from('new frame'));
+  await page.evaluate(() => { CP_STAGE_COPY_MS = 300; CP_STAGE_MOVE_MS = 300; });
+  const copy = hold('copy', /^disk:\/Зависание\/.*\/_cp_new_.*\/кадр\.jpg$/);
+  const move = hold('move', new RegExp('/' + code + '$'));
+  try {
+    await send();
+    await page.waitForFunction(() => /карточек 9: 0 \/ 9/.test(document.getElementById('cbBusyText').textContent));
+    await finish();
+    check('массовая отправка девяти карточек показывает общий счётчик и закрывает баннер после проверки на Диске',
+      copy.hit && move.hit && FILES.get(dstFile).equals(FILES.get(srcFile)) && !!(PROPS.get(target) || {}).cp_stage_copy);
+  } finally { copy.release(); move.release(); }
+  const before = MOVED.length;
+  await send();
+  await finish();
+  check('повторная отправка уже проверенного комплекта обходится без повторного переноса папки', MOVED.length === before);
+  await page.close();
+}
 
 async function articleFolderChecks(ctx, base) {
   const page = await ctx.newPage();
@@ -787,6 +863,7 @@ async function articleFolderChecks(ctx, base) {
   /* фоновое зеркало всех съёмок (2.0.119) пишет в отборы и выработку само — в тестах включаем только там, где проверяем его */
   await ctx.addInitScript(() => { window.cpNoMirrorAll = true; });
   if (process.env.CP_ARTICLE_ONLY) {
+    await retouchTransferChecks(ctx, base);
     await articleFolderChecks(ctx, base);
     await browser.close(); srv.close();
     process.exit(results.some(r => !r[1]) ? 1 : 0);
@@ -4076,6 +4153,7 @@ async function articleFolderChecks(ctx, base) {
     await old.close();
   }
 
+  await retouchTransferChecks(ctx, base);
   await articleFolderChecks(ctx, base);
   await browser.close(); srv.close();
   const failed = results.filter(r => !r[1]);

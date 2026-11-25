@@ -203,7 +203,7 @@ function cpqRun(op, shoot) {
     }, Promise.resolve());
     return cpqChunks(grouped.loose, CPQ.copyChunk).reduce(function (p, ch, ci) {
       return p.then(function () {
-        return CPDisk.proxyCopy(ch, ci === 0 ? dirs : []).then(function (out) {
+        return cpStageCopyBatch(ch, ci === 0 ? dirs : []).then(function (out) {
           var res = (out && out.results) || [];
           if (ci === 0) firstOk = true;
           ch.forEach(function (it, k) {
@@ -277,6 +277,7 @@ function cpqThere(path) {
 function cpqDone(ent) {
   var op = ent.op;
   delete CPQ.ops[op.id];
+  cpqRender();
   return cpqSave(ent.shoot, function (m, data) {
     delete m.q[op.id];
     var fn = op.after && CPQ.after[op.after.type];
